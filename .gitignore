@@ -3,6 +3,8 @@ visualisation/
 artifacts/
 feature_store/
 graphs/
+outputs/
+specs/
 
 # Dataset directories and large data files — never commit raw data to Git
 data/
@@ -11,6 +13,8 @@ netflow/data/
 *.csv
 *.parquet
 datasets/
+
+# instructions and guides
 CLAUDE.md
 research_plan.md
 git-push-guide.txt
