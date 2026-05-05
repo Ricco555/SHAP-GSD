@@ -1,0 +1,190 @@
+"""
+Temporal-aware class balancing — training split ONLY.
+
+PROBLEM: NF-UNSW-NB15-v3 is ~96% benign. Class-weighted loss alone
+leaves minority-class precision low (Paper 1: Backdoor F1=0.071).
+
+SOLUTION: Oversample minority classes while preserving temporal ordering.
+Val/test splits are NEVER touched.
+
+CLASS WEIGHTS: Computed from the ORIGINAL unbalanced distribution.
+Use alongside balancing (addresses both sampling frequency and gradient magnitude).
+
+STRATEGIES:
+  oversample  — duplicate minority flows (with replacement) to min_class_ratio×majority
+  undersample — drop majority flows to max_majority_ratio×total_attack_count
+  hybrid      — undersample first, then oversample
+"""
+
+import logging
+import math
+
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+class TemporalBalancer:
+    """Balance the training split while preserving temporal edge ordering."""
+
+    def __init__(
+        self,
+        strategy: str = "oversample",
+        min_class_ratio: float = 0.1,
+        max_majority_ratio: float = 5.0,
+        seed: int = 42,
+    ) -> None:
+        """
+        Args:
+            strategy: "oversample" | "undersample" | "hybrid"
+            min_class_ratio: target minority count = min_class_ratio × majority count
+            max_majority_ratio: target majority count = max_majority_ratio × total_attack_count
+            seed: RNG seed for reproducibility
+        """
+        assert strategy in ("oversample", "undersample", "hybrid"), (
+            f"Unknown strategy: {strategy!r}"
+        )
+        self.strategy = strategy
+        self.min_class_ratio = min_class_ratio
+        self.max_majority_ratio = max_majority_ratio
+        self.rng = np.random.default_rng(seed)
+
+    def balance(
+        self,
+        edge_ids: np.ndarray,
+        timestamps: np.ndarray,
+        labels: np.ndarray,
+    ) -> np.ndarray:
+        """Return balanced EID array sorted by timestamp. May contain duplicates.
+
+        Duplicated EIDs point to the same feature store rows — no data duplication.
+        All original training EIDs are present in the output (oversample mode).
+
+        Args:
+            edge_ids:   global EIDs, shape (n,)
+            timestamps: FLOW_START_MILLISECONDS, shape (n,)
+            labels:     integer class labels, shape (n,)
+
+        Returns:
+            balanced_eids: global EIDs sorted by timestamp, shape (m,)
+        """
+        # Build O(1) numpy EID→timestamp lookup (avoids Python dict iteration)
+        eid_max = int(edge_ids.max())
+        ts_lookup = np.zeros(eid_max + 1, dtype=np.int64)
+        ts_lookup[edge_ids] = timestamps
+        lb_lookup = np.zeros(eid_max + 1, dtype=np.int64)
+        lb_lookup[edge_ids] = labels
+
+        if self.strategy == "oversample":
+            result = self._oversample(edge_ids, ts_lookup, lb_lookup)
+        elif self.strategy == "undersample":
+            result = self._undersample(edge_ids, ts_lookup, lb_lookup)
+        else:  # hybrid
+            step1 = self._undersample(edge_ids, ts_lookup, lb_lookup)
+            result = self._oversample(step1, ts_lookup, lb_lookup)
+
+        # Final sort by timestamp (vectorized)
+        result = result[np.argsort(ts_lookup[result])]
+
+        logger.info(
+            f"Balanced training set: {len(edge_ids):,} → {len(result):,} edges "
+            f"(strategy={self.strategy})"
+        )
+        return result
+
+    def get_class_weights(self, original_labels: np.ndarray) -> torch.Tensor:
+        """Inverse-frequency weights from the ORIGINAL (unbalanced) distribution.
+
+        Never computed on balanced data — balancing changes sampling frequency
+        but the loss gradient magnitude is calibrated against the real distribution.
+
+        Args:
+            original_labels: integer labels for ALL unbalanced training flows
+
+        Returns:
+            weights: float32 tensor of shape (n_classes,), indexed by class int
+        """
+        classes, counts = np.unique(original_labels, return_counts=True)
+        n_total = len(original_labels)
+        n_classes = int(classes.max()) + 1
+
+        weights = np.zeros(n_classes, dtype=np.float32)
+        for cls, cnt in zip(classes, counts):
+            weights[cls] = n_total / (len(classes) * cnt)
+
+        logger.info(
+            f"Class weights (from original distribution, {n_classes} classes):\n"
+            + "\n".join(f"  class {c}: {weights[c]:.4f}  (n={cnt:,})"
+                        for c, cnt in zip(classes, counts))
+        )
+        return torch.tensor(weights, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    def _oversample(
+        self,
+        edge_ids: np.ndarray,
+        ts_lookup: np.ndarray,
+        lb_lookup: np.ndarray,
+    ) -> np.ndarray:
+        """Oversample minority classes; preserve all original EIDs.
+
+        Args:
+            edge_ids:  global EIDs in this split
+            ts_lookup: numpy array where ts_lookup[eid] = timestamp
+            lb_lookup: numpy array where lb_lookup[eid] = label
+        """
+        labels = lb_lookup[edge_ids]
+        classes, counts = np.unique(labels, return_counts=True)
+        majority_count = counts.max()
+        target_count = math.ceil(majority_count * self.min_class_ratio)
+
+        extra_eids: list[np.ndarray] = [edge_ids.copy()]
+        for cls, cnt in zip(classes, counts):
+            if cnt >= target_count:
+                continue
+            needed = target_count - cnt
+            cls_eids = edge_ids[labels == cls]
+            sampled = self.rng.choice(cls_eids, size=needed, replace=True)
+            extra_eids.append(sampled)
+            logger.info(
+                f"  Oversampled class {cls}: {cnt:,} → {cnt + needed:,} (+{needed:,})"
+            )
+
+        return np.concatenate(extra_eids)
+
+    def _undersample(
+        self,
+        edge_ids: np.ndarray,
+        ts_lookup: np.ndarray,
+        lb_lookup: np.ndarray,
+    ) -> np.ndarray:
+        """Undersample majority class.
+
+        Args:
+            edge_ids:  global EIDs in this split
+            ts_lookup: numpy array where ts_lookup[eid] = timestamp
+            lb_lookup: numpy array where lb_lookup[eid] = label
+        """
+        labels = lb_lookup[edge_ids]
+        classes, counts = np.unique(labels, return_counts=True)
+        majority_cls = classes[counts.argmax()]
+        total_attack = len(labels) - counts.max()
+        target_majority = int(self.max_majority_ratio * total_attack)
+
+        majority_eids = edge_ids[labels == majority_cls]
+        minority_eids = edge_ids[labels != majority_cls]
+
+        if len(majority_eids) > target_majority:
+            majority_eids = self.rng.choice(
+                majority_eids, size=target_majority, replace=False
+            )
+            logger.info(
+                f"  Undersampled class {majority_cls}: "
+                f"{counts.max():,} → {target_majority:,}"
+            )
+
+        return np.concatenate([majority_eids, minority_eids])
