@@ -1,0 +1,13 @@
+torch
+dgl
+numpy<2
+pandas
+scipy
+scikit-learn
+shap
+matplotlib
+joblib
+pyyaml
+xgboost
+pyarrow
+pydantic
