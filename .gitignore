@@ -13,6 +13,7 @@ netflow/data/
 datasets/
 CLAUDE.md
 research_plan.md
+git-push-guide.txt
 
 # environment secrets
 .env
