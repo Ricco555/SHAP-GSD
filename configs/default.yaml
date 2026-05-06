@@ -14,6 +14,11 @@ balancer:
   min_class_ratio: 0.1        # each minority class reaches 10% of majority count
   max_majority_ratio: 5.0     # for undersample: benign ≤ 5× total attack count
   seed: 42
+  class_weight_method: "effective_num"   # "inverse_freq" | "sqrt_inverse_freq" | "effective_num"
+  effective_num_beta: 0.9999             # Cui et al. 2019 — tunable per dataset
+  class_weight_max_clamp: null           # null = no clamp; set float as last-resort safety net
+  log_class_weights: true                # always log final weights — required for paper reporting
+  compute_weights_on: "original"         # never compute on balanced distribution
 
 output:
   feature_store_dir: "feature_store"

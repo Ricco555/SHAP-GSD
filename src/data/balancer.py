@@ -93,31 +93,82 @@ class TemporalBalancer:
         )
         return result
 
-    def get_class_weights(self, original_labels: np.ndarray) -> torch.Tensor:
-        """Inverse-frequency weights from the ORIGINAL (unbalanced) distribution.
+    def get_class_weights(
+        self,
+        original_labels: np.ndarray,
+        method: str = "effective_num",
+        beta: float = 0.9999,
+        max_clamp: float | None = None,
+        log_weights: bool = True,
+    ) -> torch.Tensor:
+        """Compute class weights from the ORIGINAL (unbalanced) label distribution.
 
-        Never computed on balanced data — balancing changes sampling frequency
-        but the loss gradient magnitude is calibrated against the real distribution.
+        Methods
+        -------
+        "effective_num"     Cui et al., CVPR 2019. E_n = (1 - β^n) / (1 - β).
+                            weight_c = 1 / E_{n_c}, normalized so weights sum to
+                            num_classes. Naturally bounded — safe across datasets.
+        "sqrt_inverse_freq" weight_c = 1 / sqrt(n_c), normalized. Bounded
+                            alternative, no citation needed.
+        "inverse_freq"      weight_c = 1 / n_c, normalized. Retained for ablation
+                            only — produces extreme values for rare classes.
 
-        Args:
-            original_labels: integer labels for ALL unbalanced training flows
+        Parameters
+        ----------
+        original_labels : int labels from the ORIGINAL unbalanced training split.
+                          Never pass balanced/resampled labels.
+        method :          weighting method (default "effective_num").
+        beta :            effective number β for method="effective_num".
+                          β=0 → uniform; β→1 → inverse frequency.
+        max_clamp :       if not None, clamp weights to this maximum after
+                          normalization. Use only as last-resort — prefer
+                          reducing β instead.
+        log_weights :     log per-class weights and max/min ratio. Always True
+                          for paper runs — reviewers will ask for these values.
 
-        Returns:
-            weights: float32 tensor of shape (n_classes,), indexed by class int
+        Returns
+        -------
+        torch.Tensor of shape (num_classes,), float32, on CPU.
         """
-        classes, counts = np.unique(original_labels, return_counts=True)
-        n_total = len(original_labels)
-        n_classes = int(classes.max()) + 1
-
-        weights = np.zeros(n_classes, dtype=np.float32)
-        for cls, cnt in zip(classes, counts):
-            weights[cls] = n_total / (len(classes) * cnt)
-
-        logger.info(
-            f"Class weights (from original distribution, {n_classes} classes):\n"
-            + "\n".join(f"  class {c}: {weights[c]:.4f}  (n={cnt:,})"
-                        for c, cnt in zip(classes, counts))
+        classes = np.unique(original_labels)
+        num_classes = len(classes)
+        class_counts = np.array(
+            [np.sum(original_labels == c) for c in classes], dtype=np.float64
         )
+
+        if method == "effective_num":
+            # Cui et al., CVPR 2019: E_n = (1 - β^n) / (1 - β)
+            if beta == 1.0:
+                raise ValueError(
+                    "beta=1.0 causes division by zero in effective_num. "
+                    "Use beta=0.9999 or switch to inverse_freq."
+                )
+            effective_num = (1.0 - np.power(beta, class_counts)) / (1.0 - beta)
+            weights = 1.0 / effective_num
+        elif method == "sqrt_inverse_freq":
+            weights = 1.0 / np.sqrt(class_counts)
+        elif method == "inverse_freq":
+            weights = 1.0 / class_counts
+        else:
+            raise ValueError(
+                f"Unknown class_weight_method '{method}'. "
+                "Choose: 'effective_num', 'sqrt_inverse_freq', 'inverse_freq'."
+            )
+
+        # Normalize so weights sum to num_classes (keeps loss magnitude stable)
+        weights = weights / weights.sum() * num_classes
+
+        if max_clamp is not None:
+            weights = np.clip(weights, a_min=None, a_max=float(max_clamp))
+
+        if log_weights:
+            logger.info("Class weights (%s, beta=%s):", method, beta)
+            for c, w, n in zip(classes, weights, class_counts):
+                logger.info("  class %d: weight=%.4f  n=%d", int(c), w, int(n))
+            logger.info(
+                "  weight ratio max/min: %.1f", weights.max() / weights.min()
+            )
+
         return torch.tensor(weights, dtype=torch.float32)
 
     # ------------------------------------------------------------------
