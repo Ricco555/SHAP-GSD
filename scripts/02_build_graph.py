@@ -74,7 +74,13 @@ def main(cfg: dict) -> None:
 
     src_ips_all = df["IPV4_SRC_ADDR"].values
     dst_ips_all = df["IPV4_DST_ADDR"].values
-    labels_all  = df["Label"].values.astype(np.int64)
+
+    # Multi-class labels from Attack column (matches evaluator.DEFAULT_CLASS_NAMES order)
+    _attack_to_int = {
+        "Benign": 0, "Generic": 1, "Exploits": 2, "Fuzzers": 3, "DoS": 4,
+        "Reconnaissance": 5, "Analysis": 6, "Backdoor": 7, "Shellcode": 8, "Worms": 9,
+    }
+    labels_all = np.array([_attack_to_int[str(v)] for v in df["Attack"].values], dtype=np.int64)
 
     # ── 3. Build global node map ───────────────────────────────────────────────
     graph_dir = repo_root / cfg["graph"]["dir"]

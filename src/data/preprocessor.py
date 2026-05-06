@@ -39,6 +39,21 @@ from src.data.loader import (
 
 logger = logging.getLogger(__name__)
 
+# Canonical Attack string → integer mapping.
+# Order must match evaluator.DEFAULT_CLASS_NAMES exactly.
+_ATTACK_TO_INT: dict[str, int] = {
+    "Benign":          0,
+    "Generic":         1,
+    "Exploits":        2,
+    "Fuzzers":         3,
+    "DoS":             4,
+    "Reconnaissance":  5,   # dataset uses full name; display name is "Recon"
+    "Analysis":        6,
+    "Backdoor":        7,
+    "Shellcode":       8,
+    "Worms":           9,
+}
+
 # 16-bin DST port scheme (finalized after dataset pilot — CLAUDE.md phase 4)
 # Each entry: (bin_name, predicate_fn)
 _DST_PORT_BINS: list[tuple[str, Any]] = [
@@ -257,6 +272,15 @@ class Preprocessor:
         val_X   = _concat(val_scaled,   val_port,   val_ohe)
         test_X  = _concat(test_scaled,  test_port,  test_ohe)
 
+        # Encode multi-class Attack labels (must happen before _pack)
+        for sub_df in (train_df, val_df, test_df):
+            sub_df["_attack_int"] = sub_df["Attack"].map(_ATTACK_TO_INT)
+            unknown = sub_df["_attack_int"].isna()
+            if unknown.any():
+                bad = sub_df.loc[unknown, "Attack"].unique().tolist()
+                raise ValueError(f"Unknown Attack values: {bad}. Update _ATTACK_TO_INT.")
+            sub_df["_attack_int"] = sub_df["_attack_int"].astype(np.int64)
+
         # Build feature name list and record d_e
         ohe_names = list(self.ohe.get_feature_names_out(CATEGORICAL_COLS))
         self.feature_names = (
@@ -279,7 +303,7 @@ class Preprocessor:
                 "features":     X,
                 "edge_indices": sub_df["GLOBAL_EID"].values.astype(np.int64),
                 "timestamps":   sub_df["FLOW_START_MILLISECONDS"].values.astype(np.int64),
-                "labels":       sub_df["Label"].values.astype(np.int64),
+                "labels":       sub_df["_attack_int"].values.astype(np.int64),
             }
 
         return (
