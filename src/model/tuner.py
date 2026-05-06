@@ -101,17 +101,39 @@ class HyperparameterTuner:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         configs = list(self._configs())
-        logger.info(f"Starting grid search: {len(configs)} configurations")
+        n_total = len(configs)
 
-        results = []
-        best_val  = -1.0
-        best_idx  = -1
+        # ── Resume: load any previously completed trials ───────────────────────
+        tuning_path = output_dir / "tuning_results.json"
+        completed: dict[int, dict] = {}
+        if tuning_path.exists():
+            with open(tuning_path) as f:
+                for r in json.load(f):
+                    completed[r["trial"]] = r
+            logger.info(
+                f"Resuming: {len(completed)}/{n_total} trials already done, "
+                f"{n_total - len(completed)} remaining."
+            )
+        else:
+            logger.info(f"Starting grid search: {n_total} configurations")
+
+        results: list[dict] = []
+        best_val = -1.0
+        best_idx = -1
 
         for i, trial_params in enumerate(configs):
+            if i in completed:
+                result = completed[i]
+                results.append(result)
+                f1 = result["best_val_macro_f1"]
+                logger.info(f"[Trial {i+1}/{n_total}] SKIP (done, f1={f1:.4f})  {trial_params}")
+                if f1 > best_val:
+                    best_val = f1
+                    best_idx = i
+                continue
+
             trial_start = time.time()
-            logger.info(
-                f"\n[Trial {i+1}/{len(configs)}] {trial_params}"
-            )
+            logger.info(f"\n[Trial {i+1}/{n_total}] {trial_params}")
 
             cfg_trial = copy.deepcopy(base_cfg)
             cfg_trial["model"].update(trial_params)
@@ -167,10 +189,9 @@ class HyperparameterTuner:
                 best_val = best_val_f1
                 best_idx = i
 
-        # Save all results
-        tuning_path = output_dir / "tuning_results.json"
-        with open(tuning_path, "w") as f:
-            json.dump(results, f, indent=2)
+            # Flush after every trial so a Ctrl-C loses at most one trial's work.
+            with open(tuning_path, "w") as f:
+                json.dump(results, f, indent=2)
 
         best_params = results[best_idx]["params"]
         best_path   = output_dir / "best_params.json"
