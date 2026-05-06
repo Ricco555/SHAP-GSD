@@ -1,0 +1,23 @@
+# Hyperparameter search space — 3×3×4×3 = 108 configs
+search_space:
+  fanouts:
+    - [15, 10]
+    - [25, 15]
+    - [35, 25]
+  hidden_size: [64, 128, 256]
+  dropout: [0.1, 0.2, 0.3, 0.4]
+  batch_size: [512, 1024, 2048]
+
+# Fixed during search
+fixed:
+  num_layers: 2
+  aggregator: "mean"
+  learning_rate: 0.001
+  temporal_window_seconds: 60
+  balancing_strategy: "oversample"
+  node_state_dim: 15
+
+trial:
+  max_epochs: 20
+  patience: 5
+  selection_metric: "val_macro_f1"

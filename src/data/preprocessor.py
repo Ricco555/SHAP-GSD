@@ -90,6 +90,18 @@ def encode_dst_port(ports: np.ndarray) -> np.ndarray:
     return out
 
 
+def port_to_bin_indices(ports: np.ndarray) -> np.ndarray:
+    """Map L4_DST_PORT values → bin indices (0-15), shape (n,), dtype int32.
+
+    Thin wrapper around encode_dst_port: returns argmax of the one-hot output.
+    Used by NodeStateManager so that dst_port_entropy and unique_dst_port_count
+    operate over the 16 semantic service bins rather than raw port numbers.
+    This ensures that 80/8080/8443 (all HTTP/HTTPS) appear as one service,
+    not as three distinct high-entropy destinations.
+    """
+    return encode_dst_port(ports).argmax(axis=1).astype(np.int32)
+
+
 def encode_src_port(ports: np.ndarray) -> np.ndarray:
     """Map L4_SRC_PORT → binary is_ephemeral (1 if >= 49152), shape (n, 1)."""
     return (np.asarray(ports) >= 49152).astype(np.float32).reshape(-1, 1)

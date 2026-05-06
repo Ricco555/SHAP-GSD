@@ -92,6 +92,11 @@ class FeatureStore:
         positions = np.array([self._eid_to_pos[int(e)] for e in global_eids])
         return self._mmap[positions]
 
+    def get_labels_batch(self, global_eids: np.ndarray) -> np.ndarray:
+        """Return label array for a batch of global EIDs, shape (k,)."""
+        positions = np.array([self._eid_to_pos[int(e)] for e in global_eids])
+        return self._labels[positions]
+
 
 def write_feature_store(
     split_dir: Path | str,

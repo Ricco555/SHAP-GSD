@@ -1,0 +1,57 @@
+data:
+  csv_path: "data/NF-UNSW-NB15-v3.csv"
+  train_frac: 0.6
+  val_frac: 0.3
+  # test_frac is implied: 1 - train_frac - val_frac = 0.1
+
+preprocessing:
+  spearman_threshold: 0.995
+  ohe_min_frequency: 0.001   # fraction of training data; rare categories → "infrequent" bin
+  ohe_handle_unknown: "ignore"
+
+balancer:
+  strategy: "oversample"      # oversample | undersample | hybrid
+  min_class_ratio: 0.1        # each minority class reaches 10% of majority count
+  max_majority_ratio: 5.0     # for undersample: benign ≤ 5× total attack count
+  seed: 42
+
+output:
+  feature_store_dir: "feature_store"
+  artifacts_dir: "artifacts"
+  transformers_dir: "artifacts/transformers"
+  split_indices_path: "split_indices.json"
+  feature_groups_path: "feature_groups.json"
+  balanced_train_indices_path: "balanced_train_indices.npy"
+  class_weights_path: "class_weights.npy"
+
+seed: 42
+
+model:
+  num_layers: 2
+  hidden_size: 128
+  dropout: 0.4
+  aggregator: "mean"
+  fanouts: [25, 15]
+  node_state_dim: 15
+  batch_size: 512
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  max_epochs: 50
+  patience: 10
+  num_classes: 10
+  temporal_window_seconds: 60
+  snapshot_interval: 1000
+
+graph:
+  dir: "graphs"
+  node_state_dir: "node_state_snapshots"
+
+compute:
+  device: "cuda"
+  num_workers: 0
+  pin_memory: true
+
+reproducibility:
+  model_seed: 42
+  coalition_seed: 123
+  background_seed: 456
