@@ -23,7 +23,7 @@ from src.data.feature_groups import FeatureGrouping
 from src.data.preprocessor import N_DST_PORT_BINS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FG_PATH = REPO_ROOT / "feature_groups.json"
+FG_PATH = REPO_ROOT / "artifacts" / "feature_groups.json"
 
 
 @pytest.fixture(scope="module")

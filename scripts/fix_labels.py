@@ -25,6 +25,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.data.balancer import TemporalBalancer
 from src.data.loader import load_raw
 from src.utils.config import load_config
 
@@ -138,17 +139,19 @@ def main(cfg: dict) -> None:
 
     # ── 6. Recompute class_weights from ORIGINAL (unbalanced) train labels ─────
     train_labels = all_labels[train_mask]
-    n_train = len(train_labels)
-    counts   = np.bincount(train_labels, minlength=N_CLASSES)
+    bal_cfg = cfg["balancer"]
+    balancer = TemporalBalancer()
+    weights_tensor = balancer.get_class_weights(
+        train_labels,
+        method=bal_cfg.get("class_weight_method", "effective_num"),
+        beta=bal_cfg.get("effective_num_beta", 0.9999),
+        max_clamp=bal_cfg.get("class_weight_max_clamp", None),
+        log_weights=bal_cfg.get("log_class_weights", True),
+    )
 
-    # Inverse-frequency weighting: w_c = n_train / (N_CLASSES * count_c)
-    # Any class absent from training gets weight 0 (can't upweight what's unseen).
-    weights = np.where(counts > 0, n_train / (N_CLASSES * counts), 0.0).astype(np.float32)
-    logger.info(f"Class weights (inverse-frequency): {weights.round(4).tolist()}")
-
-    cw_path = repo_root / "class_weights.npy"
-    np.save(cw_path, weights)
-    logger.info(f"class_weights.npy written → {cw_path}  shape={weights.shape}")
+    cw_path = repo_root / cfg["output"]["class_weights_path"]
+    np.save(cw_path, weights_tensor.numpy())
+    logger.info(f"class_weights.npy written → {cw_path}  shape={weights_tensor.shape}")
 
     # ── 7. Save label_map.json ─────────────────────────────────────────────────
     # Maps display names → int (used by evaluator.py class_names lookup).
