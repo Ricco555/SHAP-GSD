@@ -78,7 +78,6 @@ def main(
 
     # Fix sampling seed so eval numbers are reproducible across runs.
     # TemporalNeighborSampler is stochastic (random fan-out when candidates > k).
-    import torch, numpy as np
     _seed = cfg["reproducibility"]["model_seed"]
     torch.manual_seed(_seed)
     np.random.seed(_seed)
