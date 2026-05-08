@@ -1,315 +1,207 @@
-# TE-G-SAGE-XAI
+# SHAP-GSD
 
-Temporally edge-aware, explainable GraphSAGE for network intrusion detection.
-NetFlow records (NF-UNSW-NB15-v3) are processed into a temporal graph, used to
-train an **EdgeGraphSAGE** edge classifier, compared against GCN, GAT, and
-XGBoost baselines, and explained with variable-level SHAP.
+Multi-granularity Shapley explanations for GNN-based Network Intrusion Detection.
 
-> Citation: *TE-G-SAGE: Explainable Edge-Aware Graph Neural Networks for
-> Network Intrusion Detection* [submitted for peer review]
+Paper 2 of a PhD thesis. Builds on TE-G-SAGE (Paper 1) with IP-level nodes,
+temporally-faithful neighbour sampling, 15-dim node state, and three-granularity
+SHAP coalitions: feature-group, temporal neighbourhood, and node novelty.
 
 ---
 
-## Installation
+## Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-DGL requires a separate index URL matched to your CUDA version — see
-[dgl.ai/install](https://www.dgl.ai/pages/start.html) for the exact command.
+DGL requires a separate install matched to your CUDA version:
+
+```bash
+pip install dgl -f https://data.dgl.ai/wheels/repo.html
+```
 
 ---
 
 ## Dataset
 
-Download **NF-UNSW-NB15-v3** from
-<https://staff.itee.uq.edu.au/marius/NIDS_datasets/> and place the CSV under:
+Download **NF-UNSW-NB15-v3** from <https://staff.itee.uq.edu.au/marius/NIDS_datasets/>
+and place it at:
 
 ```
 data/NF-UNSW-NB15-v3.csv
 ```
-
-The path is configured in `netflow/configs/data.yaml` (`raw.csv_path`).
 
 ---
 
 ## Pipeline
 
-All commands run from the `netflow/` directory.
-
 ```
 data/NF-UNSW-NB15-v3.csv
         │
         ▼
-scripts/prepare_data.py      →  datasets/nfunsw_nb15/   (GraphBolt OnDiskDataset)
-                                artifacts/label_map.json
-                                artifacts/numeric/
-                                artifacts/categorical/
+scripts/01_preprocess.py    →  feature_store/{train,val,test}/
+                               split_indices.json
+                               feature_groups.json
+                               balanced_train_indices.npy
+                               class_weights.npy
+                               artifacts/transformers/
         │
         ▼
-training/train.py            →  artifacts/best_edge_sage.pt
-                                artifacts/train_log.json
-        │
-        ├──▶ scripts/train_gcn.py    →  artifacts/best_gcn.pt
-        ├──▶ scripts/train_gat.py    →  artifacts/best_gat.pt
-        └──▶ scripts/run_baselines.py →  artifacts/best_xgb.json
+scripts/02_build_graph.py   →  graphs/{train,val,test}.bin
+                               graphs/node_id_map.json
+                               node_state_snapshots/
         │
         ▼
-scripts/eval_metrics.py      →  artifacts/metrics_test.json        (GraphSAGE)
-                                artifacts/metrics_test_gcn.json     (GCN)
-                                artifacts/metrics_test_gat.json     (GAT)
-                                artifacts/Results_comparison.csv    (after run_baselines)
+scripts/03_tune.py          →  artifacts/tuning/tuning_results.json
+                               artifacts/tuning/best_params.json
         │
         ▼
-scripts/run_complexity.py    →  artifacts/complexity_fracXXX/
-                                artifacts/complexity_summary.json
+scripts/04_train.py         →  artifacts/best_model.pt
+                               artifacts/training_curves.json
+        │
+        ▼
+scripts/05_evaluate.py      →  artifacts/evaluation/metrics.json
+                               artifacts/evaluation/confusion_matrix.png
+                               artifacts/evaluation/roc_curves.png
+        │
+        ▼
+scripts/06_explain.py       →  artifacts/explanations/
+                               artifacts/shap_summaries/
+        │
+        ▼
+scripts/07_visualize.py     →  figures/
 ```
 
-### Step 1 — Data preparation
-
-```bash
-cd netflow/
-python scripts/prepare_data.py --config configs/data.yaml
-```
-
-Runs cleaning, chronological 60/30/10 split, label encoding, numeric pipeline
-(log1p + StandardScaler + correlation pruning), categorical OHE, and writes a
-GraphBolt `OnDiskDataset` under `datasets/nfunsw_nb15/`.
-
-**Key options** (override any `data.yaml` field on the command line):
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--frac F` | `1.0` | Subsample fraction for quick tuning runs |
-| `--config PATH` | — | Path to data YAML (required) |
-
-**`configs/data.yaml` highlights:**
-
-```yaml
-raw:
-  csv_path: data/NF-UNSW-NB15-v3.csv
-split:
-  train_ratio: 0.60
-  val_ratio:   0.30
-  test_ratio:  0.10
-numeric:
-  scaler: standard          # standard | robust
-  apply_corr_prune: true
-  corr_threshold: 0.995
-categorical:
-  rare_min_freq: 50
-out:
-  root: datasets/nfunsw_nb15
-```
+All scripts read from `configs/experiment_unsw.yaml`, which inherits defaults
+from `configs/default.yaml`.
 
 ---
 
-### Step 2 — Train EdgeGraphSAGE
+## Step-by-step
+
+### Phase 1 — Data pipeline
 
 ```bash
-python training/train.py --config configs/train.yaml
+python scripts/01_preprocess.py --config configs/experiment_unsw.yaml
 ```
 
-**Key options:**
+Chronological 60/30/10 split by `FLOW_START_MILLISECONDS`. Fits StandardScaler,
+Spearman pruning mask, and OHE on training data only. Stores edge features as
+memory-mapped arrays. Class weights use Effective Number of Samples
+(Cui et al., CVPR 2019, β=0.9999).
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--epochs N` | `20` | Number of training epochs |
-| `--lr F` | `3e-4` | Learning rate |
-| `--hidden N` | `128` | Hidden dimension |
-| `--num_layers N` | `2` | Number of SAGEConv layers |
-| `--aggregator mean\|pool\|lstm\|gcn` | `mean` | Neighbourhood aggregator |
-| `--dropout F` | `0.3` | Dropout rate |
-| `--weight_decay F` | `1e-4` | L2 regularisation |
-| `--fanouts "N,N,…"` | `"25,15"` | Per-layer fanout sizes (comma-separated) |
-| `--batch_size N` | `2048` | Mini-batch size |
-| `--frac F` | `1.0` | Subsample training set fraction |
-| `--seed N` | `42` | Random seed |
-| `--device cuda\|cpu` | `auto` | Force device |
-| `--config PATH` | — | Path to training YAML (required) |
+**Outputs:** `feature_store/`, `split_indices.json`, `feature_groups.json`,
+`balanced_train_indices.npy`, `class_weights.npy`, `artifacts/transformers/`
 
-**`configs/train.yaml` highlights:**
+---
+
+### Phase 2 — Graph construction
+
+```bash
+python scripts/02_build_graph.py --config configs/experiment_unsw.yaml
+```
+
+Builds IP-level DGL graphs (one node per unique IP address) and computes the
+15-dim temporal node state for all nodes. Node state snapshots are written
+at configurable intervals for use during inference.
+
+**Outputs:** `graphs/`, `node_state_snapshots/`
+
+---
+
+### Phase 3 — Hyperparameter tuning
+
+```bash
+python scripts/03_tune.py --config configs/experiment_unsw.yaml
+```
+
+108-configuration grid search (3×3×4×3): fanouts × hidden size × dropout ×
+batch size. Selection metric: val macro-F1. 20 epochs per trial, patience 5.
+
+**Resume support:** results are flushed after every trial. Ctrl-C and re-run
+to resume from where it stopped.
+
+**Outputs:** `artifacts/tuning/tuning_results.json`, `artifacts/tuning/best_params.json`
+
+---
+
+### Phase 4 — Full training
+
+```bash
+python scripts/04_train.py --config configs/experiment_unsw.yaml
+```
+
+Trains with the best hyperparameters from Phase 3. 50 epochs max, patience 10.
+
+**Outputs:** `artifacts/best_model.pt`, `artifacts/training_curves.json`
+
+---
+
+### Phase 5 — Evaluation
+
+```bash
+python scripts/05_evaluate.py --config configs/experiment_unsw.yaml
+```
+
+Runs inference on the test split using the same `TemporalNeighborSampler` as
+training (no full-neighbourhood inflation). Prints per-class F1 alongside
+Paper 1 (TE-G-SAGE) minority-class baselines — Backdoor F1=0.071,
+DoS F1=0.26 — and warns if either is not improved.
+
+**Outputs:** `artifacts/evaluation/metrics.json`, `confusion_matrix.png`, `roc_curves.png`
+
+---
+
+### Phase 6 — SHAP-GSD explanations
+
+Read `specs/03_explainer.md` before running.
+
+```bash
+pytest tests/test_shap_axioms.py -v   # must pass first
+python scripts/06_explain.py --config configs/experiment_unsw.yaml
+```
+
+Three-granularity Shapley attributions via KernelSHAP:
+- **Feature-group** — ~48 semantic groups (e.g. volume, timing, port service)
+- **Temporal neighbourhood** — contribution of past flows to the prediction
+- **Node novelty** — whether src/dst IP is new to the network
+
+**Outputs:** `artifacts/explanations/`, `artifacts/shap_summaries/`
+
+---
+
+### Phase 7 — Visualization
+
+```bash
+python scripts/07_visualize.py --config configs/experiment_unsw.yaml
+```
+
+**Outputs:** `figures/`
+
+---
+
+## Configuration
+
+| File | Purpose |
+|------|---------|
+| `configs/default.yaml` | All defaults — model, graph, compute, reproducibility |
+| `configs/experiment_unsw.yaml` | Dataset-specific overrides for NF-UNSW-NB15-v3 |
+| `configs/tuning_grid.yaml` | Hyperparameter search space |
+
+Key fields in `default.yaml`:
 
 ```yaml
 model:
-  hidden: 128
-  num_layers: 2
-  aggregator: mean          # mean | pool | lstm | gcn
-  dropout: 0.3
-training:
-  fanouts: [25, 15]         # per-layer neighbourhood sample sizes
-  batch_size: 2048
-  epochs: 20
-  lr: 3.0e-4
-  weight_decay: 1.0e-4
-  device: auto
-out:
-  checkpoint: artifacts/best_edge_sage.pt
-  train_log:  artifacts/train_log.json
-```
+  num_classes: 10
+  hidden_size: 128
+  fanouts: [25, 15]
+  batch_size: 512
+  max_epochs: 50
+  patience: 10
 
----
-
-### Step 3 — Baselines
-
-Run any or all of the three baselines after Step 2.
-
-#### GCN
-
-```bash
-python scripts/train_gcn.py --config configs/gcn.yaml
-# options: --epochs N  --device cuda|cpu
-```
-
-#### GAT
-
-```bash
-python scripts/train_gat.py --config configs/gat.yaml
-# options: --epochs N  --device cuda|cpu
-```
-
-#### XGBoost
-
-```bash
-python scripts/run_baselines.py --config configs/baselines.yaml [--plots]
-# options: --n_estimators N  --per_class_sample N  --plots
-```
-
-`--plots` saves one-vs-rest ROC curves (`artifacts/roc_xgb.png`).
-
----
-
-### Step 3b — Evaluate GNN models
-
-Run after training to produce per-split metrics JSON files and plots.
-`run_baselines.py` reads these files to build the comparison table, so run
-this before `run_baselines.py` (or re-run it afterwards).
-
-```bash
-# EdgeGraphSAGE  →  metrics_test.json
-python scripts/eval_metrics.py --config configs/train.yaml --split test
-
-# GCN            →  metrics_test_gcn.json
-python scripts/eval_metrics.py --config configs/gcn.yaml  --split test --model_tag gcn
-
-# GAT            →  metrics_test_gat.json
-python scripts/eval_metrics.py --config configs/gat.yaml  --split test --model_tag gat
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--split train\|val\|test` | `test` | Which split to evaluate |
-| `--model_tag TAG` | `""` | Appended to output filenames, e.g. `gcn` → `metrics_test_gcn.json` |
-| `--checkpoint PATH` | from config | Override checkpoint path |
-| `--no_plots` | off | Skip matplotlib output |
-
-After all baselines and eval runs complete, `artifacts/Results_comparison.csv`
-and `artifacts/Results_comparison.tex` contain a side-by-side table of
-Accuracy / Macro-F1 / FAR for all four models.
-
-**`configs/baselines.yaml` highlights:**
-
-```yaml
-xgboost:
-  n_estimators: 600
-  max_depth: 8
-  per_class_sample: 40000   # cap training rows per class; null = use all
-  tree_method: hist         # hist | gpu_hist
-```
-
----
-
-### Step 4 — Complexity sweep
-
-Trains EdgeGraphSAGE at multiple dataset fractions and records per-epoch
-timing to mirror `012_Complexity_test.ipynb`.
-
-```bash
-python scripts/run_complexity.py --config configs/train.yaml \
-    --fracs 0.25 0.5 0.75 1.0 [--epochs 5] [--plots]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--fracs F…` | `0.25 0.5 0.75 1.0` | Dataset fractions to sweep |
-| `--epochs N` | value from config | Override epochs per sweep point |
-| `--plots` | off | Save `complexity_scaling.png` |
-| `--device` | auto | Force device |
-
-Each fraction writes to its own sub-directory (`artifacts/complexity_fracXXX/`)
-so the main checkpoint is never overwritten.  A summary JSON is written to
-`artifacts/complexity_summary.json`.
-
----
-
-### Step 5 — XAI
-
-Runs variable-level grouped KernelSHAP (~45 dims: 38 numeric + 7 categorical
-variables) and structural neighbour-masking XAI.  Each categorical variable's
-entire OHE block is treated as one coalition member, making SHAP tractable and
-producing directly interpretable attributions ("L7_PROTO contributed X").
-
-```bash
-python scripts/run_xai.py --config configs/xai.yaml
-```
-
-**Key options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--n_per_class N` | `50` | Edges sampled per class for SHAP aggregation |
-| `--background_size N` | `50` | Background samples for KernelExplainer |
-| `--classes C…` | all | Limit beeswarm to these class IDs |
-| `--device cuda\|cpu` | auto | Force device |
-
-**`configs/xai.yaml` highlights:**
-
-```yaml
-xai:
-  n_per_class:    50    # higher = more stable, slower
-  background_size: 50
-  n_beeswarm:     50
-  top_k:          10
-  classes: null         # null = all classes
-```
-
-**Outputs** (under `artifacts/xai/`):
-
-| File | Description |
-|------|-------------|
-| `shap_summary.json` | Mean \|SHAP\| per variable per class |
-| `topk_<class>.png` | Top-k variable importance bar chart |
-| `spider.png` | Spider chart across all classes |
-| `signed_shap_<class>.png` | Signed mean SHAP bar chart |
-| `beeswarm_<class>.png` | SHAP beeswarm dot plot |
-
-For single-edge or custom explanations, use the Python API directly:
-
-```python
-from xai import local_shap_for_edge_grouped, build_variable_groups
-```
-
-Pass `variable_groups=None` to any aggregation function to fall back to the
-raw 601-dim OHE-level SHAP.
-
----
-
-## Notebooks (interactive / exploratory path)
-
-The notebooks in `netflow/` provide an interactive path through the same
-pipeline and are useful for exploration and visualisation.  Run them in order:
-
-| Notebook | Content |
-|----------|---------|
-| `01_E-GraphSAGE_NFNB15v3_mean_agg_multiclass.ipynb` | Data cleaning, feature store, graph build, training, hyperparameter tuning |
-| `02_E-SAGE_metrics.ipynb` | Load checkpoint, compute P/R/F1/AUC/FAR, generate plots |
-| `03_E-SAGE_XAI.ipynb` | SHAP feature explanations and structural neighbour-masking XAI |
-| `04_baseline-xg-gcn.ipynb` | XGBoost and GCN baselines on same splits |
-
-```bash
-cd netflow/
-jupyter notebook
+balancer:
+  class_weight_method: "effective_num"   # Cui et al. CVPR 2019
+  effective_num_beta: 0.9999
 ```
 
 ---
@@ -318,19 +210,42 @@ jupyter notebook
 
 | Path | Contents |
 |------|----------|
-| `datasets/nfunsw_nb15/` | GraphBolt OnDiskDataset (edge features, graph topology, split indices) |
-| `artifacts/label_map.json` | String → integer class mapping |
-| `artifacts/numeric/` | Fitted scaler + column list (joblib) |
-| `artifacts/categorical/` | Fitted OHE encoder + column metadata (joblib / JSON) |
-| `artifacts/best_edge_sage.pt` | Best EdgeGraphSAGE checkpoint |
-| `artifacts/best_gcn.pt` | Best GCN checkpoint |
-| `artifacts/best_gat.pt` | Best GAT checkpoint |
-| `artifacts/best_xgb.json` | Best XGBoost model |
-| `artifacts/train_log.json` | Per-epoch loss / accuracy / timing |
-| `artifacts/Results_comparison.csv` | Side-by-side model comparison table |
-| `artifacts/complexity_summary.json` | Timing vs dataset fraction |
-| `artifacts/xai/` | SHAP plots, neighbour-impact charts |
-| `artifacts/corr/` | Correlation heatmaps |
+| `feature_store/{train,val,test}/` | Memory-mapped edge features, labels, timestamps |
+| `split_indices.json` | Chronological split boundaries (τ_train, τ_val) |
+| `feature_groups.json` | Semantic feature group definitions (K groups) |
+| `class_weights.npy` | Per-class loss weights from original distribution |
+| `graphs/*.bin` | DGL graphs for each split |
+| `node_state_snapshots/` | Temporal node state at snapshot intervals |
+| `artifacts/transformers/` | Fitted scaler, OHE, Spearman mask |
+| `artifacts/tuning/` | Per-trial results + best hyperparameters |
+| `artifacts/best_model.pt` | Best model checkpoint |
+| `artifacts/training_curves.json` | Per-epoch loss, macro-F1, per-class F1 |
+| `artifacts/evaluation/` | Test metrics, confusion matrix, ROC curves |
+| `artifacts/label_map.json` | Class name → integer mapping |
+
+Runtime-generated directories (`feature_store/`, `graphs/`, `artifacts/`,
+`outputs/`) are excluded from version control.
+
+---
+
+## Tests
+
+```bash
+# Gate tests — must pass before training
+pytest tests/ -v --ignore=tests/test_shap_axioms.py
+
+# SHAP axiom tests — run only after Phase 6 is implemented
+pytest tests/test_shap_axioms.py -v
+```
+
+| Test file | What it checks |
+|-----------|---------------|
+| `test_temporal_sampler.py` | Zero temporal-leakage violations (hard gate) |
+| `test_node_state.py` | 15-dim state correctness, novelty rollback |
+| `test_feature_groups.py` | Group counts, DST_PORT 16-bin encoding |
+| `test_balancer.py` | Oversampling ratios, class weight methods |
+| `test_eid_alignment.py` | EID↔feature-store alignment (skips if graphs not built) |
+| `test_shap_axioms.py` | Efficiency, dummy, symmetry axioms for SHAP-GSD |
 
 ---
 
@@ -338,7 +253,3 @@ jupyter notebook
 
 Experiments performed using the Advanced Computing service provided by the
 University of Zagreb University Computing Centre (SRCE).
-
-## Release: v2
-
-Full code refactor using [Claude Code](https://claude.ai/code) making it more streamlined without reliance on Jupyter notebooks.
