@@ -24,10 +24,10 @@ output:
   feature_store_dir: "feature_store"
   artifacts_dir: "artifacts"
   transformers_dir: "artifacts/transformers"
-  split_indices_path: "split_indices.json"
-  feature_groups_path: "feature_groups.json"
-  balanced_train_indices_path: "balanced_train_indices.npy"
-  class_weights_path: "class_weights.npy"
+  split_indices_path: "artifacts/split_indices.json"
+  feature_groups_path: "artifacts/feature_groups.json"
+  balanced_train_indices_path: "artifacts/balanced_train_indices.npy"
+  class_weights_path: "artifacts/class_weights.npy"
 
 seed: 42
 

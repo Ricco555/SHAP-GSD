@@ -3,8 +3,15 @@ visualisation/
 artifacts/
 feature_store/
 graphs/
+node_state_snapshots/
 outputs/
 specs/
+
+# Phase 1 artifacts — belong in artifacts/, not repo root
+/split_indices.json
+/feature_groups.json
+/balanced_train_indices.npy
+/class_weights.npy
 
 # Dataset directories and large data files — never commit raw data to Git
 /data/
