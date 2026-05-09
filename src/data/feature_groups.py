@@ -4,7 +4,7 @@ Semantic feature grouping for SHAP-GSD.
 PROBLEM: Raw d_e-dim feature vector has one-hot blocks for each categorical
 variable. KernelSHAP over d_e dims has high variance and redundant attributions.
 
-SOLUTION: Group by original variable. K ≈ 55 semantic groups:
+SOLUTION: Group by original variable. K = 48 semantic groups (confirmed by preprocessing):
   - Each pruned numeric feature → one group (1 column each)
   - DST_PORT_GROUP (16-bin one-hot) → one group
   - SRC_PORT_IS_EPHEMERAL (1 binary) → one group

@@ -24,5 +24,6 @@ model:
   early_stopping_metric: "composite"
   minority_class_threshold: 5000         # selects DoS(1719) Analysis(514) Backdoor(3185) Shellcode(980) Worms(50) — not Recon(5349)
   composite_minority_weight: 0.5
+  patience: 20                           # Backdoor first appears ~ep13; need 17+ epochs after for composite to recover
 
 seed: 42

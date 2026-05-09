@@ -426,9 +426,34 @@ class NodeStateManager:
         return self._compute_state(
             int(node_id),
             float(query_time_ms),
-            exclude_ts=float(edge_timestamp_ms),
-            exclude_direction=edge_direction,
-            exclude_peer_id=int(edge_features.get("peer_id", -1)),
+            excluded_edges=[(float(edge_timestamp_ms), edge_direction,
+                             int(edge_features.get("peer_id", -1)))],
+        )
+
+    def rollback_edges(
+        self,
+        node_id: int,
+        query_time_ms: float,
+        excluded: list[tuple[float, str, int]],
+    ) -> np.ndarray:
+        """Compute node state excluding multiple specific edges simultaneously.
+
+        Required for temporal SHAP coalitions where several neighbor edges
+        are absent at once. Does NOT modify internal state.
+
+        Args:
+            node_id:        the node whose state to compute.
+            query_time_ms:  state query time in milliseconds.
+            excluded:       list of (edge_timestamp_ms, direction, peer_id)
+                            tuples — each edge treated as if absent.
+
+        Returns:
+            np.ndarray of shape (15,), dtype float32.
+        """
+        return self._compute_state(
+            int(node_id),
+            float(query_time_ms),
+            excluded_edges=excluded,
         )
 
     # ------------------------------------------------------------------
@@ -511,14 +536,12 @@ class NodeStateManager:
         self,
         node_id: int,
         time_ms: float,
-        exclude_ts: Optional[float] = None,
-        exclude_direction: Optional[str] = None,
-        exclude_peer_id: Optional[int] = None,
+        excluded_edges: Optional[list[tuple[float, str, int]]] = None,
     ) -> np.ndarray:
         """Compute the 15-dim state vector for node_id at time_ms.
 
-        The optional exclude_* arguments implement rollback for SHAP: the
-        specified edge is treated as absent without modifying stored data.
+        excluded_edges: list of (timestamp_ms, direction, peer_id) tuples.
+        Each matching edge is treated as absent (rollback for SHAP coalitions).
 
         Returns float32 array of shape (15,).
         """
@@ -547,25 +570,26 @@ class NodeStateManager:
         ports = hist.dst_port[left:right]
         peers = hist.peer_id[left:right]
 
-        # Rollback: exclude the first matching edge record
+        # Rollback: exclude listed edges (each matched once, in order)
         _first_seen_rolled_back = False
-        if exclude_ts is not None and len(ts) > 0:
-            is_target_dir = inc if exclude_direction == "incoming" else ~inc
-            match = (
-                (ts == int(exclude_ts))
-                & is_target_dir
-                & (peers == exclude_peer_id)
-            )
-            first_hit = np.where(match)[0]
-            if len(first_hit) > 0:
-                keep = np.ones(len(ts), dtype=bool)
-                keep[first_hit[0]] = False
-                ts, inc, byt, ports, peers = (
-                    ts[keep], inc[keep], byt[keep],
-                    ports[keep], peers[keep],
+        if excluded_edges and len(ts) > 0:
+            keep = np.ones(len(ts), dtype=bool)
+            for (ex_ts, ex_dir, ex_peer) in excluded_edges:
+                is_target_dir = inc if ex_dir == "incoming" else ~inc
+                match = (
+                    (ts == int(ex_ts))
+                    & is_target_dir
+                    & (peers == int(ex_peer))
                 )
-                # Track if the global first-seen edge was the one removed
-                _first_seen_rolled_back = (int(exclude_ts) == hist.first_seen_ms)
+                active = np.where(match & keep)[0]
+                if len(active) > 0:
+                    keep[active[0]] = False
+                    if int(ex_ts) == hist.first_seen_ms:
+                        _first_seen_rolled_back = True
+            ts, inc, byt, ports, peers = (
+                ts[keep], inc[keep], byt[keep],
+                ports[keep], peers[keep],
+            )
 
         w_start = time_ms - self._W_ms
 
