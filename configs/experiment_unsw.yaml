@@ -14,6 +14,8 @@ balancer:
   min_class_ratio: 0.1
   max_majority_ratio: 5.0
   seed: 42
+  class_weight_method: "inverse_freq"
+  class_weight_max_clamp: 50              # caps Worms(~2820→50); Backdoor stays ~44
 
 reproducibility:
   model_seed: 90   # seed=42+48: trial 48 was the only tuning trial where Backdoor converged
