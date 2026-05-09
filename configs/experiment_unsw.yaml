@@ -18,6 +18,11 @@ balancer:
 reproducibility:
   model_seed: 90   # seed=42+48: trial 48 was the only tuning trial where Backdoor converged
 
+model:
+  early_stopping_metric: "composite"
+  minority_class_threshold: 5000         # selects DoS(1719) Analysis(514) Backdoor(3185) Shellcode(980) Worms(50) — not Recon(5349)
+  composite_minority_weight: 0.5
+
 output:
   feature_store_dir: "feature_store"
   artifacts_dir: "artifacts"

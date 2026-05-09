@@ -89,6 +89,12 @@ def main(cfg: dict, best_params_path: Path | None = None) -> None:
     class_weights = torch.from_numpy(
         np.load(repo_root / cfg["output"]["class_weights_path"])
     ).float()
+    train_labels = np.load(
+        repo_root / cfg["output"]["feature_store_dir"] / "train" / "labels.npy"
+    )
+    train_label_counts = np.bincount(
+        train_labels, minlength=cfg["model"]["num_classes"]
+    ).astype(np.int64)
 
     # ── 6. Build model ─────────────────────────────────────────────────────────
     torch.manual_seed(cfg["reproducibility"]["model_seed"])
@@ -124,6 +130,7 @@ def main(cfg: dict, best_params_path: Path | None = None) -> None:
         class_weights=class_weights,
         output_dir=artifacts_dir,
         seed=cfg["reproducibility"]["model_seed"],
+        train_label_counts=train_label_counts,
     )
 
     # ── 8. Save final config used ──────────────────────────────────────────────

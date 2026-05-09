@@ -44,6 +44,9 @@ model:
   max_epochs: 50
   patience: 10
   num_classes: 10
+  early_stopping_metric: "macro_f1"      # "macro_f1" | "minority_macro_f1" | "composite"
+  minority_class_threshold: 5000         # n_train < this → minority class
+  composite_minority_weight: 0.5         # α: weight of minority_macro_f1 in composite
   temporal_window_seconds: 60
   snapshot_interval: 1000
 

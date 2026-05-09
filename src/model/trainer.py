@@ -6,7 +6,9 @@ Key invariants:
 - TemporalNeighborSampler uses LOCAL edge IDs (DGL graph indices 0..n_edges-1).
 - Edge features are fetched from FeatureStore using GLOBAL EIDs from g.edata[dgl.EID].
 - NodeStateManager receives global node IDs from blocks[0].srcdata[dgl.NID].
-- Early stopping on VALIDATION MACRO-F1 (not loss).
+- Early stopping on a configurable metric: "composite" (default), "minority_macro_f1",
+  or "macro_f1". Composite = (1-α)×macro_f1 + α×minority_macro_f1 where minority
+  classes are those with n_train < minority_class_threshold.
 - Class weights from the ORIGINAL unbalanced distribution.
 
 Local vs global EID note:
@@ -94,19 +96,24 @@ class Trainer:
         class_weights: torch.Tensor,
         output_dir: Path,
         seed: int = 42,
+        train_label_counts: np.ndarray | None = None,
     ) -> dict:
         """Run the training loop and return training curves.
 
         Args:
-            balanced_train_eids: global EIDs for training (= local EIDs for
+            balanced_train_eids:  global EIDs for training (= local EIDs for
                 the training split since it starts at EID 0).  Must be
                 sortable by timestamp to satisfy shuffle=False invariant.
-            class_weights:       float32 tensor (num_classes,) from original distribution.
-            output_dir:          directory for best checkpoint and training_curves.json.
-            seed:                random seed for reproducibility.
+            class_weights:        float32 tensor (num_classes,) from original distribution.
+            output_dir:           directory for best checkpoint and training_curves.json.
+            seed:                 random seed for reproducibility.
+            train_label_counts:   int array (num_classes,) of original (unbalanced)
+                training sample counts per class.  Required for "composite" and
+                "minority_macro_f1" early stopping metrics; ignored for "macro_f1".
 
         Returns:
             dict with keys: 'train_loss', 'val_loss', 'val_macro_f1',
+                            'val_minority_macro_f1', 'val_composite_f1',
                             'val_per_class_f1', 'epoch_times', 'best_epoch'.
         """
         torch.manual_seed(seed)
@@ -115,6 +122,26 @@ class Trainer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        m = self.cfg["model"]
+        stopping_metric    = m.get("early_stopping_metric", "macro_f1")
+        minority_threshold = m.get("minority_class_threshold", 5000)
+        alpha              = float(m.get("composite_minority_weight", 0.5))
+
+        # Identify minority class indices once — stable across epochs.
+        minority_indices: list[int] = []
+        if train_label_counts is not None and stopping_metric != "macro_f1":
+            minority_indices = [
+                int(i) for i, n in enumerate(train_label_counts)
+                if n < minority_threshold
+            ]
+            logger.info(
+                "Early stopping metric: %s  α=%.2f  "
+                "minority classes (n<%d): %s",
+                stopping_metric, alpha, minority_threshold, minority_indices,
+            )
+        else:
+            logger.info("Early stopping metric: %s", stopping_metric)
+
         criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))
 
         # For training split: global_eid == local_eid (both 0-indexed from 0).
@@ -122,15 +149,17 @@ class Trainer:
         balanced_sorted = np.sort(balanced_train_eids)
 
         curves: dict = {
-            "train_loss":       [],
-            "val_loss":         [],
-            "val_macro_f1":     [],
-            "val_per_class_f1": [],
-            "epoch_times":      [],
-            "best_epoch":       -1,
+            "train_loss":            [],
+            "val_loss":              [],
+            "val_macro_f1":          [],
+            "val_minority_macro_f1": [],
+            "val_composite_f1":      [],
+            "val_per_class_f1":      [],
+            "epoch_times":           [],
+            "best_epoch":            -1,
         }
 
-        best_f1    = -1.0
+        best_score = -1.0
         no_improve = 0
 
         for epoch in range(1, self.max_epochs + 1):
@@ -146,32 +175,55 @@ class Trainer:
 
             val_loss, val_macro_f1, val_per_class = self._evaluate(criterion)
 
+            # Minority and composite metrics
+            if minority_indices:
+                minority_f1s = [val_per_class[i] for i in minority_indices
+                                if i < len(val_per_class)]
+                minority_macro_f1 = float(np.mean(minority_f1s)) if minority_f1s else 0.0
+            else:
+                minority_macro_f1 = val_macro_f1
+            composite_f1 = (1.0 - alpha) * val_macro_f1 + alpha * minority_macro_f1
+
+            if stopping_metric == "composite":
+                score = composite_f1
+            elif stopping_metric == "minority_macro_f1":
+                score = minority_macro_f1
+            else:
+                score = val_macro_f1
+
             elapsed = time.time() - t0
             curves["train_loss"].append(float(train_loss))
             curves["val_loss"].append(float(val_loss))
             curves["val_macro_f1"].append(float(val_macro_f1))
+            curves["val_minority_macro_f1"].append(float(minority_macro_f1))
+            curves["val_composite_f1"].append(float(composite_f1))
             curves["val_per_class_f1"].append(val_per_class)
             curves["epoch_times"].append(float(elapsed))
 
             logger.info(
-                f"Epoch {epoch:3d}/{self.max_epochs}  "
-                f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
-                f"val_macro_f1={val_macro_f1:.4f}  {elapsed:.1f}s"
+                "Epoch %3d/%d  train_loss=%.4f  val_loss=%.4f  "
+                "macro_f1=%.4f  minority_f1=%.4f  composite=%.4f  %.1fs",
+                epoch, self.max_epochs, train_loss, val_loss,
+                val_macro_f1, minority_macro_f1, composite_f1, elapsed,
             )
 
-            if val_macro_f1 > best_f1 + 1e-5:
-                best_f1    = val_macro_f1
+            if score > best_score + 1e-5:
+                best_score = score
                 no_improve = 0
                 curves["best_epoch"] = epoch
                 ckpt = output_dir / "best_model.pt"
                 torch.save(self.model.state_dict(), ckpt)
-                logger.info(f"  → new best val_macro_f1={best_f1:.4f}, saved {ckpt}")
+                logger.info(
+                    "  → new best %s=%.4f  (macro_f1=%.4f  minority_f1=%.4f), saved %s",
+                    stopping_metric, best_score, val_macro_f1, minority_macro_f1, ckpt,
+                )
             else:
                 no_improve += 1
                 if no_improve >= self.patience:
                     logger.info(
-                        f"Early stopping at epoch {epoch} "
-                        f"(no improvement for {self.patience} epochs)"
+                        "Early stopping at epoch %d "
+                        "(no improvement for %d epochs)",
+                        epoch, self.patience,
                     )
                     break
 
@@ -179,8 +231,8 @@ class Trainer:
         with open(curves_path, "w") as f:
             json.dump(curves, f, indent=2)
         logger.info(
-            f"Training done. best_epoch={curves['best_epoch']}, "
-            f"best_val_macro_f1={best_f1:.4f}"
+            "Training done. best_epoch=%d, best_%s=%.4f",
+            curves["best_epoch"], stopping_metric, best_score,
         )
         return curves
 

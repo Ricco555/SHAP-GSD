@@ -77,22 +77,25 @@ class HyperparameterTuner:
         device: torch.device,
         output_dir: Path,
         seed: int = 42,
+        train_label_counts: np.ndarray | None = None,
     ) -> dict:
         """Run all hyperparameter trials and return the best config.
 
         Args:
-            g_train / g_val:    split DGL graphs.
-            fs_train / fs_val:  FeatureStore for each split.
-            nsm:                NodeStateManager.
+            g_train / g_val:     split DGL graphs.
+            fs_train / fs_val:   FeatureStore for each split.
+            nsm:                 NodeStateManager.
             balanced_train_eids: sorted oversampled EIDs.
-            class_weights:      float32 tensor from original distribution.
-            node_in_dim:        node feature dimension (15).
-            edge_in_dim:        edge feature dimension (d_e).
-            num_classes:        number of output classes.
-            base_cfg:           merged config dict; model sub-dict is overridden per trial.
-            device:             torch device.
-            output_dir:         directory to write tuning_results.json, best_params.json.
-            seed:               base random seed (trial i uses seed+i).
+            class_weights:       float32 tensor from original distribution.
+            train_label_counts:  int array (num_classes,) of original unbalanced
+                                 training counts — passed to trainer for composite metric.
+            node_in_dim:         node feature dimension (15).
+            edge_in_dim:         edge feature dimension (d_e).
+            num_classes:         number of output classes.
+            base_cfg:            merged config dict; model sub-dict is overridden per trial.
+            device:              torch device.
+            output_dir:          directory to write tuning_results.json, best_params.json.
+            seed:                base random seed (trial i uses seed+i).
 
         Returns:
             best_params dict (values for the tuned hyperparameters).
@@ -167,9 +170,16 @@ class HyperparameterTuner:
                 class_weights=class_weights,
                 output_dir=trial_out,
                 seed=seed + i,
+                train_label_counts=train_label_counts,
             )
 
-            best_val_f1 = max(curves["val_macro_f1"]) if curves["val_macro_f1"] else 0.0
+            # Use the same metric as early stopping for trial selection.
+            stopping_metric = cfg_trial["model"].get("early_stopping_metric", "macro_f1")
+            metric_key = {
+                "composite":         "val_composite_f1",
+                "minority_macro_f1": "val_minority_macro_f1",
+            }.get(stopping_metric, "val_macro_f1")
+            best_val_f1 = max(curves[metric_key]) if curves.get(metric_key) else 0.0
             elapsed = time.time() - trial_start
 
             result = {
