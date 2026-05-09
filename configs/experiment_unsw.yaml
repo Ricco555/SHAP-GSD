@@ -23,13 +23,4 @@ model:
   minority_class_threshold: 5000         # selects DoS(1719) Analysis(514) Backdoor(3185) Shellcode(980) Worms(50) — not Recon(5349)
   composite_minority_weight: 0.5
 
-output:
-  feature_store_dir: "feature_store"
-  artifacts_dir: "artifacts"
-  transformers_dir: "artifacts/transformers"
-  split_indices_path: "split_indices.json"
-  feature_groups_path: "feature_groups.json"
-  balanced_train_indices_path: "balanced_train_indices.npy"
-  class_weights_path: "class_weights.npy"
-
 seed: 42
