@@ -65,11 +65,22 @@ scripts/05_evaluate.py      →  artifacts/evaluation/metrics.json
                                artifacts/evaluation/roc_curves.png
         │
         ▼
-scripts/06_explain.py       →  artifacts/explanations/
-                               artifacts/shap_summaries/
+scripts/06_explain.py       →  outputs/explanations/
         │
         ▼
-scripts/07_visualize.py     →  figures/
+scripts/07_visualize.py     →  outputs/figures/
+        │
+        ▼
+scripts/08_metrics.py       →  outputs/metrics/summary.json
+                               outputs/metrics/table2.txt
+        │
+        ▼
+scripts/09_w_ablation.py    →  outputs/w_ablation/gap_stats.json
+                               outputs/w_ablation/summary.txt
+        │
+        ▼
+scripts/10_baselines.py     →  outputs/baselines/summary.json
+                               outputs/baselines/comparison_table.txt
 ```
 
 All scripts read from `configs/experiment_unsw.yaml`, which inherits defaults
@@ -180,6 +191,42 @@ python scripts/07_visualize.py --config configs/experiment_unsw.yaml
 
 ---
 
+### Phase 8 — Quantitative SHAP-GSD metrics
+
+```bash
+python scripts/08_metrics.py --config configs/experiment_unsw.yaml
+```
+
+Computes Fidelity+, Fidelity−, and Stability on the 1,764-flow explanation
+set from Phase 6. Fidelity+ measures sufficiency (removing top-k groups hurts
+prediction); Fidelity− measures necessity (keeping only top-k groups maintains
+prediction); Stability is mean per-group φ std across re-runs with different seeds.
+
+**Outputs:** `outputs/metrics/fidelity.csv`, `outputs/metrics/stability.csv`,
+`outputs/metrics/summary.json`, `outputs/metrics/table2.txt`
+
+---
+
+### Phase 9 — Temporal window (W) sensitivity ablation
+
+```bash
+python scripts/09_w_ablation.py --config configs/experiment_unsw.yaml
+```
+
+Step 1: for W ∈ {60, 300, 1800, 3600} s, reports the fraction of flows with
+≥1 in-window neighbour and mean in-window neighbour count. Step 2: if any W
+has >1% in-window flow rate, re-runs temporal SHAP on a 50-flow subset to
+produce non-zero temporal attributions and measure Fidelity+ change.
+
+On NF-UNSW-NB15-v3 all neighbour timestamps fall far outside W=60 s;
+temporal φ values are near-zero (confirmed dataset property, reported as a
+null result in the paper).
+
+**Outputs:** `outputs/w_ablation/gap_stats.json`, `outputs/w_ablation/gap_stats.txt`,
+`outputs/w_ablation/summary.txt`
+
+---
+
 ## Configuration
 
 | File | Purpose |
@@ -222,6 +269,11 @@ balancer:
 | `artifacts/training_curves.json` | Per-epoch loss, macro-F1, per-class F1 |
 | `artifacts/evaluation/` | Test metrics, confusion matrix, ROC curves |
 | `artifacts/label_map.json` | Class name → integer mapping |
+| `outputs/explanations/` | Per-flow SHAP-GSD JSON results (1,764 flows) |
+| `outputs/figures/` | Case study four-panel figures |
+| `outputs/metrics/summary.json` | Per-class Fidelity+/−, Stability for Table 2 |
+| `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
+| `outputs/baselines/` | Baseline comparison results and Table 2 |
 
 Runtime-generated directories (`feature_store/`, `graphs/`, `artifacts/`,
 `outputs/`) are excluded from version control.
