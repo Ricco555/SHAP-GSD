@@ -175,9 +175,10 @@ def _train_or_load_pgexplainer(
         logger.info(f"Loading cached PGExplainer from {ckpt_path}")
         from torch_geometric.explain.algorithm import PGExplainer
         algorithm = PGExplainer(epochs=pg_epochs, lr=pg_lr)
-        state = torch.load(ckpt_path, map_location="cpu")
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         algorithm.mlp = state["mlp"]
         algorithm.optimizer = None  # not needed for inference
+        algorithm._curr_epoch = pg_epochs - 1  # mark training as complete
         return algorithm
 
     logger.info(
