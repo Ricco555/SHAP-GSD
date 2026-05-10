@@ -222,10 +222,17 @@ def run_edgeshaper_with_model(
         device="cpu",
     )
 
+    # Compute graph density clamped to valid binomial probability.
+    # Dense subgraphs (many repeated edges) can yield density > 1, which
+    # causes numpy.random.binomial to raise ValueError.
+    n_e = pyg_data.edge_index.size(1)
+    max_edges = max(N_local * (N_local - 1), 1)
+    P = float(np.clip(n_e / max_edges, 0.01, 0.99))
+
     phi_edges = explainer.explain(
         M=M,
         target_class=ctx.true_label,
-        P=None,     # use graph density as P
+        P=P,
         deviation=None,
         log_odds=False,
         seed=42,

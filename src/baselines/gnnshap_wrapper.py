@@ -319,10 +319,9 @@ def run_gnnshap_with_model(
         os.chdir(_orig_dir)
         sys.path = _orig_path
 
-    # explanation.shap_vals: (nplayers,) — edge Shapley values
-    # explanation.sub_edge_index: (2, nplayers) — original (non-relabeled) edge indices
-    shap_vals = np.array(explanation.shap_vals)
-    sub_edge_index = explanation.sub_edge_index
+    # GNNShapExplanation stores shap_values (np.array) and sub_edge_index (already numpy)
+    shap_vals = np.array(explanation.shap_values)
+    sub_edge_index = torch.from_numpy(explanation.sub_edge_index).long()
 
     local_scores = _edge_shap_to_node_scores(shap_vals, sub_edge_index, N_local)
     node_scores_input = _map_local_to_input(local_scores, ctx.blocks, gnid_to_local)

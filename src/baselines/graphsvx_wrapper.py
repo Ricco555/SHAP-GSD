@@ -218,6 +218,8 @@ def run_graphsvx_with_model(
     for k in _saved_src_mods:
         del sys.modules[k]
 
+    phi_list = None
+    svx = None
     try:
         os.chdir(GRAPHSVX_DIR)
         sys.path.insert(0, GRAPHSVX_DIR)
@@ -239,6 +241,10 @@ def run_graphsvx_with_model(
             regu=0,             # structure-only: F=0, phi shape = (D,)
             vizu=False,
         )
+    except Exception as exc:
+        # NetworkXNoPath (disconnected directed subgraph) or any other internal
+        # GraphSVX failure → fall back to zero attribution for this flow.
+        logger.debug(f"GraphSVX internal error EID={ctx.global_eid}: {exc}")
     finally:
         os.chdir(_orig_dir)
         sys.path = _orig_path
@@ -248,6 +254,14 @@ def run_graphsvx_with_model(
                 del sys.modules[k]
         # Restore SHAP-GSD's src.* entries
         sys.modules.update(_saved_src_mods)
+
+    if phi_list is None or svx is None:
+        node_scores_input = np.zeros(len(ctx.input_node_ids))
+        fid_plus, fid_minus = fidelity_from_node_mask(
+            node_scores_input, ctx, bg_node, model, top_k=top_k
+        )
+        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
+                            time.time() - t0)
 
     phi = phi_list[0]                  # numpy array, shape (D,)
     neighbours = svx.neighbours        # tensor of local node indices, length D

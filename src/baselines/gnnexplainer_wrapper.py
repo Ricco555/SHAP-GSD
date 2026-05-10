@@ -217,7 +217,6 @@ def run_gnnexplainer_with_model(
         x=x_singleton,
         edge_index=edge_index_empty,
         index=0,
-        target=ctx.true_label,
     )
 
     raw_mask = explanation.node_mask.squeeze(0).detach().cpu().numpy()  # (d_e,)

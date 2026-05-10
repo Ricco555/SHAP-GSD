@@ -34,6 +34,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_dummy_mp_class():
+    """Return a DummyMP(MessagePassing) class.  Lazy import avoids a hard
+    torch_geometric dependency at module load time."""
+    from torch_geometric.nn import MessagePassing
+
+    class DummyMP(MessagePassing):
+        """Identity MessagePassing layer exposed so PyG's get_embeddings()
+        hook can capture h_full.  PGExplainer uses the captured output as
+        node embeddings for its edge-mask MLP."""
+        def __init__(self):
+            super().__init__(aggr="add")
+            self.add_self_loops = False
+
+        def forward(self, x, edge_index):
+            return x  # identity: output = captured node embeddings (h_full)
+
+        def message(self, x_j):
+            return x_j
+
+    return DummyMP
+
+
 # ── PGE-compatible model wrapper ───────────────────────────────────────────────
 
 class PGECompatibleWrapper(nn.Module):
@@ -42,6 +64,9 @@ class PGECompatibleWrapper(nn.Module):
     PGExplainer masks edges in the subgraph and measures how the prediction
     changes.  This wrapper holds frozen DGL node embeddings (h_full) and applies
     a one-hop weighted aggregation when PGExplainer supplies an edge_weight mask.
+
+    A DummyMP layer is included so that PyG's get_embeddings() hook can capture
+    h_full as the 'node embeddings' used by PGExplainer's edge-mask MLP.
 
     forward(x, edge_index, edge_weight=None):
         x           : (N, hidden) — node embeddings (h_full passed by the
@@ -61,6 +86,8 @@ class PGECompatibleWrapper(nn.Module):
         num_nodes: int,
     ) -> None:
         super().__init__()
+        DummyMP = _get_dummy_mp_class()
+        self._dummy_mp = DummyMP()
         self.register_buffer("_h_full", h_full.detach())
         self.edge_mlp = edge_mlp
         self.register_buffer("_x_e_t", x_e_t.detach())
@@ -75,6 +102,9 @@ class PGECompatibleWrapper(nn.Module):
         edge_weight: torch.Tensor = None,
     ) -> torch.Tensor:
         h = x if (x is not None and x.shape == self._h_full.shape) else self._h_full
+
+        # Pass h through the dummy MP so PyG's get_embeddings hook captures it.
+        h = self._dummy_mp(h, edge_index)   # identity: h unchanged
 
         if edge_weight is not None and edge_index.size(1) > 0:
             # Weighted one-hop aggregation: h_new[dst] += edge_weight * h[src]
@@ -192,9 +222,28 @@ def train_pgexplainer(
     """
     import dgl as _dgl
     from torch_geometric.explain.algorithm import PGExplainer
+    from torch_geometric.explain.config import (
+        ExplainerConfig, ExplanationType,
+        ModelConfig, ModelMode, ModelTaskLevel, ModelReturnType,
+    )
     from src.baselines.adapter import build_flow_context, dgl_subgraph_to_pyg
 
     algorithm = PGExplainer(epochs=epochs, lr=lr)
+
+    # connect() is normally called by the Explainer constructor.
+    # When training without an Explainer wrapper we must call it manually.
+    algorithm.connect(
+        ExplainerConfig(
+            explanation_type=ExplanationType.phenomenon,
+            node_mask_type=None,
+            edge_mask_type="object",
+        ),
+        ModelConfig(
+            mode=ModelMode.multiclass_classification,
+            task_level=ModelTaskLevel.node,
+            return_type=ModelReturnType.probs,
+        ),
+    )
 
     all_geids = g_train.edata[_dgl.EID].numpy()
     rng = np.random.default_rng(seed)
@@ -232,8 +281,10 @@ def train_pgexplainer(
                 src_local, dst_local, N_local,
             ).eval()
 
-            target_t = torch.tensor([ctx.true_label], dtype=torch.long)
-            index_t  = torch.tensor([src_local],      dtype=torch.long)
+            # PGExplainer indexes target as y[index], so target must have
+            # shape (N_local,) — not a single-element scalar tensor.
+            target_t = torch.full((N_local,), ctx.true_label, dtype=torch.long)
+            index_t  = torch.tensor([src_local], dtype=torch.long)
 
             try:
                 loss = algorithm.train(
@@ -333,7 +384,7 @@ def run_pgexplainer_with_model(
         x=h_full,
         edge_index=pyg_data.edge_index,
         index=torch.tensor([src_local], dtype=torch.long),
-        target=torch.tensor([ctx.true_label], dtype=torch.long),
+        target=torch.full((N_local,), ctx.true_label, dtype=torch.long),
     )
 
     edge_mask_np = explanation.edge_mask.detach().cpu().numpy()
