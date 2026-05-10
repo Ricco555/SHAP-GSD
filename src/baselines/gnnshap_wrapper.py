@@ -259,14 +259,20 @@ def run_gnnshap_with_model(
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
 
-    # Isolated flow fallback
+    def _zero_fallback():
+        scores = np.zeros(len(ctx.input_node_ids))
+        fp, fm = fidelity_from_node_mask(scores, ctx, bg_node, model, top_k=top_k)
+        return _pack_result(ctx, scores, fp, fm, time.time() - t0)
+
+    # Isolated flow or too few players for coalition sampling
     if pyg_data.edge_index.size(1) == 0:
-        node_scores_input = np.zeros(len(ctx.input_node_ids))
-        fid_plus, fid_minus = fidelity_from_node_mask(
-            node_scores_input, ctx, bg_node, model, top_k=top_k
+        return _zero_fallback()
+    if N_local < 3:
+        logger.debug(
+            f"GNNShap EID={ctx.global_eid}: N_local={N_local} < 3, "
+            "insufficient players for coalition sampling — zero fallback"
         )
-        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0)
+        return _zero_fallback()
 
     # Pre-compute relabeled positions for forward_fn
     src_relabeled, dst_relabeled = _compute_relabeled_positions(
@@ -291,6 +297,7 @@ def run_gnnshap_with_model(
     # Import GNNShap (must chdir to its root for CUDA extension)
     _orig_dir = os.getcwd()
     _orig_path = sys.path[:]
+    explanation = None
     try:
         os.chdir(GNNSHAP_DIR)
         if GNNSHAP_DIR not in sys.path:
@@ -315,9 +322,16 @@ def run_gnnshap_with_model(
             sampler_name="GNNShapSampler",
             solver_name="WLSSolver",
         )
+    except Exception as exc:
+        logger.debug(
+            f"GNNShap EID={ctx.global_eid} N_local={N_local}: {exc} — zero fallback"
+        )
     finally:
         os.chdir(_orig_dir)
         sys.path = _orig_path
+
+    if explanation is None:
+        return _zero_fallback()
 
     # GNNShapExplanation stores shap_values (np.array) and sub_edge_index (already numpy)
     shap_vals = np.array(explanation.shap_values)

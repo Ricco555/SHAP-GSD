@@ -292,15 +292,26 @@ def train_pgexplainer(
                     h_full, pyg_data.edge_index,
                     target=target_t, index=index_t,
                 )
-                total_loss += float(loss)
+                loss_val = float(loss)
+                if not (loss_val == loss_val):   # NaN check
+                    logger.debug(f"PGExplainer NaN loss EID={global_eid}, skipping")
+                    continue
+                total_loss += loss_val
                 n_used += 1
             except Exception as exc:
                 logger.debug(f"PGExplainer train step EID={global_eid}: {exc}")
 
-        logger.info(
-            f"PGExplainer epoch {epoch+1}/{epochs}: "
-            f"avg_loss={total_loss / max(n_used, 1):.4f}  n={n_used}"
-        )
+        avg = total_loss / max(n_used, 1)
+        if n_used == 0:
+            logger.warning(
+                f"PGExplainer epoch {epoch+1}/{epochs}: "
+                f"0/{len(chosen)} flows produced a valid loss — MLP may be diverging"
+            )
+        else:
+            logger.info(
+                f"PGExplainer epoch {epoch+1}/{epochs}: "
+                f"avg_loss={avg:.4f}  n={n_used}"
+            )
 
     logger.info("PGExplainer training complete.")
     return algorithm
