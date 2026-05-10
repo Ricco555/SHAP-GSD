@@ -18,6 +18,9 @@ CLAUDE.md
 research_plan.md
 git-push-guide.txt
 
+# exploratory scripts — local only
+explore/
+
 # environment secrets
 .env
 .env.*
