@@ -6,7 +6,7 @@ Produces:
   confusion_matrix.png  row-normalised heatmap
   roc_curves.png        one-vs-rest ROC per class
 
-Paper 1 (TE-G-SAGE) minority-class baselines to beat:
+TE-G-SAGE minority-class baselines to beat:
   Backdoor F1 = 0.071
   DoS      F1 = 0.26
 These are printed alongside the new results for direct comparison.
@@ -37,7 +37,7 @@ from src.visualization.metrics_plots import plot_confusion_matrix, plot_roc_curv
 
 logger = logging.getLogger(__name__)
 
-# Paper 1 (TE-G-SAGE) per-class F1 baselines (class int → F1).
+# TE-G-SAGE per-class F1 baselines (class int → F1).
 # Update these keys if the label mapping for this dataset differs.
 PAPER1_F1_BASELINES: dict[str, float] = {
     "Backdoor": 0.071,
@@ -143,7 +143,7 @@ class Evaluator:
             if name in report
         }
 
-        # ── Paper 1 comparison ────────────────────────────────────────────────
+        # ── TE-G-SAGE comparison ──────────────────────────────────────────────
         paper1_comparison = self._paper1_comparison(per_class)
 
         metrics = {
@@ -242,7 +242,7 @@ class Evaluator:
     def _paper1_comparison(
         per_class: dict[str, dict],
     ) -> dict[str, dict]:
-        """Build Paper 1 vs Paper 2 delta table for minority classes."""
+        """Build TE-G-SAGE vs SHAP-GSD delta table for minority classes."""
         comparison: dict[str, dict] = {}
         for cls_name, baseline_f1 in PAPER1_F1_BASELINES.items():
             paper2_f1 = per_class.get(cls_name, {}).get("f1", None)
@@ -286,7 +286,7 @@ class Evaluator:
             )
         if paper1_comparison:
             logger.info("")
-            logger.info("Paper 1 minority-class targets:")
+            logger.info("TE-G-SAGE minority-class targets:")
             for name, row in paper1_comparison.items():
                 status = "IMPROVED" if row["improved"] else "NOT MET"
                 logger.info(

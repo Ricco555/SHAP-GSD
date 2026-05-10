@@ -1,5 +1,5 @@
 """
-15-dimensional per-node state vector. NEW — Paper 1 used constant ones.
+15-dimensional per-node state vector. NEW — TE-G-SAGE used constant ones.
 
 NODE STATE SCHEMA:
   Behavioral (11):

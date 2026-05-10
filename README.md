@@ -156,7 +156,7 @@ python scripts/05_evaluate.py --config configs/experiment_unsw.yaml
 
 Runs inference on the test split using the same `TemporalNeighborSampler` as
 training (no full-neighbourhood inflation). Prints per-class F1 alongside
-Paper 1 (TE-G-SAGE) minority-class baselines — Backdoor F1=0.071,
+TE-G-SAGE minority-class baselines — Backdoor F1=0.071,
 DoS F1=0.26 — and warns if either is not improved.
 
 **Outputs:** `artifacts/evaluation/metrics.json`, `confusion_matrix.png`, `roc_curves.png`

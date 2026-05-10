@@ -2,7 +2,7 @@
 Temporal-aware class balancing — training split ONLY.
 
 PROBLEM: NF-UNSW-NB15-v3 is ~96% benign. Class-weighted loss alone
-leaves minority-class precision low (Paper 1: Backdoor F1=0.071).
+leaves minority-class precision low (TE-G-SAGE: Backdoor F1=0.071).
 
 SOLUTION: Oversample minority classes while preserving temporal ordering.
 Val/test splits are NEVER touched.

@@ -155,7 +155,7 @@ def main(cfg: dict) -> None:
 
     # ── 7. Save label_map.json ─────────────────────────────────────────────────
     # Maps display names → int (used by evaluator.py class_names lookup).
-    # "Reconnaissance" in the CSV becomes "Recon" in plots/tables/Paper 2.
+    # "Reconnaissance" in the CSV becomes "Recon" in plots/tables.
     display_label_map = {
         "Benign":    0,
         "Generic":   1,

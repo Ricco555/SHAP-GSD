@@ -130,7 +130,7 @@ def _spearman_prune_mask(
     """Return boolean keep-mask for numeric features.
 
     For each pair (i, j) with i < j where |rho_s| > threshold, column j is
-    dropped (greedy upper-triangle rule, same as Paper 1).
+    dropped (greedy upper-triangle rule, same as TE-G-SAGE).
     """
     logger.info(f"Computing Spearman correlation matrix on {X_train.shape} train array")
     df = pd.DataFrame(X_train, columns=feature_names)

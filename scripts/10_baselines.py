@@ -437,7 +437,7 @@ def _build_comparison_table(
 
     # ASCII table
     lines = []
-    lines.append("BASELINE EXPLAINER COMPARISON — SHAP-GSD Paper 2 Table 2")
+    lines.append("BASELINE EXPLAINER COMPARISON — SHAP-GSD Table 2")
     lines.append("="*80)
     lines.append(
         "Note: GNNExplainer uses feature-group fidelity (top-5 groups, 218→48 dims).")

@@ -224,7 +224,7 @@ def main() -> None:
     # Write quality report
     report_path = out_dir / "quality_report.txt"
     header = (
-        "Case study quality report — SHAP-GSD Paper 2\n"
+        "Case study quality report — SHAP-GSD\n"
         f"W_seconds={W_seconds}\n"
         + "-" * 90 + "\n"
         + "Class        EID         top_phi  shap_range  n_topo  node_range  n_gaps  in_W\n"

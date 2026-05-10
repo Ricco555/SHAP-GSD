@@ -4,8 +4,8 @@ Construct DGL graphs from preprocessed splits.
 FOUR CHANGES FROM PAPER 1:
 
 CHANGE 1 — IP-level nodes (not IP:PORT):
-  Paper 1: node = "10.0.0.5:49152"
-  Paper 2: node = "10.0.0.5"
+  TE-G-SAGE: node = "10.0.0.5:49152"
+  SHAP-GSD:  node = "10.0.0.5"
   Ports move to edge features (encoded in preprocessor).
   Avoids host history fragmentation across ephemeral ports.
 
