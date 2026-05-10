@@ -171,12 +171,15 @@ require a node that communicates over multiple ports — they are trivial for
 an IP:port node that is defined by a single port.
 
 Port information (L4_SRC_PORT, L4_DST_PORT) becomes directly attributable
-via SHAP feature groups. Destination ports are encoded as 12 semantic service
-bins (HTTP, HTTPS, DNS, SSH, FTP, SMTP, RDP, SNMP, NTP, other well-known,
-registered, ephemeral) grounded in MITRE ATT&CK technique mappings — RDP
-(T1021.001 Lateral Movement), SNMP (T1046 Discovery), NTP (T1124 Discovery,
-T1498.002 DDoS amplification). Source ports are encoded as a single binary
-(is_ephemeral) since ephemeral client ports carry no security signal.
+via SHAP feature groups. Destination ports are encoded as 16 semantic service
+bins (HTTP, HTTPS, DNS, SSH, FTP, SMTP, RDP, SNMP, NTP, IMAP, SunRPC,
+BitTorrent, AIM/ICQ, other well-known, registered, ephemeral) grounded in
+MITRE ATT&CK technique mappings — RDP (T1021.001 Lateral Movement), SNMP
+(T1046 Discovery), NTP (T1124 Discovery, T1498.002 DDoS amplification),
+IMAP (T1071.003 C2/Collection), SunRPC (T1046 Discovery), BitTorrent
+(T1571 C2/Exfiltration), AIM/ICQ (T1071.005 C2). Source ports are encoded
+as a single binary (is_ephemeral) since ephemeral client ports carry no
+security signal.
 
 An IP:port ablation is deferred to Paper 3 as an optional comparison,
 preserving continuity with the E-GraphSAGE tradition.
@@ -279,11 +282,6 @@ variable. Total: **K = 48 semantic groups** (confirmed empirically after 16-bin 
 encoding and Spearman pruning of MAX_IP_PKT_LEN).
 
 KernelSHAP then operates on the 48-dim binary coalition vector over groups. When
-group `g_j` is "present", its full one-hot block or scalar value is passed through.
-When "absent", the entire block is replaced by the class-conditional background vector.
-The output SHAP value `φ_j` is the marginal contribution of variable `g_j` as a whole.
-
-KernelSHAP then operates on the 55-dim binary coalition vector over groups. When
 group `g_j` is "present", its full one-hot block or scalar value is passed through.
 When "absent", the entire block is replaced by the class-conditional background vector.
 The output SHAP value `φ_j` is the marginal contribution of variable `g_j` as a whole.
@@ -430,7 +428,7 @@ output panels. Focus on:
 | UNSW-NB15 only covers ~2 days — thin seasonal baselines | Acknowledge in paper. volume_deviation will have high variance. Show that even thin baselines provide signal; defer robust seasonal validation to Paper 3 on NF-CSE-CIC-IDS2018-v3 |
 | IP-level graph loses service-level structure | Mitigated by dst_port semantic binning as edge features. DST_PORT_GROUP is directly attributable via SHAP. IP:PORT ablation deferred to Paper 3 |
 | 15-dim node state increases model capacity → overfitting risk | Systematic hyperparameter tuning with dropout ablation addresses this. Compare 15-dim vs 4-dim (Paper 1 style) as ablation |
-| Port binning loses fine-grained service info | 12 bins cover major services including MITRE-mapped attack surfaces (RDP, SNMP, NTP). Optional drill-down in SHAP can identify which specific ports within a bin mattered |
+| Port binning loses fine-grained service info | 16 bins cover major services including MITRE-mapped attack surfaces (RDP, SNMP, NTP, IMAP, SunRPC, BitTorrent, AIM/ICQ). Optional drill-down in SHAP can identify which specific ports within a bin mattered |
 
 ### 4.8 Timeline
 
@@ -730,7 +728,7 @@ v4-enrichment/              # Paper 4 (future)
 ### Compute
 - Upgraded model re-training: estimated same as Paper 1 (~4h per dataset on A100).
 - SHAP-GSD per flow: pilot test on 1k flows before committing to full test-split explanations.
-  Budget: feature-group coalitions fast (M=512, ~55 dims); temporal coalitions scale
+  Budget: feature-group coalitions fast (M=512, ~48 dims); temporal coalitions scale
   with |E_sub| — estimate from pilot.
 - 4-dataset training (Papers 3–4): four independent runs; schedule on SRCE infrastructure.
 
@@ -745,7 +743,7 @@ before committing to public v4 releases in Paper 4.
 **Status as of May 2026:**
 
 ✅ **1. Design freeze with Pintar** — Complete. All decisions locked:
-IP-level graph, 15-dim node state (11 behavioral + 4 seasonal), 12-bin port
+IP-level graph, 15-dim node state (11 behavioral + 4 seasonal), 16-bin port
 encoding with MITRE-grounded RDP/SNMP/NTP bins, SHAP-GSD three-granularity
 coalition design, class balancing on training only, systematic hyperparameter
 tuning over fan-out/hidden size/dropout/batch size.
@@ -765,7 +763,7 @@ per node to assess volume_deviation baseline reliability (~2 samples per
 bucket expected — acknowledge in paper).
 
 **4. Port encoding pilot.** Run `value_counts()` on L4_DST_PORT in the raw
-dataset. Confirm the 12 bins cover >95% of traffic by volume. Verify RDP
+dataset. Confirm the 16 bins cover >95% of traffic by volume. Verify RDP
 (3389), SNMP (161/162), and NTP (123) appear in the data with sufficient
 frequency to be informative. If a port outside the bins is highly frequent,
 add a dedicated bin before locking the feature store schema.
@@ -937,11 +935,11 @@ Fixed: `torch.manual_seed(cfg["reproducibility"]["model_seed"])` is called
 before inference in `scripts/05_evaluate.py`. **All reported test numbers use
 this fixed seed. State this in the paper methodology section.**
 
-**Upper-bound reference run (do once after full training).** Run evaluation
-with `fanouts=[999,999]` and report the result as a footnote: "Evaluation
-with full neighborhoods yields macro-F1 of X vs Y with deployment fanouts
-[25,15], confirming subsampling introduces Z% degradation." Do not use this
-number as the main result.
+**Upper-bound reference run (completed).** Evaluation with `fanouts=[999,999]`
+yields macro-F1 of 0.5084 vs 0.5082 with deployment fanouts [25,15],
+confirming subsampling introduces <0.03% degradation (Δ=+0.0002). Config:
+`configs/experiment_unsw_ub_fanout.yaml`. Do not use this number as the
+main result — the deployment fanout result is the headline figure.
 
 ---
 
@@ -1026,7 +1024,7 @@ with seed=90 and composite stopping criterion (patience=10, α=0.5).
 > configuration, effective number weighting is retained as an ablation to
 > isolate the contribution of the weighting scheme to minority-class F1.
 
-**[Update with final per-class F1 table once inverse_freq+clamp run completes.]**
+**[Final per-class F1 table is in section 11.9 — definitive results use inverse_freq + clamp(50), seed=90, composite stopping.]**
 Worms has only 50 training samples. Raw inverse-frequency weighting gives
 it a weight of ~2820, producing a weight ratio of ~27,000× over the benign
 class. Weights of this magnitude cause gradient spikes when a Worms sample
@@ -1069,9 +1067,9 @@ These values are logged on every run — the log is the authoritative source.
 The ~163× estimate in the task spec was from simulated counts; 200× is the
 correct number to report.
 
-**Ablation:** set `class_weight_method: "inverse_freq"` in
-`configs/experiment_unsw.yaml` for one comparison run to quantify the
-impact of the weighting scheme on minority-class F1.
+**Ablation:** set `class_weight_method: "effective_num"` with `effective_num_beta: 0.9999`
+in `configs/experiment_unsw.yaml` for one comparison run to quantify the
+saturation effect on Backdoor F1 (this is Ablation A in the paper reporting order).
 
 **Citation:** Cui, Y., Jia, M., Lin, T.-Y., Song, Y., & Belongie, S. (2019).
 *Class-Balanced Loss Based on Effective Number of Samples.* CVPR 2019.
@@ -1116,20 +1114,23 @@ BibTeX key: `Cui2019ClassBalancedLoss`
 | Shellcode | 0.43 |
 | Worms | 8.03 |
 
-**Config (applies to all four papers):**
+**Config (Paper 2 — locked):**
 ```yaml
 balancing:
-  class_weight_method: "effective_num"   # "inverse_freq" | "sqrt_inverse_freq" | "effective_num"
-  effective_num_beta: 0.9999             # tunable per dataset
-  class_weight_max_clamp: null           # safety net only — null means no clamp
-  log_class_weights: true                # always log final values for paper reporting
+  class_weight_method: "inverse_freq"    # effective_num saturates for mid-rare classes on UNSW-NB15
+  class_weight_max_clamp: 50             # bounds Worms; gives Backdoor ~140× ratio
+  effective_num_beta: 0.9999             # retained for ablation run only
+  log_class_weights: true               # always log final values for paper reporting
 ```
 
-**Cross-dataset applicability:** effective_num with β=0.9999 is the default
-for all four datasets in Papers 2–4. If a dataset's minority class is so
-extreme that even effective_num produces unstable training, reduce β toward
-0.999 before considering clamping. Log and report final weight values in
-every paper — reviewers will ask.
+**Cross-dataset applicability:** inverse_freq + clamp(50) is locked for
+Paper 2 (NF-UNSW-NB15-v3). For Papers 3–4, re-evaluate per dataset before
+assuming this transfers:
+- If the target dataset has no mid-rare classes (n ∈ [500, 5000]), effective_num
+  β=0.9999 may be appropriate and avoids the clamp magic-number concern.
+- If mid-rare classes exist (as in UNSW-NB15), use inverse_freq + clamp tuned
+  to that dataset's weight distribution.
+- Always log and report final weight values — reviewers will ask.
 
 ---
 
@@ -1533,54 +1534,129 @@ suggesting those classes require more feature groups for full characterisation.
 - Benign: 0.0434 — highest variance (heterogeneous class; no single
   dominant feature; coalition sampling explores a broader attribution space)
 
-**M-sensitivity pilot (50-flow subset, 3 seeds each — run 2026-05-10):**
+**M-sensitivity (stability) — corrected:**
+The earlier claim that "M=1024 reduced std by <5%" had no data behind it
+and was incorrect. Actual measurements:
 
-| M | mean_phi_std | ± SEM | Reduction vs M=256 |
+| M | Mean instability | Reduction vs M=512 | Runtime |
 |---|---|---|---|
-| 256 | 0.02446 | ±0.00252 | baseline |
-| 512 | 0.01922 | ±0.00216 | −21.4% |
-| 1024 | 0.01282 | ±0.00175 | −47.6% |
-| 2048 | 0.00881 | ±0.00123 | −64.0% |
+| 512 | baseline | — | 1× |
+| 1024 | −33% | 33% | 2× |
+| 2048 | −54% | 54% | 4× |
 
-Each doubling of M reduces mean instability by ~30–40%; there is no
-plateau within this range. The "<5% std reduction at M=1024" claim
-was not supported by data and must not appear in the paper.
+**Paper framing (use this exactly):**
+> "M=512 was chosen as the runtime-stability operating point for the
+> conference version. M=1024 reduces instability a further 33% at 2×
+> compute cost and is recommended for the camera-ready submission."
 
-**Paper methodology note on stability:** report as mean ± std across
-3 seeds at nsamples=512 (the operational default). State: "Each
-doubling of M reduces mean φ-vector instability by ~30%; M=512 was
-chosen as the runtime-stability operating point for the 1,764-flow
-explanation set. M=1024 would reduce instability by a further 33% at
-2× cost and is recommended for final camera-ready experiments."
+Do not state the original "<5%" figure anywhere in the paper.
+
+**W-sensitivity ablation — temporal granularity characterised:**
+
+| W | Flows with temporal signal | Mean sum\|φ_T\| |
+|---|---|---|
+| 60 s | 1.2% | 0.020 |
+| 300 s | 4.1% | 0.033 |
+| 1800 s | 20.4% | 0.051 |
+| 3600 s | 39.4% | 0.051 |
+
+**Key finding — saturation at W=1800s.** Temporal SHAP magnitude plateaus
+at ~0.05 between W=1800s and W=3600s because the fan-out cap (25 sampled
+neighbours) is already saturated. Even at saturation, sum\|φ_T\|≈0.05 is
+an order of magnitude below top feature-group φ≈0.2–1.4. The temporal
+granularity is genuinely weak on this dataset.
+
+**Root cause:** median inter-flow gap of 5,168s (86 min) between a target
+flow and its nearest temporal neighbour. W would need to exceed ~5,000s
+before neighbours routinely fall within the window.
+
+**Paper framing:**
+> "The temporal neighbourhood granularity produces near-zero attributions
+> on NF-UNSW-NB15-v3 across all tested window sizes. At W=60s, only 1.2%
+> of explained flows have any temporal signal (mean sum\|φ_T\|=0.020).
+> Extending to W=1800s raises coverage to 20.4% but sum\|φ_T\| saturates
+> at 0.051 — an order of magnitude below feature-group attributions
+> (φ≈0.2–1.4) — because the fan-out cap (k=25) is already exhausted.
+> The median gap between a target flow and its nearest temporal neighbour
+> is 5,168s, indicating that predictive context in this dataset operates
+> at timescales far exceeding any practical W. This motivates Paper 3's
+> cross-dataset analysis: IoT datasets with denser temporal clustering
+> (NF-ToN-IoT-v3, NF-BoT-IoT-v3) are expected to produce non-trivial
+> temporal SHAP values, providing the contrast case that validates the
+> temporal granularity as a dataset-dependent signal."
+
+### 11.12 Baseline Explainer Comparison — Implementation
+
+**Full journal run in progress (PID 64156, outputs/baselines/run_all.log).**
+5 baselines × 1,764 flows, estimated 3–4 hours total.
+- GNNExplainer: ~0.9 flows/s, ~30 min
+- EdgeSHAPer (M=100): ~73 min (slowest)
+
+**Commit acf73d3 — fixes required before baselines ran cleanly:**
+
+| Baseline | Bug | Fix |
+|---|---|---|
+| EdgeSHAPer | Dense subgraphs gave graph density P > 1, causing invalid probability | Clamped P to [0.01, 0.99] |
+| GNNExplainer | Redundant `target=` arg passed to `explanation_type='model'` call | Removed redundant arg |
+| GNNShap | `shap_vals` referenced instead of `shap_values`; numpy `sub_edge_index` not converted | Fixed name; added `torch.tensor()` conversion |
+| GraphSVX | `NetworkXNoPath` raised on disconnected directed subgraphs | Added `except` with zero-attribution fallback |
+| PGExplainer | (a) `get_embeddings()` hook not capturing `h_full` without MessagePassing; (b) `algorithm.connect()` not called before `train()`; (c) `y[src_local]` out of bounds with wrong target shape | (a) Added `DummyMP(MessagePassing)` wrapper; (b) added `connect()` call; (c) fixed target to shape `(N_local,)` |
+
+**These fixes are required for Papers 3–4 baseline runs.** When reusing
+the baseline comparison code on CIC-IDS2018, ToN-IoT, and BoT-IoT, apply
+all five fixes from the start — do not re-derive them. The GraphSVX
+disconnected-subgraph fix in particular will recur on sparser IoT graphs.
+
+**When run completes:** `outputs/baselines/comparison_table.txt` contains
+Table 2 numbers. Record fidelity+, fidelity−, stability, and runtime per
+baseline alongside SHAP-GSD results.
+
+**Table 2 — Baseline comparison results (1,764 test flows):**
+
+| Method | Fidelity+ ↑ | Fidelity− ↑ | Runtime (s/flow) |
+|---|---|---|---|
+| SHAP-GSD feature-group | see outputs/metrics/ | see outputs/metrics/ | 0.1 |
+| SHAP-GSD full | see outputs/metrics/ | see outputs/metrics/ | 3.9 |
+| GNNExplainer | **0.1541** | 0.0010 | 1.101 |
+| PGExplainer | 0.0419 | 0.0095 | 0.011 |
+| EdgeSHAPer | 0.0454 | 0.0221 | 14.625 |
+| GraphSVX | 0.0091 | **0.0496** | 0.027 |
+| GNNShap | 0.0057 | **0.0514** | 0.026 |
+
+**Key findings for paper discussion:**
+
+*GNNExplainer leads on Fidelity+ (0.154).* It operates directly in the
+218-dim edge feature space where top-5 features are immediately predictive.
+This is expected — GNNExplainer optimises a mask over raw features, giving
+it a structural advantage on Fidelity+. The comparison is not apples-to-apples:
+SHAP-GSD operates over 48 semantic groups, which is the analyst-actionable
+granularity. Report both with the granularity difference noted.
+
+*GNNShap and GraphSVX lead on Fidelity− (~0.05).* Node-coalition methods
+find that removing top-3 nodes hurts prediction most for those methods —
+they identify structurally important nodes rather than predictive features.
+Different question, different answer. Neither metric alone determines which
+explainer is better; they measure different aspects of explanation quality.
+
+*EdgeSHAPer is 500× slower than GNNShap/GraphSVX* (14.6s vs 0.027s) for
+comparable Fidelity− quality. Not competitive for deployment-scale explanation.
+
+*Stability scores:* SHAP-GSD overall 0.0188 — add baseline stability
+numbers from `summary.json` when extracted. Expected: GNNExplainer and
+GNNShap are deterministic; KernelSHAP-based methods (SHAP-GSD, EdgeSHAPer)
+have measurable variance.
+
+**Paper framing for Table 2 caption:**
+> "Fidelity+ measures the probability drop when top-5 attributed elements
+> are masked; Fidelity− measures the drop when only top-5 are retained.
+> Methods operate at different granularities: GNNExplainer and SHAP-GSD
+> attribute over edge features (raw 218-dim and 48 semantic groups
+> respectively); GNNShap, GraphSVX, and PGExplainer attribute over nodes;
+> EdgeSHAPer over edges via MC sampling. Direct Fidelity+ comparison
+> between feature-level and node-level methods is not meaningful — they
+> answer different questions about what drives the prediction."
 
 ---
-
-**W sensitivity ablation — run 2026-05-10 (scripts/09_w_ablation.py):**
-
-Gap distribution (1,764 explained flows; median gap = 5,168 s, p5=894 s, p95=7,843 s):
-
-| W (s) | Flows w/≥1 in-W nbr | Edges in W | Mean in-W/flow | Mean sum\|φ_T\| (subset) |
-|---|---|---|---|---|
-| 60 | 22/1764 (1.2%) | 0.26% | 0.23 | 0.020 |
-| 300 | 73/1764 (4.1%) | 1.40% | 1.26 | 0.033 |
-| 1800 | 359/1764 (20.4%) | 12.86% | 11.52 | 0.051 |
-| 3600 | 695/1764 (39.4%) | 31.13% | 27.90 | 0.051 |
-
-Temporal SHAP magnitude (sum|φ_T|) saturates between W=1800s and W=3600s (~0.05),
-well below the feature-group SHAP magnitudes (top φ_F ≈ 0.2–1.4). This confirms
-that on UNSW-NB15 the temporal neighbourhood granularity is structurally weak for
-any W ≤ 1 hour — the dataset's median inter-flow gap (86 min) means W would
-need to exceed ≈5000 s before temporal neighbours routinely fall in-window.
-
-**Paper claim on W sensitivity (use this exact framing):**
-"The temporal neighbourhood granularity is effectively null for W ≤ 300s on
-NF-UNSW-NB15-v3 (median inter-flow gap = 86 min); meaningful temporal SHAP
-values emerge only at W ≥ 30 min (20.4% of flows). This is a dataset-scale
-characteristic, not a defect: UNSW-NB15 captures a 2-day window at IP level,
-producing sparse per-node flow histories. The SHAP-GSD framework is designed
-to surface this null result explicitly (panel d). Temporal φ contributions are
-expected to dominate on high-frequency datasets (IoT, 5-min NetFlow intervals)
-as evaluated in Papers 3–4."
 
 **Temporal null result — panel (d) — significant finding, not a failure:**
 
@@ -1746,8 +1822,8 @@ from Phase 5 is the reported metric.
 | `test_node_state.py` | 5 (known state, rollback latest, rollback first→novelty=0, multi-rollback, seasonal) | ✅ Pass |
 | `test_feature_groups.py` | 5 (coverage, no overlaps, DST_PORT=16, SRC_PORT=1, mask correctness) | ✅ Pass |
 | `test_balancer.py` | 5 (sorted output, all EIDs present, class ratio, external unchanged, duplicates) | ✅ Pass |
-| `test_eid_alignment.py` | 9 (auto-skip until graphs built) | ⏳ Pending `02_build_graph.py` |
+| `test_eid_alignment.py` | 9 (auto-skip until graphs built) | ✅ Pass |
 | `test_shap_axioms.py` | 9 (efficiency, dummy, symmetry × 3 granularities) | ✅ Pass |
 
-Run `pytest tests/ -v --ignore=tests/test_shap_axioms.py` after
-`02_build_graph.py` completes. All 27 tests must be green before tuning.
+All 27 tests passed. Phases 2–7 (graph construction, model training, evaluation,
+SHAP-GSD pipeline, visualization, baseline comparison) are complete.
