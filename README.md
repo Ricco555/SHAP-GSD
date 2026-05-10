@@ -2,7 +2,7 @@
 
 Multi-granularity Shapley explanations for GNN-based Network Intrusion Detection.
 
-Paper 2 of a PhD thesis. Builds on TE-G-SAGE (Paper 1) with IP-level nodes,
+Publication pending. Extends TE-G-SAGE with IP-level nodes,
 temporally-faithful neighbour sampling, 15-dim node state, and three-granularity
 SHAP coalitions: feature-group, temporal neighbourhood, and node novelty.
 
@@ -385,7 +385,6 @@ python scripts/05_evaluate.py \
     --checkpoint artifacts/ub_fanout/best_model.pt
 ```
 
-Result: macro-F1 0.5084 vs 0.5082 — subsampling introduces <0.03% degradation.
 
 ### Coalition spaces
 
