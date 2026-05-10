@@ -249,6 +249,108 @@ pytest tests/test_shap_axioms.py -v
 
 ---
 
+## Baseline Explainer Comparison (Table 2)
+
+Five baseline GNN explainers are benchmarked against SHAP-GSD.
+
+### Additional dependencies
+
+These are **not** in `requirements.txt` — install only when running the
+baseline comparison:
+
+```bash
+# PGExplainer and GNNExplainer (PyG)
+pip install torch_geometric
+
+# GNNShap
+pip install gnnshap
+
+# EdgeSHAPer
+pip install edgeshaper
+
+# GraphSVX — install from source (PyPI version is stale)
+git clone https://github.com/AlexDuvalinho/GraphSVX.git external/graphsvx
+pip install -e external/graphsvx
+```
+
+GraphSVX ships its own `src/` package that conflicts with this repo's `src/`.
+The wrapper (`src/baselines/graphsvx_wrapper.py`) isolates it automatically
+via `sys.modules` save/restore — no manual path changes needed.
+
+### How to run
+
+**Full journal run** (all 5 baselines × all test flows, ~2–4 h):
+
+```bash
+python scripts/10_baselines.py --config configs/experiment_unsw.yaml
+```
+
+**Quick smoke-test** (5 flows per class, ~10 min):
+
+```bash
+python scripts/10_baselines.py \
+    --config configs/experiment_unsw.yaml \
+    --n-per-class 5 \
+    --baselines all
+```
+
+**Single baseline:**
+
+```bash
+python scripts/10_baselines.py \
+    --config configs/experiment_unsw.yaml \
+    --baselines gnnexplainer          # or pgexplainer, gnnshap, graphsvx, edgeshaper
+```
+
+**Skip PGExplainer training** (reuse saved checkpoint from a previous run):
+
+```bash
+python scripts/10_baselines.py \
+    --config configs/experiment_unsw.yaml \
+    --skip-pg-train
+```
+
+PGExplainer trains a small MLP over 200 sampled flows × 30 epochs before
+inference. The checkpoint is saved to `outputs/baselines/pgexplainer_ckpt.pt`
+and reloaded automatically on subsequent runs when `--skip-pg-train` is passed.
+
+### Outputs
+
+| Path | Contents |
+|------|----------|
+| `outputs/baselines/summary.json` | Per-class Fidelity+/− and runtime for all baselines |
+| `outputs/baselines/comparison_table.txt` | Formatted Table 2 (baselines only) |
+| `outputs/baselines/table2_with_shapgsd.txt` | Full Table 2 with SHAP-GSD column |
+| `outputs/baselines/pgexplainer_ckpt.pt` | Trained PGExplainer MLP checkpoint |
+
+### Upper-bound fanout reference
+
+To reproduce the subsampling footnote (fanouts=[999,999] vs [25,15]):
+
+```bash
+python scripts/05_evaluate.py \
+    --config configs/experiment_unsw_ub_fanout.yaml \
+    --checkpoint artifacts/ub_fanout/best_model.pt
+```
+
+Result: macro-F1 0.5084 vs 0.5082 — subsampling introduces <0.03% degradation.
+
+### Coalition spaces
+
+| Method | Space | Fidelity mask |
+|--------|-------|---------------|
+| SHAP-GSD | Feature-group [F] | top-5 of 48 semantic groups |
+| GNNExplainer | Feature-group [F] | top-5 of 48 semantic groups |
+| PGExplainer | Node-coalition [N] | top-3 nodes in k-hop subgraph |
+| GNNShap | Node-coalition [N] | top-3 nodes in k-hop subgraph |
+| GraphSVX | Node-coalition [N] | top-3 nodes in k-hop subgraph |
+| EdgeSHAPer | Node-coalition [N] | top-3 nodes in k-hop subgraph |
+
+SHAP-GSD[F] and GNNExplainer[F] are directly comparable.
+PGExplainer[N]/GNNShap[N]/GraphSVX[N]/EdgeSHAPer[N] are directly comparable.
+
+---
+
 ## Acknowledgements
 
 Experiments performed using the Advanced Computing service provided by the
