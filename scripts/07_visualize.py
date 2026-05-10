@@ -255,7 +255,8 @@ def main() -> None:
             continue
         cls = cls_dir.name
         matrices = []
-        for jf in sorted(cls_dir.glob("*.json")):
+        for jf in sorted(f for f in cls_dir.glob("*.json")
+                         if f.stem.isdigit()):
             try:
                 rec = json.loads(jf.read_text())
                 phi = np.array(rec["feature_group_shap"], dtype=np.float64)
