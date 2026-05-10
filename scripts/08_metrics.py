@@ -408,7 +408,8 @@ def _build_summary(
         fid_plus  = [r["fidelity_plus"]  for r in frows]
         fid_minus = [r["fidelity_minus"] for r in frows]
         stab      = [r["mean_phi_std"]   for r in srows]
-        runtimes  = [r["runtime_s"] for r in frows if r.get("runtime_s") is not None]
+        runtimes  = [r["runtime_s"] for r in frows
+                     if r.get("runtime_s") is not None and r["runtime_s"] >= 0]
         per_class[cls] = {
             "n_flows":          len(frows),
             "fidelity_plus":    round(float(np.mean(fid_plus)),  4),
@@ -423,7 +424,9 @@ def _build_summary(
     all_fp  = [r["fidelity_plus"]  for r in fidelity_rows]
     all_fm  = [r["fidelity_minus"] for r in fidelity_rows]
     all_st  = [r["mean_phi_std"]   for r in stability_rows]
-    all_rt  = [r["runtime_s"] for r in fidelity_rows if r.get("runtime_s") is not None]
+    # Exclude negative runtimes (WSL2 clock jitter artefacts)
+    all_rt  = [r["runtime_s"] for r in fidelity_rows
+               if r.get("runtime_s") is not None and r["runtime_s"] >= 0]
     overall = {
         "n_flows":           len(fidelity_rows),
         "fidelity_plus":     round(float(np.mean(all_fp)),  4),
