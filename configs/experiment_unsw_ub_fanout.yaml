@@ -1,0 +1,34 @@
+# Upper-bound fanout experiment — all neighbours included (no subsampling).
+# Overrides model.fanouts=[25,15] → [999,999] for the subsampling footnote.
+# All other settings identical to experiment_unsw.yaml.
+
+data:
+  csv_path: "data/NF-UNSW-NB15-v3.csv"
+  train_frac: 0.6
+  val_frac: 0.3
+
+preprocessing:
+  spearman_threshold: 0.995
+  ohe_min_frequency: 0.001
+  ohe_handle_unknown: "ignore"
+
+balancer:
+  strategy: "oversample"
+  min_class_ratio: 0.1
+  max_majority_ratio: 5.0
+  seed: 42
+  class_weight_method: "inverse_freq"
+  class_weight_max_clamp: 50
+
+reproducibility:
+  model_seed: 90
+
+output:
+  artifacts_dir: "artifacts/ub_fanout"
+
+model:
+  fanouts: [999, 999]
+  early_stopping_metric: "composite"
+  minority_class_threshold: 5000
+  composite_minority_weight: 0.5
+  patience: 20
