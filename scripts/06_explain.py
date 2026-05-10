@@ -104,6 +104,7 @@ def _result_to_dict(result: ExplanationResult) -> dict:
         "dst_novelty_shap":   result.dst_novelty_shap,
         "subgraph_edge_ids":  result.subgraph_edge_ids,
         "subgraph_shap_weights": result.subgraph_shap_weights,
+        "runtime_s":          round(result.runtime_s, 4),
     }
 
 

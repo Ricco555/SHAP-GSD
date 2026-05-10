@@ -271,6 +271,7 @@ def compute_fidelity(
             "fidelity_plus":   round(p_full - p_masked, 6),
             "fidelity_minus":  round(p_full - p_kept, 6),
             "top_k_groups":    "|".join(top_k_groups),
+            "runtime_s":       rec.get("runtime_s", None),
         })
 
         if (i + 1) % 100 == 0:
@@ -407,6 +408,7 @@ def _build_summary(
         fid_plus  = [r["fidelity_plus"]  for r in frows]
         fid_minus = [r["fidelity_minus"] for r in frows]
         stab      = [r["mean_phi_std"]   for r in srows]
+        runtimes  = [r["runtime_s"] for r in frows if r.get("runtime_s") is not None]
         per_class[cls] = {
             "n_flows":          len(frows),
             "fidelity_plus":    round(float(np.mean(fid_plus)),  4),
@@ -415,11 +417,13 @@ def _build_summary(
             "fidelity_minus_std": round(float(np.std(fid_minus)),4),
             "stability":        round(float(np.mean(stab)), 6) if stab else None,
             "n_stability":      len(srows),
+            "runtime_mean_s":   round(float(np.mean(runtimes)), 4) if runtimes else None,
         }
 
     all_fp  = [r["fidelity_plus"]  for r in fidelity_rows]
     all_fm  = [r["fidelity_minus"] for r in fidelity_rows]
     all_st  = [r["mean_phi_std"]   for r in stability_rows]
+    all_rt  = [r["runtime_s"] for r in fidelity_rows if r.get("runtime_s") is not None]
     overall = {
         "n_flows":           len(fidelity_rows),
         "fidelity_plus":     round(float(np.mean(all_fp)),  4),
@@ -428,6 +432,7 @@ def _build_summary(
         "fidelity_minus_std":round(float(np.std(all_fm)),   4),
         "stability":         round(float(np.mean(all_st)),  6) if all_st else None,
         "n_stability":       len(stability_rows),
+        "runtime_mean_s":    round(float(np.mean(all_rt)),  4) if all_rt else None,
     }
 
     return {"top_k": top_k, "per_class": per_class, "overall": overall}

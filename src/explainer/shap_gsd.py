@@ -14,6 +14,7 @@ Stratified mode: explain_stratified(n_per_class) → dict[int, list[ExplanationR
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -58,6 +59,9 @@ class ExplanationResult:
     # Explanatory subgraph
     subgraph_edge_ids: list[int]         # top-K by |φ_T|
     subgraph_shap_weights: list[float]
+
+    # Timing
+    runtime_s: float = 0.0              # wall-clock seconds for all three granularities
 
 
 class SHAPGSDExplainer:
@@ -128,6 +132,7 @@ class SHAPGSDExplainer:
         Returns:
             ExplanationResult with all three SHAP granularities filled.
         """
+        _t0 = time.time()
         dgl = self._dgl
         seed_eid_t = torch.tensor([local_eid], dtype=torch.long)
 
@@ -263,6 +268,7 @@ class SHAPGSDExplainer:
             dst_novelty_shap=node_result["dst_novelty_shap"],
             subgraph_edge_ids=subgraph_eids,
             subgraph_shap_weights=subgraph_weights,
+            runtime_s=round(time.time() - _t0, 4),
         )
 
     def explain_batch(self, local_eids: list[int]) -> list[ExplanationResult]:
