@@ -29,7 +29,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.utils.config import load_config
 from src.model.temporal_sampler import TemporalNeighborSampler
-from src.visualization.case_study_plots import make_case_study_figure
+from src.visualization.case_study_plots import (
+    make_case_study_figure,
+    plot_class_feature_summary,
+    make_all_classes_figure,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,6 +240,60 @@ def main() -> None:
             f.write(row + "\n")
 
     logger.info(f"Quality report → {report_path}")
+
+    # ── Phase 7B: per-class feature-group summary plots ───────────────────────
+    logger.info("=== Phase 7B: Per-class feature-group SHAP summaries ===")
+    fg_dir = Path("outputs") / "figures" / "feature_groups"
+    fg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load all explanation JSONs grouped by class
+    class_shap: dict[str, np.ndarray] = {}
+    group_names_ref: list[str] | None = None
+
+    for cls_dir in sorted(explanations_dir.iterdir()):
+        if not cls_dir.is_dir():
+            continue
+        cls = cls_dir.name
+        matrices = []
+        for jf in sorted(cls_dir.glob("*.json")):
+            try:
+                rec = json.loads(jf.read_text())
+                phi = np.array(rec["feature_group_shap"], dtype=np.float64)
+                matrices.append(phi)
+                if group_names_ref is None:
+                    group_names_ref = rec["feature_group_names"]
+            except Exception as e:
+                logger.debug(f"Skipping {jf.name}: {e}")
+        if matrices:
+            class_shap[cls] = np.stack(matrices)
+            logger.info(f"  {cls}: {len(matrices)} flows loaded")
+
+    if not class_shap or group_names_ref is None:
+        logger.warning("No explanation JSONs found — skipping Phase 7B")
+    else:
+        import matplotlib.pyplot as _plt
+
+        # Per-class figures
+        for cls, mat in class_shap.items():
+            fig, ax = _plt.subplots(figsize=(6, 8))
+            plot_class_feature_summary(ax, group_names_ref, mat, cls, top_n=20)
+            for ext in ("pdf", "png"):
+                path = fg_dir / f"{cls}.{ext}"
+                fig.savefig(str(path), bbox_inches="tight",
+                            dpi=300 if ext == "pdf" else 150)
+            _plt.close(fig)
+            logger.info(f"  Saved {cls}.pdf / {cls}.png")
+
+        # Combined all-classes figure
+        fig_all = make_all_classes_figure(class_shap, group_names_ref, top_n=15)
+        for ext in ("pdf", "png"):
+            path = fg_dir / f"all_classes.{ext}"
+            fig_all.savefig(str(path), bbox_inches="tight",
+                            dpi=300 if ext == "pdf" else 150)
+        _plt.close(fig_all)
+        logger.info(f"  Saved all_classes.pdf / all_classes.png")
+        logger.info(f"Feature-group summaries → {fg_dir}")
+
     logger.info("Phase 7 complete.")
 
 

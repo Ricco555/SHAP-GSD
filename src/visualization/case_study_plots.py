@@ -325,3 +325,97 @@ def make_case_study_figure(
 
     plt.tight_layout()
     return fig
+
+
+# ── Per-class feature-group summary ───────────────────────────────────────────
+
+def plot_class_feature_summary(
+    ax: plt.Axes,
+    group_names: list[str],
+    shap_matrix: np.ndarray,
+    class_name: str,
+    top_n: int = 20,
+) -> None:
+    """Horizontal bar chart of mean signed φ ± 1 std across all flows in a class.
+
+    Args:
+        ax:           Matplotlib axes to draw on.
+        group_names:  Length-K list of feature group names.
+        shap_matrix:  (N, K) array of signed SHAP values (N flows, K groups).
+        class_name:   Display name for the title.
+        top_n:        Number of top groups to show (ranked by mean |φ|).
+    """
+    mean_phi = shap_matrix.mean(axis=0)
+    std_phi  = shap_matrix.std(axis=0)
+
+    # Rank by mean |φ| — preserves sign in the bar
+    idx = np.argsort(np.abs(mean_phi))[::-1][:top_n]
+    names  = [group_names[i] for i in idx]
+    means  = mean_phi[idx]
+    stds   = std_phi[idx]
+
+    # Most important at top
+    names = names[::-1]
+    means = means[::-1]
+    stds  = stds[::-1]
+
+    colours = _bar_colours(means)
+    y = np.arange(len(names))
+
+    ax.barh(y, means, xerr=stds, color=colours,
+            error_kw=dict(elinewidth=0.8, ecolor="black", capsize=2),
+            edgecolor="white", linewidth=0.4)
+    ax.axvline(0, color="black", linewidth=0.6)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=7)
+    ax.set_xlabel("Mean SHAP value φ  (±1 std)", fontsize=8)
+    ax.set_title(
+        f"{class_name}  (n={shap_matrix.shape[0]})",
+        fontsize=9, fontweight="bold",
+    )
+    ax.tick_params(axis="x", labelsize=7)
+    ax.text(0.98, 0.02, f"Σ|μφ| = {np.abs(means).sum():.3f}",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=7, color="dimgray")
+
+
+def make_all_classes_figure(
+    class_shap: dict[str, np.ndarray],
+    group_names: list[str],
+    top_n: int = 15,
+    ncols: int = 5,
+) -> plt.Figure:
+    """2×5 grid of per-class mean-φ bar charts for all 10 classes.
+
+    Args:
+        class_shap:  dict mapping class_name → (N, K) shap_matrix.
+        group_names: Length-K list of feature group names.
+        top_n:       Groups per subplot.
+        ncols:       Columns in the grid (rows computed automatically).
+
+    Returns:
+        matplotlib Figure.
+    """
+    classes = sorted(class_shap.keys())
+    nrows = -(-len(classes) // ncols)   # ceiling division
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(ncols * 4.5, nrows * (top_n * 0.35 + 1.2)),
+    )
+    axes_flat = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    for i, cls in enumerate(classes):
+        plot_class_feature_summary(
+            axes_flat[i], group_names, class_shap[cls], cls, top_n=top_n
+        )
+
+    # Hide unused subplots
+    for j in range(len(classes), len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    fig.suptitle(
+        "SHAP-GSD — Feature-group attributions by class (mean ± 1 std, signed φ)",
+        fontsize=11, fontweight="bold", y=1.01,
+    )
+    plt.tight_layout()
+    return fig
