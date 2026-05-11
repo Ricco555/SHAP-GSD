@@ -140,9 +140,12 @@ class NodeNoveltySHAP:
             return np.array(results, dtype=np.float64)
 
         background_data = np.zeros((1, coalition_size), dtype=np.float32)
+        foreground_data = np.ones((1, coalition_size), dtype=np.float32)
         explainer = shap.KernelExplainer(_predict_fn, background_data)
+        f_baseline = float(np.squeeze(explainer.expected_value))
+        f_logit = float(_predict_fn(foreground_data)[0])
         phi_raw = explainer.shap_values(
-            np.ones((1, coalition_size), dtype=np.float32),
+            foreground_data,
             nsamples=nsamples,
             silent=True,
         )
@@ -156,7 +159,8 @@ class NodeNoveltySHAP:
 
         logger.debug(
             f"Node SHAP: class={true_class}, coalition_size={coalition_size}, "
-            f"src_novelty_φ={src_novelty_phi:.4f}, dst_novelty_φ={dst_novelty_phi:.4f}"
+            f"src_novelty_φ={src_novelty_phi:.4f}, dst_novelty_φ={dst_novelty_phi:.4f}, "
+            f"efficiency_err={abs(phi.sum() - (f_logit - f_baseline)):.4f}"
         )
 
         return {
@@ -164,4 +168,6 @@ class NodeNoveltySHAP:
             "dst_novelty_shap": dst_novelty_phi,
             "node_shap": node_phi,
             "coalition_size": coalition_size,
+            "f_baseline": f_baseline,
+            "f_logit": f_logit,
         }

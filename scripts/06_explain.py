@@ -104,6 +104,17 @@ def _result_to_dict(result: ExplanationResult) -> dict:
         "dst_novelty_shap":   result.dst_novelty_shap,
         "subgraph_edge_ids":  result.subgraph_edge_ids,
         "subgraph_shap_weights": result.subgraph_shap_weights,
+        # Shapley efficiency baselines (logit space for true_class)
+        "f_baseline_feature":  round(result.f_baseline_feature, 6),
+        "f_logit_feature":     round(result.f_logit_feature, 6),
+        "f_baseline_temporal": round(result.f_baseline_temporal, 6),
+        "f_logit_temporal":    round(result.f_logit_temporal, 6),
+        "f_baseline_node":     round(result.f_baseline_node, 6),
+        "f_logit_node":        round(result.f_logit_node, 6),
+        # Per-layer timing
+        "runtime_feature_s":  round(result.runtime_feature_s, 4),
+        "runtime_temporal_s": round(result.runtime_temporal_s, 4),
+        "runtime_node_s":     round(result.runtime_node_s, 4),
         "runtime_s":          round(result.runtime_s, 4),
     }
 
@@ -262,6 +273,35 @@ def main() -> None:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(summary_rows)
+
+    # --- Runtime-by-layer summary ---
+    all_results_flat = [r for results in stratified.values() for r in results]
+    if all_results_flat:
+        rt_feat = np.array([r.runtime_feature_s for r in all_results_flat])
+        rt_temp = np.array([r.runtime_temporal_s for r in all_results_flat])
+        rt_node = np.array([r.runtime_node_s for r in all_results_flat])
+        rt_total = np.array([r.runtime_s for r in all_results_flat])
+
+        def _stats(arr: np.ndarray) -> dict:
+            return {
+                "mean_s":   round(float(arr.mean()), 4),
+                "std_s":    round(float(arr.std()), 4),
+                "median_s": round(float(np.median(arr)), 4),
+                "p95_s":    round(float(np.percentile(arr, 95)), 4),
+            }
+
+        runtime_summary = {
+            "n_flows":  total,
+            "hardware": cfg.get("compute", {}).get("hardware", "unknown"),
+            "feature_group": _stats(rt_feat),
+            "temporal_neighborhood": _stats(rt_temp),
+            "node_novelty": _stats(rt_node),
+            "total_end_to_end": _stats(rt_total),
+        }
+        rt_path = Path("outputs") / "metrics" / "runtime_by_layer.json"
+        with open(rt_path, "w") as f:
+            json.dump(runtime_summary, f, indent=2)
+        logger.info(f"Runtime-by-layer summary → {rt_path}")
 
     logger.info(
         f"Phase 6 complete: {total} edges explained, "

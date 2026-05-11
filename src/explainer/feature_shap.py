@@ -104,9 +104,14 @@ class FeatureGroupSHAP:
             return np.array(results, dtype=np.float64)
 
         background_data = np.zeros((1, self.K), dtype=np.float32)
+        foreground_data = np.ones((1, self.K), dtype=np.float32)
         explainer = shap.KernelExplainer(_predict_fn, background_data)
+        # f_baseline = E[f(background)] — evaluated at init time by KernelExplainer
+        f_baseline = float(np.squeeze(explainer.expected_value))
+        # f_logit = f(all groups present) — one extra forward pass
+        f_logit = float(_predict_fn(foreground_data)[0])
         phi_raw = explainer.shap_values(
-            np.ones((1, self.K), dtype=np.float32),
+            foreground_data,
             nsamples=nsamples,
             silent=True,
         )
@@ -114,6 +119,7 @@ class FeatureGroupSHAP:
 
         logger.debug(
             f"Feature SHAP: class={true_class}, "
-            f"sum(φ)={phi.sum():.4f}, top group={self.group_names[int(np.abs(phi).argmax())]}"
+            f"sum(φ)={phi.sum():.4f}, f_logit={f_logit:.4f}, f_baseline={f_baseline:.4f}, "
+            f"efficiency_err={abs(phi.sum() - (f_logit - f_baseline)):.4f}"
         )
-        return {name: float(phi[i]) for i, name in enumerate(self.group_names)}
+        return {name: float(phi[i]) for i, name in enumerate(self.group_names)}, f_baseline, f_logit

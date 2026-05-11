@@ -60,8 +60,21 @@ class ExplanationResult:
     subgraph_edge_ids: list[int]         # top-K by |φ_T|
     subgraph_shap_weights: list[float]
 
-    # Timing
-    runtime_s: float = 0.0              # wall-clock seconds for all three granularities
+    # Shapley efficiency baselines (logit space, for true_class)
+    # f_baseline = E[f(background)]; f_logit = f(all-present foreground)
+    # efficiency_error = |sum(phi) - (f_logit - f_baseline)|
+    f_baseline_feature: float = 0.0
+    f_logit_feature: float = 0.0
+    f_baseline_temporal: float = 0.0
+    f_logit_temporal: float = 0.0
+    f_baseline_node: float = 0.0
+    f_logit_node: float = 0.0
+
+    # Per-layer timing (wall-clock seconds)
+    runtime_feature_s: float = 0.0
+    runtime_temporal_s: float = 0.0
+    runtime_node_s: float = 0.0
+    runtime_s: float = 0.0              # sum of the three layers
 
 
 class SHAPGSDExplainer:
@@ -180,7 +193,8 @@ class SHAPGSDExplainer:
         predicted_label = int(np.argmax(proba))
 
         # --- Feature-group SHAP ---
-        feat_phi_dict = self.feat_shap.explain(
+        _t_feat = time.time()
+        feat_phi_dict, f_baseline_feat, f_logit_feat = self.feat_shap.explain(
             true_class=true_label,
             model=self.model,
             blocks=blocks,
@@ -190,11 +204,13 @@ class SHAPGSDExplainer:
             dst_pos=dst_pos,
             nsamples=self._feat_nsamples,
         )
+        runtime_feature_s = time.time() - _t_feat
         group_names = list(feat_phi_dict.keys())
         feat_phi_arr = np.array([feat_phi_dict[n] for n in group_names])
 
         # --- Temporal neighborhood SHAP ---
-        temp_results = self.temp_shap.explain(
+        _t_temp = time.time()
+        temp_results, f_baseline_temp, f_logit_temp = self.temp_shap.explain(
             target_local_eid=local_eid,
             true_class=true_label,
             model=self.model,
@@ -207,11 +223,13 @@ class SHAPGSDExplainer:
             base_node_feats=base_node_feats,
             nsamples=self._temp_nsamples,
         )
+        runtime_temporal_s = time.time() - _t_temp
         neighbor_eids = [t[0] for t in temp_results]
         neighbor_ts = [t[1] for t in temp_results]
         neighbor_phi = np.array([t[2] for t in temp_results])
 
         # --- Node novelty SHAP ---
+        _t_node = time.time()
         node_result = self.node_shap.explain(
             true_class=true_label,
             src_nid=target_src,
@@ -225,8 +243,11 @@ class SHAPGSDExplainer:
             x_e=x_e,
             nsamples=self._node_nsamples,
         )
+        runtime_node_s = time.time() - _t_node
         non_target_node_ids = [int(k) for k in node_result["node_shap"].keys()]
         node_phi_arr = np.array(list(node_result["node_shap"].values()))
+        f_baseline_node = node_result["f_baseline"]
+        f_logit_node = node_result["f_logit"]
 
         # --- Top-K explanatory subgraph ---
         from src.explainer.subgraph_extractor import extract_top_k_subgraph
@@ -252,6 +273,7 @@ class SHAPGSDExplainer:
         subgraph_eids = [t[0] for t in subgraph]
         subgraph_weights = [t[1] for t in subgraph]
 
+        total_s = time.time() - _t0
         return ExplanationResult(
             edge_id=global_eid,
             true_label=true_label,
@@ -268,7 +290,16 @@ class SHAPGSDExplainer:
             dst_novelty_shap=node_result["dst_novelty_shap"],
             subgraph_edge_ids=subgraph_eids,
             subgraph_shap_weights=subgraph_weights,
-            runtime_s=round(time.time() - _t0, 4),
+            f_baseline_feature=f_baseline_feat,
+            f_logit_feature=f_logit_feat,
+            f_baseline_temporal=f_baseline_temp,
+            f_logit_temporal=f_logit_temp,
+            f_baseline_node=f_baseline_node,
+            f_logit_node=f_logit_node,
+            runtime_feature_s=round(runtime_feature_s, 4),
+            runtime_temporal_s=round(runtime_temporal_s, 4),
+            runtime_node_s=round(runtime_node_s, 4),
+            runtime_s=round(total_s, 4),
         )
 
     def explain_batch(self, local_eids: list[int]) -> list[ExplanationResult]:

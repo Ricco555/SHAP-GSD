@@ -166,7 +166,7 @@ class TemporalNeighborhoodSHAP:
         N = len(neighbor_records)
         if N == 0:
             logger.debug("Temporal SHAP: no in-window neighbors, returning []")
-            return []
+            return [], 0.0, 0.0
 
         model.eval()
         input_node_ids = input_nodes.cpu().numpy()
@@ -211,9 +211,12 @@ class TemporalNeighborhoodSHAP:
             return np.array(results, dtype=np.float64)
 
         background_data = np.zeros((1, N), dtype=np.float32)
+        foreground_data = np.ones((1, N), dtype=np.float32)
         explainer = shap.KernelExplainer(_predict_fn, background_data)
+        f_baseline = float(np.squeeze(explainer.expected_value))
+        f_logit = float(_predict_fn(foreground_data)[0])
         phi_raw = explainer.shap_values(
-            np.ones((1, N), dtype=np.float32),
+            foreground_data,
             nsamples=nsamples,
             silent=True,
         )
@@ -222,7 +225,8 @@ class TemporalNeighborhoodSHAP:
             phi = np.array([float(phi)])
 
         logger.debug(
-            f"Temporal SHAP: {N} neighbors, class={true_class}, sum(φ)={phi.sum():.4f}"
+            f"Temporal SHAP: {N} neighbors, class={true_class}, sum(φ)={phi.sum():.4f}, "
+            f"efficiency_err={abs(phi.sum() - (f_logit - f_baseline)):.4f}"
         )
 
         results_list = [
@@ -230,4 +234,4 @@ class TemporalNeighborhoodSHAP:
             for i, rec in enumerate(neighbor_records)
         ]
         results_list.sort(key=lambda t: abs(t[2]), reverse=True)
-        return results_list
+        return results_list, f_baseline, f_logit
