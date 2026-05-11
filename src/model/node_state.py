@@ -3,11 +3,12 @@
 
 NODE STATE SCHEMA:
   Behavioral (11):
-  [0]  is_internal       binary  1 if private IP (10.x, 172.16-31.x, 192.168.x)
-                                 DATASET NOTE: UNSW-NB15 uses public IPs, not RFC1918.
-                                 This feature returns 0 for all nodes in this dataset.
-                                 Limitation accepted and noted in paper. Correct behaviour
-                                 for real deployments and Papers 3–4 (CIC-IDS, ToN-IoT, BoT-IoT).
+  [0]  is_internal       binary  1 if private IP (10.x, 172.16-31.x, 192.168.x) or loopback
+                                 DATASET NOTE (CORRECTED): NF-UNSW-NB15-v3 has MIXED IPs.
+                                 44 nodes total: 8 RFC1918/loopback (is_internal=1),
+                                 36 public/multicast (is_internal=0). Earlier note claiming
+                                 all nodes are public was incorrect. Run
+                                 scripts/12_novelty_audit.py for full dim-0/dim-1 breakdown.
   [1]  novelty           binary  1 if first seen in window W
   [2]  recency           float   normalized time since last flow [0=just seen, 1=not seen in W]
   [3]  rolling_in_degree  int    incoming edges in W
