@@ -16,6 +16,8 @@ datasets/
 # instructions and guides
 CLAUDE.md
 research_plan.md
+papers_34_plan.md
+implementation_log.md
 git-push-guide.txt
 
 # exploratory scripts — local only
