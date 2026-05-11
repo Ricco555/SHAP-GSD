@@ -173,11 +173,40 @@ python scripts/06_explain.py --config configs/experiment_unsw.yaml
 ```
 
 Three-granularity Shapley attributions via KernelSHAP:
-- **Feature-group** — ~48 semantic groups (e.g. volume, timing, port service)
-- **Temporal neighbourhood** — contribution of past flows to the prediction
-- **Node novelty** — whether src/dst IP is new to the network
+- **Feature-group** (`φ_F`) — 48 semantic groups (e.g. volume, timing, port service)
+- **Temporal neighbourhood** (`φ_T`) — contribution of past flows to the prediction
+- **Node novelty** (`φ_N`) — whether src/dst IP is new to the network
 
-**Outputs:** `artifacts/explanations/`, `artifacts/shap_summaries/`
+Each per-flow JSON now includes:
+
+| Field group | Fields |
+|-------------|--------|
+| Efficiency baselines | `f_baseline_feature`, `f_logit_feature`, `f_baseline_temporal`, `f_logit_temporal`, `f_baseline_node`, `f_logit_node` |
+| Per-layer timing | `runtime_feature_s`, `runtime_temporal_s`, `runtime_node_s`, `runtime_s` |
+
+At the end of the run a runtime-by-layer summary is written:
+
+**Outputs:** `outputs/explanations/<class>/<eid>.json`,
+`outputs/explanations/summary.csv`,
+`outputs/metrics/runtime_by_layer.json`
+
+---
+
+### Phase 11 — Shapley efficiency audit
+
+Standalone post-hoc check: for each existing explanation JSON, computes the
+Shapley efficiency error `|Σφ − (f_logit − f_baseline)|` without re-running
+KernelSHAP.
+
+```bash
+python scripts/11_efficiency.py --config configs/experiment_unsw.yaml
+```
+
+**Finding (NF-UNSW-NB15-v3):** KernelSHAP satisfies the efficiency axiom
+exactly by construction (errors ≈ 10⁻¹⁷, machine epsilon) because its
+constrained WLS solver enforces `Σφ = f(x) − E[f(bg)]` algebraically.
+
+**Outputs:** `outputs/metrics/efficiency.json`
 
 ---
 
@@ -270,8 +299,12 @@ balancer:
 | `artifacts/evaluation/` | Test metrics, confusion matrix, ROC curves |
 | `artifacts/label_map.json` | Class name → integer mapping |
 | `outputs/explanations/` | Per-flow SHAP-GSD JSON results (1,764 flows) |
-| `outputs/figures/` | Case study four-panel figures |
+| `outputs/figures/case_studies/` | 4-panel case study figures, 9 attack classes |
+| `outputs/figures/explore/` | Convergence experiment figures |
 | `outputs/metrics/summary.json` | Per-class Fidelity+/−, Stability for Table 2 |
+| `outputs/metrics/runtime_by_layer.json` | Mean/std/p95 runtime per SHAP granularity |
+| `outputs/metrics/efficiency.json` | Shapley efficiency audit results |
+| `outputs/metrics/node_shap_convergence.json` | KernelSHAP convergence at nsamples 128–2048 |
 | `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
 | `outputs/baselines/` | Baseline comparison results and Table 2 |
 
@@ -399,6 +432,38 @@ python scripts/05_evaluate.py \
 
 SHAP-GSD[F] and GNNExplainer[F] are directly comparable.
 PGExplainer[N]/GNNShap[N]/GraphSVX[N]/EdgeSHAPer[N] are directly comparable.
+
+---
+
+## Research scripts (`explore/`)
+
+Standalone analysis and figure-generation scripts used to produce manuscript
+evidence.  They read from `outputs/explanations/` and the test graph; they do
+not modify any artifact.  Run from the repo root after Phase 6 is complete.
+
+| Script | Purpose |
+|--------|---------|
+| `explore/case_studies.py` | 4-panel case study figures for all 9 attack classes (feature SHAP bars, 2-hop topology, node SHAP bars, temporal gap histogram) |
+| `explore/node_shap_convergence.py` | KernelSHAP efficiency error at nsamples ∈ {128, 256, 512, 1024, 2048} on 200 flows — confirms exact efficiency by construction |
+| `explore/arguments/arg1_semantic_grouping.py` | Coalition space reduction: 48 groups vs 218 raw features (×10⁵¹ reduction) |
+| `explore/arguments/arg2_absence_driven.py` | Absence-driven attribution: fraction of flows where top feature group is negative |
+| `explore/arguments/arg3_mitre_port.py` | MITRE ATT&CK port semantic tagging (16-bin encoding) |
+| `explore/arguments/arg5_node_state.py` | Node-state fraction of total \|φ\| by class |
+| `explore/arguments/arg8_temporal_faithfulness.py` | Zero temporal-leakage violations across 405 sampler calls |
+| `explore/class_analysis.py` | Per-class SHAP distribution plots |
+| `explore/fidelity_distributions.py` | Fidelity+/− distribution figures |
+| `explore/shap_scatter.py` | φ_F vs φ_N scatter plots |
+| `explore/table2_figure.py` | Table 2 bar chart (SHAP-GSD vs baselines) |
+| `explore/w_ablation_figure.py` | Temporal window W sensitivity figure |
+| `explore/method_comparison_figure.py` | Method comparison overview figure |
+
+```bash
+# Example — regenerate all 9 case study figures
+python explore/case_studies.py
+
+# Example — run KernelSHAP convergence experiment
+python explore/node_shap_convergence.py --n-per-class 20 --seed 42
+```
 
 ---
 
