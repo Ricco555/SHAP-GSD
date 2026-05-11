@@ -210,6 +210,35 @@ constrained WLS solver enforces `Σφ = f(x) − E[f(bg)]` algebraically.
 
 ---
 
+### Phase 12 — Node novelty audit
+
+Audits node IP topology and measures how often the node novelty coalition
+(φ_N) produces non-zero SHAP values across all 1,764 explained flows.
+
+```bash
+# Fast pass — JSON scan only, no artifacts required:
+python scripts/12_novelty_audit.py --config configs/experiment_unsw.yaml
+
+# Full pass — adds NSM + test-graph dim-0/dim-1 sampling (run on SRCE):
+python scripts/12_novelty_audit.py --config configs/experiment_unsw.yaml --full
+```
+
+Three passes:
+
+1. **Node map** — classifies all unique node IPs (RFC1918, loopback, multicast, public)
+2. **JSON scan** — counts flows with non-zero `src_novelty_shap` or `dst_novelty_shap`
+3. **NSM sample** (`--full`) — samples test flows and measures dim-0 (is\_internal)
+   and dim-1 (novelty) distributions from the NodeStateManager
+
+**Finding (NF-UNSW-NB15-v3):** NF-UNSW-NB15-v3 has mixed IP topology — 44 nodes
+total: 9 RFC1918/loopback, 1 multicast, 34 public. Node novelty attributions are
+non-zero in **612/1,764 flows (34.69%)**. Attack classes show higher engagement
+than benign: Backdoor 48.5%, Analysis 46.2%, Recon 42.5% vs Benign 25.0%.
+
+**Outputs:** `outputs/metrics/novelty_audit.json`, `outputs/metrics/novelty_audit.txt`
+
+---
+
 ### Phase 7 — Visualization
 
 ```bash
@@ -305,6 +334,8 @@ balancer:
 | `outputs/metrics/runtime_by_layer.json` | Mean/std/p95 runtime per SHAP granularity |
 | `outputs/metrics/efficiency.json` | Shapley efficiency audit results |
 | `outputs/metrics/node_shap_convergence.json` | KernelSHAP convergence at nsamples 128–2048 |
+| `outputs/metrics/novelty_audit.json` | Node IP topology + per-class novelty SHAP engagement |
+| `outputs/metrics/novelty_audit.txt` | Human-readable novelty audit report |
 | `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
 | `outputs/baselines/` | Baseline comparison results and Table 2 |
 
