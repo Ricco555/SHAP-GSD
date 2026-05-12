@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # TE-G-SAGE per-class F1 baselines (class int → F1).
 # Update these keys if the label mapping for this dataset differs.
-PAPER1_F1_BASELINES: dict[str, float] = {
+TEG_SAGE_F1_BASELINES: dict[str, float] = {
     "Backdoor": 0.071,
     "DoS":      0.26,
 }
@@ -144,7 +144,7 @@ class Evaluator:
         }
 
         # ── TE-G-SAGE comparison ──────────────────────────────────────────────
-        paper1_comparison = self._paper1_comparison(per_class)
+        teg_sage_comparison = self._teg_sage_comparison(per_class)
 
         metrics = {
             "accuracy":      accuracy,
@@ -152,7 +152,7 @@ class Evaluator:
             "weighted_f1":   weighted_f1,
             "n_test_edges":  len(y_true),
             "per_class":     per_class,
-            "paper1_comparison": paper1_comparison,
+            "teg_sage_comparison": teg_sage_comparison,
         }
 
         with open(output_dir / "metrics.json", "w") as f:
@@ -170,7 +170,7 @@ class Evaluator:
         )
 
         # ── Console summary ───────────────────────────────────────────────────
-        self._print_summary(metrics, paper1_comparison, class_names)
+        self._print_summary(metrics, teg_sage_comparison, class_names)
 
         return metrics
 
@@ -239,26 +239,26 @@ class Evaluator:
         )
 
     @staticmethod
-    def _paper1_comparison(
+    def _teg_sage_comparison(
         per_class: dict[str, dict],
     ) -> dict[str, dict]:
         """Build TE-G-SAGE vs SHAP-GSD delta table for minority classes."""
         comparison: dict[str, dict] = {}
-        for cls_name, baseline_f1 in PAPER1_F1_BASELINES.items():
-            paper2_f1 = per_class.get(cls_name, {}).get("f1", None)
-            if paper2_f1 is not None:
+        for cls_name, baseline_f1 in TEG_SAGE_F1_BASELINES.items():
+            shap_gsd_f1 = per_class.get(cls_name, {}).get("f1", None)
+            if shap_gsd_f1 is not None:
                 comparison[cls_name] = {
-                    "paper1_f1":  baseline_f1,
-                    "paper2_f1":  paper2_f1,
-                    "delta":      round(paper2_f1 - baseline_f1, 4),
-                    "improved":   paper2_f1 > baseline_f1,
+                    "teg_sage_f1": baseline_f1,
+                    "shap_gsd_f1": shap_gsd_f1,
+                    "delta":       round(shap_gsd_f1 - baseline_f1, 4),
+                    "improved":    shap_gsd_f1 > baseline_f1,
                 }
         return comparison
 
     @staticmethod
     def _print_summary(
         metrics: dict,
-        paper1_comparison: dict,
+        teg_sage_comparison: dict,
         class_names: list[str],
     ) -> None:
         logger.info("=" * 65)
@@ -274,23 +274,23 @@ class Evaluator:
             if pc is None:
                 continue
             marker = ""
-            if name in paper1_comparison:
-                p1 = paper1_comparison[name]["paper1_f1"]
-                delta = paper1_comparison[name]["delta"]
+            if name in teg_sage_comparison:
+                p1 = teg_sage_comparison[name]["teg_sage_f1"]
+                delta = teg_sage_comparison[name]["delta"]
                 sign  = "+" if delta >= 0 else ""
-                marker = f"  [P1={p1:.3f}, Δ={sign}{delta:.3f}{'  ✓' if delta > 0 else '  ✗'}]"
+                marker = f"  [TE-G-SAGE={p1:.3f}, Δ={sign}{delta:.3f}{'  ✓' if delta > 0 else '  ✗'}]"
             logger.info(
                 f"  {name:<14s}  F1={pc['f1']:.4f}  "
                 f"P={pc['precision']:.4f}  R={pc['recall']:.4f}  "
                 f"n={pc['support']:,}{marker}"
             )
-        if paper1_comparison:
+        if teg_sage_comparison:
             logger.info("")
             logger.info("TE-G-SAGE minority-class targets:")
-            for name, row in paper1_comparison.items():
+            for name, row in teg_sage_comparison.items():
                 status = "IMPROVED" if row["improved"] else "NOT MET"
                 logger.info(
-                    f"  {name}: Paper1={row['paper1_f1']:.3f}  "
-                    f"Paper2={row['paper2_f1']:.4f}  [{status}]"
+                    f"  {name}: TE-G-SAGE={row['teg_sage_f1']:.3f}  "
+                    f"SHAP-GSD={row['shap_gsd_f1']:.4f}  [{status}]"
                 )
         logger.info("=" * 65)
