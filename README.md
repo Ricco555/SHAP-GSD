@@ -433,9 +433,8 @@ and reloaded automatically on subsequent runs when `--skip-pg-train` is passed.
 
 | Path | Contents |
 |------|----------|
-| `outputs/baselines/summary.json` | Per-class Fidelity+/− and runtime for all baselines |
-| `outputs/baselines/comparison_table.txt` | Formatted Table 2 (baselines only) |
-| `outputs/baselines/table2_with_shapgsd.txt` | Full Table 2 with SHAP-GSD column |
+| `outputs/baselines/summary.json` | Per-class Fidelity+/− and runtime for all explainers |
+| `outputs/baselines/comparison_table.txt` | Full Table 2 — SHAP-GSD and all five baselines |
 | `outputs/baselines/pgexplainer_ckpt.pt` | Trained PGExplainer MLP checkpoint |
 
 ### Upper-bound fanout reference
