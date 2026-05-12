@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 # RFC1918 private ranges — used for the is_internal node feature.
 # DATASET NOTE: UNSW-NB15 uses public IPs; this always returns False for that
-# dataset. Feature is correct for real deployments and Papers 3–4.
+# dataset. Feature is correct for real deployments with mixed-IP topology.
 _RFC1918_PREFIXES: tuple[tuple, ...] = (
     (10,),              # 10.0.0.0/8
     (172, 16, 31),      # 172.16.0.0/12  — stored as (a, lo, hi)

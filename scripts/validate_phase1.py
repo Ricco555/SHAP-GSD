@@ -204,17 +204,17 @@ def section2(cfg: dict) -> dict:
     except FileNotFoundError as e:
         fail(S, "timestamps loadable", str(e))
 
-    # Compare with Paper 1 reference splits
-    PAPER1_REF = {"train": 1_419_254, "val": 709_628, "test": 236_542}
+    # Compare with TE-G-SAGE reference splits
+    TEG_SAGE_REF = {"train": 1_419_254, "val": 709_628, "test": 236_542}
     print(f"\n  Split size comparison (after duplicate removal):")
-    print(f"  {'split':<6} {'actual':>12} {'paper1_ref':>12} {'delta':>10}")
-    for sp, ref in PAPER1_REF.items():
+    print(f"  {'split':<6} {'actual':>12} {'teg_sage_ref':>12} {'delta':>10}")
+    for sp, ref in TEG_SAGE_REF.items():
         actual = splits[sp]["n_edges"]
         delta  = actual - ref
         sign   = "+" if delta >= 0 else ""
         print(f"  {sp:<6} {actual:>12,} {ref:>12,} {sign}{delta:>9,}")
         status = "PASS" if abs(delta) < ref * 0.05 else "WARN"
-        _report(S, f"split size {sp} within 5% of Paper 1 ref",
+        _report(S, f"split size {sp} within 5% of TE-G-SAGE ref",
                 status,
                 f"actual={actual:,}  ref={ref:,}  delta={sign}{delta:,}")
 

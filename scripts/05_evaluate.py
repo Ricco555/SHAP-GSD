@@ -125,7 +125,7 @@ def main(
     )
 
     # ── 8. Warn if TE-G-SAGE targets not met ──────────────────────────────────
-    comparison = metrics.get("paper1_comparison", {})
+    comparison = metrics.get("teg_sage_comparison", {})
     not_improved = [k for k, v in comparison.items() if not v["improved"]]
     if not_improved:
         logger.warning(
