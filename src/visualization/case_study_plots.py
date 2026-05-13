@@ -81,7 +81,6 @@ def plot_feature_shap(
     ax.set_yticks(y)
     ax.set_yticklabels(names, fontsize=7)
     ax.set_xlabel("SHAP value φ", fontsize=8)
-    ax.set_title(f"(a) Feature-group SHAP — {class_name}", fontsize=9, fontweight="bold")
     ax.tick_params(axis="x", labelsize=7)
 
     # Annotation: sum(φ)
@@ -92,6 +91,9 @@ def plot_feature_shap(
     pos_patch = mpatches.Patch(color=_POS, label="Positive")
     neg_patch = mpatches.Patch(color=_NEG, label="Negative")
     ax.legend(handles=[pos_patch, neg_patch], fontsize=6, loc="lower right")
+    ax.text(0.5, -0.20, f"(a) Feature-group SHAP — {class_name}",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, fontweight="bold")
 
 
 # ── Panel B: 2-hop neighbourhood topology ────────────────────────────────────
@@ -150,8 +152,6 @@ def plot_topology(
                            arrowsize=10, connectionstyle="arc3,rad=0.1")
     nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=6)
 
-    ax.set_title(f"(b) 2-hop neighbourhood topology — {class_name}",
-                 fontsize=9, fontweight="bold")
     ax.axis("off")
 
     legend_handles = [
@@ -160,6 +160,9 @@ def plot_topology(
         if any(role.get(n) == r for n in G.nodes())
     ]
     ax.legend(handles=legend_handles, fontsize=6, loc="lower left")
+    ax.text(0.5, -0.08, f"(b) 2-hop neighbourhood topology — {class_name}",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, fontweight="bold")
 
 
 # ── Panel C: node SHAP ────────────────────────────────────────────────────────
@@ -200,7 +203,6 @@ def plot_node_shap(
     ax.set_yticks(y)
     ax.set_yticklabels(names_arr, fontsize=7)
     ax.set_xlabel("SHAP value φ", fontsize=8)
-    ax.set_title(f"(c) Node SHAP — {class_name}", fontsize=9, fontweight="bold")
     ax.tick_params(axis="x", labelsize=7)
 
     # Shade the novelty rows
@@ -208,6 +210,9 @@ def plot_node_shap(
                alpha=0.08, color="gold", zorder=0)
     ax.text(0.98, 0.98, "gold = novelty flags",
             transform=ax.transAxes, ha="right", va="top", fontsize=6, color="goldenrod")
+    ax.text(0.5, -0.20, f"(c) Node SHAP — {class_name}",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, fontweight="bold")
 
 
 # ── Panel D: temporal gap distribution ────────────────────────────────────────
@@ -222,8 +227,9 @@ def plot_temporal_gaps(
     if len(neighbor_gap_seconds) == 0:
         ax.text(0.5, 0.5, "No neighbour edges sampled",
                 ha="center", va="center", transform=ax.transAxes, fontsize=9)
-        ax.set_title(f"(d) Temporal neighbour gap — {class_name}",
-                     fontsize=9, fontweight="bold")
+        ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=8, fontweight="bold")
         return
 
     in_window = neighbor_gap_seconds[neighbor_gap_seconds <= W_seconds]
@@ -245,12 +251,14 @@ def plot_temporal_gaps(
     ax.set_xscale("log")
     ax.set_xlabel("Gap to target edge (minutes, log scale)", fontsize=8)
     ax.set_ylabel("Edge count", fontsize=8)
-    ax.set_title(f"(d) Temporal neighbour gap — {class_name}\n"
-                 f"φ_T ≈ 0: {len(in_window)}/{len(neighbor_gap_seconds)} "
+    ax.set_title(f"φ_T ≈ 0: {len(in_window)}/{len(neighbor_gap_seconds)} "
                  f"neighbours within W={W_seconds:.0f} s",
-                 fontsize=9, fontweight="bold")
+                 fontsize=8)
     ax.tick_params(labelsize=7)
     ax.legend(fontsize=6)
+    ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, fontweight="bold")
 
 
 # ── Composite figure ──────────────────────────────────────────────────────────
@@ -283,8 +291,7 @@ def make_case_study_figure(
     (ax_feat, ax_topo), (ax_node, ax_temp) = axes
 
     fig.suptitle(
-        f"SHAP-GSD Case Study — {class_name}"
-        + (f"  (EID {global_eid})" if global_eid else ""),
+        f"SHAP-GSD Case Study — {class_name}",
         fontsize=11, fontweight="bold", y=1.01,
     )
 
@@ -323,7 +330,7 @@ def make_case_study_figure(
     gaps = np.array(topo.get("all_neighbor_gaps_s", []))
     plot_temporal_gaps(ax_temp, gaps, W_seconds=W_seconds, class_name=class_name)
 
-    plt.tight_layout()
+    plt.tight_layout(h_pad=3.5)
     return fig
 
 
