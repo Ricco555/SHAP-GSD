@@ -197,7 +197,7 @@ def main() -> None:
             id2ip=id2ip,
             class_name=class_name,
             W_seconds=W_seconds,
-            top_feat=20,
+            top_feat=15,
             global_eid=global_eid,
         )
 
