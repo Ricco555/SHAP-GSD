@@ -63,7 +63,7 @@ def plot_feature_shap(
     ax: plt.Axes,
     group_names: list[str],
     shap_values: np.ndarray,
-    top_n: int = 20,
+    top_n: int = 15,
     class_name: str = "",
 ) -> None:
     """Horizontal bar chart of the top_n feature groups by |φ|."""
@@ -79,21 +79,22 @@ def plot_feature_shap(
     ax.barh(y, values, color=colours, edgecolor="white", linewidth=0.4)
     ax.axvline(0, color="black", linewidth=0.6)
     ax.set_yticks(y)
-    ax.set_yticklabels(names, fontsize=7)
-    ax.set_xlabel("SHAP value φ", fontsize=8)
-    ax.tick_params(axis="x", labelsize=7)
+    ax.set_yticklabels(names, fontsize=10)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", pad=5)
+    ax.set_xlabel("SHAP value φ", fontsize=10)
 
     # Annotation: sum(φ)
     ax.text(0.98, 0.02, f"Σφ = {values.sum():.3f}",
-            transform=ax.transAxes, ha="right", va="bottom", fontsize=7,
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
             color="dimgray")
 
     pos_patch = mpatches.Patch(color=_POS, label="Positive")
     neg_patch = mpatches.Patch(color=_NEG, label="Negative")
-    ax.legend(handles=[pos_patch, neg_patch], fontsize=6, loc="lower right")
+    ax.legend(handles=[pos_patch, neg_patch], fontsize=9, loc="lower right")
     ax.text(0.5, -0.20, f"(a) Feature-group SHAP — {class_name}",
             transform=ax.transAxes, ha="center", va="top",
-            fontsize=8, fontweight="bold")
+            fontsize=9, fontweight="bold")
 
 
 # ── Panel B: 2-hop neighbourhood topology ────────────────────────────────────
@@ -150,7 +151,7 @@ def plot_topology(
     nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.4,
                            edge_color="gray", arrows=True,
                            arrowsize=10, connectionstyle="arc3,rad=0.1")
-    nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=6)
+    nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=8)
 
     ax.axis("off")
 
@@ -159,10 +160,10 @@ def plot_topology(
         for r in ["target_src", "target_dst", "hop1", "hop2"]
         if any(role.get(n) == r for n in G.nodes())
     ]
-    ax.legend(handles=legend_handles, fontsize=6, loc="lower left")
+    ax.legend(handles=legend_handles, fontsize=9, loc="lower left")
     ax.text(0.5, -0.08, f"(b) 2-hop neighbourhood topology — {class_name}",
             transform=ax.transAxes, ha="center", va="top",
-            fontsize=8, fontweight="bold")
+            fontsize=9, fontweight="bold")
 
 
 # ── Panel C: node SHAP ────────────────────────────────────────────────────────
@@ -201,18 +202,19 @@ def plot_node_shap(
     ax.barh(y, values_arr, color=colours, edgecolor="white", linewidth=0.4)
     ax.axvline(0, color="black", linewidth=0.6)
     ax.set_yticks(y)
-    ax.set_yticklabels(names_arr, fontsize=7)
-    ax.set_xlabel("SHAP value φ", fontsize=8)
-    ax.tick_params(axis="x", labelsize=7)
+    ax.set_yticklabels(names_arr, fontsize=10)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", pad=5)
+    ax.set_xlabel("SHAP value φ", fontsize=10)
 
     # Shade the novelty rows
     ax.axhspan(len(names_arr) - 2 - 0.4, len(names_arr) - 1 + 0.4,
                alpha=0.08, color="gold", zorder=0)
     ax.text(0.98, 0.98, "gold = novelty flags",
-            transform=ax.transAxes, ha="right", va="top", fontsize=6, color="goldenrod")
+            transform=ax.transAxes, ha="right", va="top", fontsize=9, color="goldenrod")
     ax.text(0.5, -0.20, f"(c) Node SHAP — {class_name}",
             transform=ax.transAxes, ha="center", va="top",
-            fontsize=8, fontweight="bold")
+            fontsize=9, fontweight="bold")
 
 
 # ── Panel D: temporal gap distribution ────────────────────────────────────────
@@ -249,16 +251,16 @@ def plot_temporal_gaps(
     ax.axvline(W_seconds / 60, color="red", linestyle="--", linewidth=1.2,
                label=f"W = {W_seconds:.0f} s")
     ax.set_xscale("log")
-    ax.set_xlabel("Gap to target edge (minutes, log scale)", fontsize=8)
-    ax.set_ylabel("Edge count", fontsize=8)
     ax.set_title(f"φ_T ≈ 0: {len(in_window)}/{len(neighbor_gap_seconds)} "
                  f"neighbours within W={W_seconds:.0f} s",
-                 fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.legend(fontsize=6)
+                 fontsize=10)
+    ax.set_xlabel("Gap to target edge (minutes, log scale)", fontsize=10)
+    ax.set_ylabel("Edge count", fontsize=10)
+    ax.tick_params(labelsize=10)
+    ax.legend(fontsize=9)
     ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
             transform=ax.transAxes, ha="center", va="top",
-            fontsize=8, fontweight="bold")
+            fontsize=9, fontweight="bold")
 
 
 # ── Composite figure ──────────────────────────────────────────────────────────
@@ -269,7 +271,7 @@ def make_case_study_figure(
     id2ip: dict[int, str],
     class_name: str,
     W_seconds: float = 60.0,
-    top_feat: int = 20,
+    top_feat: int = 15,
     global_eid: int | None = None,
 ) -> plt.Figure:
     """Build the 2×2 four-panel case study figure.
@@ -287,7 +289,7 @@ def make_case_study_figure(
     Returns:
         matplotlib Figure (not yet saved).
     """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     (ax_feat, ax_topo), (ax_node, ax_temp) = axes
 
     fig.suptitle(

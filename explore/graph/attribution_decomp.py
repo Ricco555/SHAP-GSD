@@ -34,7 +34,7 @@ OUT_DIR = ROOT / "outputs" / "figures" / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM = "attribution_decomp"
-LABEL_FS = 9
+LABEL_FS = 11
 _PHI_F = "#2a9d8f"
 _PHI_T = "#e9c46a"
 _PHI_N = "#e76f51"
@@ -94,8 +94,8 @@ def main() -> None:
     mean_phi_t = np.array([r[4] for r in rows])
 
     # ------------------------------------------------------------------ figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
-    fig.subplots_adjust(wspace=0.35)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7))
+    fig.subplots_adjust(wspace=0.55)
 
     # --- Left: stacked horizontal bar ---
     y = np.arange(len(classes))
@@ -103,10 +103,11 @@ def main() -> None:
     ax1.barh(y, frac_t, left=frac_f, color=_PHI_T, label=r"$\varphi_T$ (temporal)")
     ax1.barh(y, frac_n, left=frac_f + frac_t, color=_PHI_N, label=r"$\varphi_N$ (node/structure)")
 
-    # Per-class absolute-value annotations
+    # Per-class absolute-value annotations (φ_T omitted — near-zero across all classes)
     for i, (cls, ff, ft, fn, _) in enumerate(rows):
-        label = (f"φ_F={ff:.2f}  φ_T={ft:.4f}  φ_N={fn:.2f}")
-        ax1.text(1.01, y[i], label, va="center", fontsize=6.5, color=_GRAY)
+        label = f"φ_F={ff:.2f}  φ_N={fn:.2f}"
+        ax1.text(1.02, y[i], label, va="center", fontsize=9,
+                 color=_GRAY, transform=ax1.get_yaxis_transform())
 
     ax1.set_yticks(y)
     ax1.set_yticklabels(classes, fontsize=LABEL_FS)
@@ -142,6 +143,7 @@ def main() -> None:
 
     ax2.set_yticks(np.arange(len(classes)))
     ax2.set_yticklabels(classes, fontsize=LABEL_FS)
+    ax2.tick_params(axis="y", pad=8)
     ax2.set_xlabel(r"Absolute $\varphi_T$ per flow", fontsize=LABEL_FS)
     ax2.tick_params(labelsize=LABEL_FS)
     ax2.set_title(r"Per-class $\varphi_T$ distribution", fontsize=LABEL_FS + 1)

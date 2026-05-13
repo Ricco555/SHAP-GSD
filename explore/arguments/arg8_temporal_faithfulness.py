@@ -39,7 +39,7 @@ OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "arg8_temporal_faithfulness"
-LABEL_FS = 9
+LABEL_FS = 11
 _TEAL    = "#2a9d8f"
 _CORAL   = "#e76f51"
 _GRAY    = "#888888"
@@ -113,7 +113,7 @@ def main() -> None:
     cls_sorted = sorted(per_class, key=lambda c: per_class[c]["future_mean"], reverse=True)
 
     # ------------------------------------------------------------------ figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7))
     fig.subplots_adjust(wspace=0.42)
 
     # Left: temporal offset histogram
@@ -157,7 +157,7 @@ def main() -> None:
     for i, (c, lr) in enumerate(zip(cls_sorted, lr_pct)):
         ax2.text(max(future_m) * 1.05, y[i] + bar_h / 2,
                  f"{lr:.1f}% leaked",
-                 va="center", fontsize=6.5, color=_GRAY)
+                 va="center", fontsize=9, color=_GRAY)
 
     ax2.set_xscale("log")
     ax2.set_yticks(y)
