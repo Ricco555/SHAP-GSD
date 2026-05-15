@@ -161,8 +161,7 @@ def main() -> None:
         ax1.set_xticks(range(0, 24, 4))
         ax1.text(0.02, 0.97,
                  "Controlled lab env. (UNSW-NB15, 2 days)\n"
-                 "Full diurnal pattern not recoverable;\n"
-                 "Paper 3 tests on multi-week dataset.",
+                 "Full diurnal pattern not recoverable.",
                  transform=ax1.transAxes, fontsize=7, va="top",
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_GRAY, alpha=0.85))
     else:
