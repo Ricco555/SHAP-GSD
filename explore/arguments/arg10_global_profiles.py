@@ -3,8 +3,8 @@ arg10_global_profiles.py — Argument 10: "Global Profiles as Proxy Ground Truth
 ================================================================================
 What it shows:
   Claim: SHAP-GSD per-class global feature-group rankings match independently
-  derived literature profiles (Moustafa & Slay 2015). Spearman ρ > 0.7 for
-  most classes validates global coherence.
+  derived literature profiles (Moustafa & Slay 2015). Only one class (Backdoor)
+  reaches ρ > 0.7; mean ρ = 0.221 across all classes.
 
 Panels:
   Left  (ax1) — Heatmap: classes (rows) × top-12 groups (cols), cell = mean
@@ -224,7 +224,8 @@ def main() -> None:
         "----",
         "SHAP-GSD per-class feature-group rankings are compared against independently",
         "derived literature profiles (Moustafa & Slay 2015, UNSW-NB15 attack descriptions).",
-        "Spearman ρ measures cross-source rank correlation; ρ > 0.7 confirms global coherence.",
+        "Spearman ρ measures cross-source rank correlation; only one class (Backdoor) reaches ρ > 0.7,",
+        "so the threshold cannot be used as a blanket validation claim.",
         "",
         "KEY FINDINGS",
         "------------",
@@ -255,10 +256,13 @@ def main() -> None:
         "Moustafa & Slay (2015) literature profiles provides independent validation",
         "that global SHAP-GSD profiles are meaningful. For Recon, MIN_TTL ranks #1",
         "in both SHAP-GSD and the literature; for DoS and Generic, volumetric and",
-        "DNS groups match expectations. Weaker ρ for Backdoor reflects a genuine",
-        "finding: SHAP-GSD identifies MIN_IP_PKT_LEN as the dominant signal while",
-        "literature lists L7_PROTO — both are plausible given the class's low accuracy",
-        "(3% correct flows) and feature degeneracy (L7_PROTO constant=1 for most flows).",
+        "DNS groups match expectations. The strongest agreement is Backdoor (ρ = 0.734);",
+        "the discrepancy at rank-1 — SHAP-GSD identifies MIN_IP_PKT_LEN while literature",
+        "lists L7_PROTO — is plausible given L7_PROTO's near-constant value for most",
+        "Backdoor flows (L7_PROTO = 1 throughout), which suppresses its variance-based",
+        "importance. The five classes below ρ = 0.4 reflect genuine distributional",
+        "differences between the 2015 raw-traffic characterisation and the NetFlow",
+        "feature set used here.",
         "",
         "CAPTION",
         "-------",
