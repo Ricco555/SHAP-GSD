@@ -23,6 +23,10 @@ git-push-guide.txt
 # exploratory scripts — local only
 explore/
 
+# dashboard — node_modules only; source is committed
+dashboard/node_modules/
+dashboard/.vite/
+
 # environment secrets
 .env
 .env.*
