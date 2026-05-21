@@ -1,8 +1,10 @@
 # SHAP-GSD Dashboard
 
-Interactive graphical abstract for the SHAP-GSD paper.
-Cycles through all 9 canonical case studies (one per attack class) with
-per-case feature-group attribution, temporal neighbourhood, and node-novelty panels.
+A standalone interactive web app that serves as a graphical abstract for the SHAP-GSD paper.
+It cycles through all 9 canonical case studies — one per attack class — and displays the
+three-granularity SHAP attribution panels side by side: feature-group (φ_F), temporal
+neighbourhood (φ_T), and node-novelty (φ_N). Intended for conference demos and as a
+companion to the paper figures.
 
 ## Requirements
 
@@ -50,7 +52,7 @@ docker compose down   # stop and remove the container
 docker compose up     # restart without rebuilding
 ```
 
-The container serves the pre-built static bundle via nginx — no Node.js needed at runtime.
+The container serves the pre-built static bundle via Caddy — no Node.js needed at runtime.
 
 ## Dependencies
 
