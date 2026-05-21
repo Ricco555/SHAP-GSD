@@ -40,15 +40,17 @@ npx serve dist
 
 ```bash
 cd dashboard
-
-# build the image
-docker build -t shap-gsd-dashboard .
-
-# run on port 8080 (--name keeps Docker from generating a random container name)
-docker run --name shap-gsd-dashboard -p 8080:80 shap-gsd-dashboard
+docker compose up --build
 ```
 
-Opens at `http://localhost:8080`. The container serves the pre-built static bundle via nginx — no Node.js needed at runtime.
+Opens at `http://localhost:8080`. The container is always named `shap-gsd-dashboard` (set in `docker-compose.yml`).
+
+```bash
+docker compose down   # stop and remove the container
+docker compose up     # restart without rebuilding
+```
+
+The container serves the pre-built static bundle via nginx — no Node.js needed at runtime.
 
 ## Dependencies
 
