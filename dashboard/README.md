@@ -44,8 +44,8 @@ cd dashboard
 # build the image
 docker build -t shap-gsd-dashboard .
 
-# run on port 8080
-docker run -p 8080:80 shap-gsd-dashboard
+# run on port 8080 (--name keeps Docker from generating a random container name)
+docker run --name shap-gsd-dashboard -p 8080:80 shap-gsd-dashboard
 ```
 
 Opens at `http://localhost:8080`. The container serves the pre-built static bundle via nginx — no Node.js needed at runtime.
