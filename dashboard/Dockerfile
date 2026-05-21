@@ -16,4 +16,4 @@ FROM caddy:alpine
 COPY --from=builder /app/dist /usr/share/caddy
 COPY Caddyfile /etc/caddy/Caddyfile
 
-EXPOSE 80
+EXPOSE ${PORT:-80}
