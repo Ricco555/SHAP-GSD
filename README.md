@@ -466,6 +466,8 @@ PGExplainer[N]/GNNShap[N]/GraphSVX[N]/EdgeSHAPer[N] are directly comparable.
 
 ## Dashboard
 
+**Live:** <https://shap-gsd.i4s-consult.eu/>
+
 An interactive web app for exploring the SHAP-GSD results is included in `dashboard/`.
 It cycles through all 9 attack-class case studies and renders the three-granularity
 attribution panels (φ_F, φ_T, φ_N) side by side. Useful for conference demos and

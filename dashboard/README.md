@@ -1,5 +1,7 @@
 # SHAP-GSD Dashboard
 
+**Live:** <https://shap-gsd.i4s-consult.eu/>
+
 A standalone interactive web app that serves as a graphical abstract for the SHAP-GSD paper.
 It cycles through all 9 canonical case studies — one per attack class — and displays the
 three-granularity SHAP attribution panels side by side: feature-group (φ_F), temporal
