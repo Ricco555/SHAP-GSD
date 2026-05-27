@@ -1,5 +1,7 @@
 # SHAP-GSD
 
+**Version 2.0.0**
+
 Multi-granularity Shapley explanations for GNN-based Network Intrusion Detection.
 
 Publication pending. Extends TE-G-SAGE with IP-level nodes,
@@ -30,6 +32,37 @@ and place it at:
 ```
 data/NF-UNSW-NB15-v3.csv
 ```
+
+### Adding another NetFlow dataset
+
+The pipeline is dataset-agnostic as of v2.0.0. To run it against any NF-* v3
+CSV:
+
+1. Drop the CSV into `data/`:
+
+   ```
+   data/NF-BoT-IoT-v3.csv
+   ```
+
+2. **Column contract:** the last two columns of the CSV must be named `Label`
+   (binary 0/1) and `Attack` (string class name). All standard NF-* v3 files
+   already follow this convention.
+
+3. **Class enumeration is automatic.** `Preprocessor.build_label_map(df)`
+   assigns `Benign=0` and numbers all other classes alphabetically. The
+   resulting mapping is persisted as `artifacts/label_map.json` (or
+   `runs/<run_id>/artifacts/label_map.json` when using the orchestrator). All
+   downstream code reads `num_classes` from `len(label_map)` — nothing is
+   hardcoded.
+
+4. Run the pipeline with the single-command orchestrator:
+
+   ```bash
+   python scripts/run_dataset.py --csv data/NF-BoT-IoT-v3.csv
+   ```
+
+   Each dataset gets its own isolated `runs/<run_id>/` directory so results
+   never collide across datasets.
 
 ---
 
@@ -89,6 +122,36 @@ from `configs/default.yaml`.
 ---
 
 ## Step-by-step
+
+### Multi-dataset orchestrator
+
+The preferred way to run the full pipeline against any dataset is the
+orchestrator. It derives a run ID from the CSV name, creates an isolated
+`runs/<run_id>/` directory, writes a minimal per-dataset config overlay, and
+runs all phases in order.
+
+```bash
+# Full pipeline for one dataset (phases 01-13):
+python scripts/run_dataset.py --csv data/NF-UNSW-NB15-v3.csv
+
+# Only pre-process and build the graph (phases 01-02):
+python scripts/run_dataset.py --csv data/dataset01.csv --from-phase 1 --to-phase 2
+
+# Multiple datasets in one invocation (each gets its own run directory):
+python scripts/run_dataset.py --csv data/a.csv data/b.csv
+
+# Skip the pytest gate after phase 02 (not recommended for production):
+python scripts/run_dataset.py --csv data/dataset01.csv --skip-tests
+
+# Overwrite an existing per-dataset config (preserves manual edits by default):
+python scripts/run_dataset.py --csv data/dataset01.csv --force-config
+```
+
+The orchestrator sets `SHAP_GSD_CONFIG=configs/experiment_<run_id>.yaml` in
+the environment for every sub-process, so individual scripts and pytest pick up
+the correct per-dataset config automatically.
+
+---
 
 ### Phase 1 — Data pipeline
 
@@ -338,19 +401,38 @@ balancer:
 | `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
 | `outputs/baselines/` | Baseline comparison results and Table 2 |
 
-Runtime-generated directories (`feature_store/`, `graphs/`, `artifacts/`,
-`outputs/`) are excluded from version control.
+**Output locations**
+
+When running via `scripts/run_dataset.py`, all outputs are written under
+`runs/<run_id>/` (e.g. `runs/nf_unsw_nb15_v3/feature_store/`,
+`runs/nf_unsw_nb15_v3/artifacts/`). Each dataset's results are fully isolated.
+
+The bare `feature_store/`, `artifacts/`, `outputs/`, `graphs/`, and
+`node_state_snapshots/` directories at repo root are the legacy/default
+locations used by the UNSW reference run when phase scripts are invoked
+directly with `configs/experiment_unsw.yaml` and no `run.dir` is set.
+
+Runtime-generated directories (`runs/`, `feature_store/`, `graphs/`,
+`artifacts/`, `outputs/`) are excluded from version control.
 
 ---
 
 ## Tests
 
 ```bash
-# Gate tests — must pass before training
+# Gate tests — must pass before training (targets the default UNSW run)
 pytest tests/ -v --ignore=tests/test_shap_axioms.py
 
 # SHAP axiom tests — run only after Phase 6 is implemented
 pytest tests/test_shap_axioms.py -v
+```
+
+Tests resolve paths via the `SHAP_GSD_CONFIG` environment variable, which
+defaults to `configs/experiment_unsw.yaml`. To run tests against a different
+dataset's run, set the variable before invoking pytest:
+
+```bash
+SHAP_GSD_CONFIG=configs/experiment_nf_bot_iot_v3.yaml pytest tests/ -v
 ```
 
 | Test file | What it checks |
