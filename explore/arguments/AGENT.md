@@ -3,14 +3,42 @@
 This subfolder (`explore/arguments/`) contains scripts that build the ten SHAP-level
 methodology arguments for Paper 2. Six arguments are implemented here (Paper 2 scope);
 four are deferred to Papers 3–4 (see `graph_arguments_plan.md`).
-Scripts are **not committed to git** (`.gitignore` excludes `explore/`).
-All figures are written to `outputs/figures/arguments/`.
+Scripts are committed to git (aligned with v2.0.0 multi-dataset workflow).
+All figures are written under `<outputs_dir>/figures/arguments/`.
+
+---
+
+## Choosing the dataset to analyse
+
+Set `SHAP_GSD_CONFIG` to select which dataset run's outputs the scripts read from
+(default: `configs/experiment_unsw.yaml`, bare `outputs/` paths).
+
+```bash
+SHAP_GSD_CONFIG=configs/experiment_dataset02.yaml python explore/arguments/arg1_semantic_grouping.py
+```
+
+---
+
+## Script classification
+
+| Script | Status |
+|--------|--------|
+| `arg1_semantic_grouping.py` | Borderline — hardcodes some colors but logic is generic |
+| `arg2_absence_driven.py` | **UNSW-specific** — hardcodes dominant-neg-group lookup per class |
+| `arg3_mitre_port.py` | **UNSW-specific** — hardcodes MITRE port-service table |
+| `arg5_node_state.py` | **UNSW-specific** — hardcodes class-specific expected patterns |
+| `arg8_temporal_faithfulness.py` | Borderline — logic is generic; W_S constant is configurable |
+| `arg10_global_profiles.py` | **UNSW-specific** — hardcodes literature profile rankings |
+
+Class-name decoupling deferred to EX-C (will be addressed when a second dataset exists).
 
 ---
 
 ## Output location
 ```python
-OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
+from explore._paths import paths
+_P = paths()
+OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 ```
 
@@ -18,6 +46,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 Scripts sit at `explore/arguments/`, three levels from repo root:
 ```python
 ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
 ```
 
 ## Mandatory conventions (same as `explore/AGENT.md`)

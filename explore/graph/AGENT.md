@@ -2,14 +2,37 @@
 
 This subfolder (`explore/graph/`) contains scripts that visualise the three-granularity
 SHAP-GSD attribution decomposition (φ_F, φ_T, φ_N) and the W-sensitivity null result.
-Scripts are **not committed to git** (`.gitignore` excludes `explore/`).
-All figures are written to `outputs/figures/graph/` (separate from `outputs/figures/explore/`).
+Scripts are committed to git (aligned with v2.0.0 multi-dataset workflow).
+All figures are written under `<outputs_dir>/figures/graph/`.
+
+---
+
+## Choosing the dataset to analyse
+
+Set `SHAP_GSD_CONFIG` to select which dataset run's outputs the scripts read from
+(default: `configs/experiment_unsw.yaml`, bare `outputs/` paths).
+
+```bash
+SHAP_GSD_CONFIG=configs/experiment_dataset02.yaml python explore/graph/attribution_decomp.py
+```
+
+---
+
+## Script classification
+
+| Script | Status |
+|--------|--------|
+| `attribution_decomp.py` | Dataset-agnostic |
+| `w_sensitivity_full.py` | Dataset-agnostic |
+| `topology_panel.py` | Borderline — hardcodes candidate EIDs per class; logic is generic |
 
 ---
 
 ## Output location
 ```python
-OUT_DIR = ROOT / "outputs" / "figures" / "graph"
+from explore._paths import paths
+_P = paths()
+OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 ```
 

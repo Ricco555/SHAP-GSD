@@ -1,7 +1,40 @@
 # SHAP-GSD Explore Folder — Agent Instructions
 
-This folder contains exploratory scripts that are **not committed to git** (`.gitignore` excludes `explore/`).
-All figures and reasoning files are written to `outputs/figures/explore/`.
+This folder contains exploratory scripts committed to git (aligned with v2.0.0 multi-dataset workflow).
+All figures and reasoning files are written under `<outputs_dir>/figures/explore/`, where
+`<outputs_dir>` resolves from `SHAP_GSD_CONFIG` (default: `outputs/`).
+
+---
+
+## Choosing the dataset to analyse
+
+Set the `SHAP_GSD_CONFIG` environment variable to select which dataset run's outputs the scripts
+read from (default: `configs/experiment_unsw.yaml`, which resolves to bare `outputs/` paths).
+
+```bash
+# Default — reads from outputs/ (existing UNSW reference run)
+python explore/table2_figure.py
+
+# Per-run dataset — reads from runs/dataset02/outputs/
+SHAP_GSD_CONFIG=configs/experiment_dataset02.yaml python explore/table2_figure.py
+```
+
+---
+
+## Script classification
+
+| Script | Status |
+|--------|--------|
+| `table2_figure.py` | Dataset-agnostic |
+| `class_analysis.py` | Dataset-agnostic |
+| `fidelity_distributions.py` | Dataset-agnostic |
+| `method_comparison_figure.py` | Dataset-agnostic |
+| `w_ablation_figure.py` | Dataset-agnostic |
+| `shap_scatter.py` | Dataset-agnostic |
+| `node_shap_convergence.py` | Dataset-agnostic |
+| `case_studies.py` | **UNSW-specific** — hardcoded paper exemplar EIDs |
+
+Subfolder scripts: see `arguments/AGENT.md` and `graph/AGENT.md`.
 
 ---
 
@@ -17,7 +50,9 @@ and produce charts and textual reasoning for the paper authors.
 
 ### 1. Output location
 ```python
-OUT_DIR = ROOT / "outputs" / "figures" / "explore"
+from explore._paths import paths
+_P = paths()
+OUT_DIR = _P["figures"] / "explore"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 ```
 
