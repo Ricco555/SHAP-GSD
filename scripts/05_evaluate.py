@@ -96,6 +96,17 @@ def main(
     nsm = NodeStateManager.load(repo_root / cfg["graph"]["node_state_dir"])
 
     # ── 6. Build model and load checkpoint ────────────────────────────────────
+    # Derive num_classes from label_map.json (produced by 01_preprocess.py).
+    _lmap_for_model = (
+        label_map_path
+        if label_map_path is not None
+        else repo_root / cfg["output"]["artifacts_dir"] / "label_map.json"
+    )
+    with open(_lmap_for_model) as f:
+        _label_map = json.load(f)
+    cfg["model"]["num_classes"] = len(_label_map)
+    logger.info(f"num_classes={cfg['model']['num_classes']} (from {_lmap_for_model})")
+
     m = cfg["model"]
     model = EdgeAwareGraphSAGE(
         node_in_dim=m["node_state_dim"],

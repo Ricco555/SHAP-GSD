@@ -292,11 +292,18 @@ def main() -> None:
         np.load(ROOT / cfg["output"]["class_weights_path"])
     ).float()
     train_labels = np.load(fs_dir / "train" / "labels.npy")
-    train_label_counts = np.bincount(
-        train_labels, minlength=cfg["model"]["num_classes"]
-    ).astype(np.int64)
 
+    # Derive num_classes from label_map.json (produced by 01_preprocess.py).
     label_map_path = ROOT / cfg["output"]["artifacts_dir"] / "label_map.json"
+    with open(label_map_path) as f:
+        label_map: dict[str, int] = json.load(f)
+    num_classes = len(label_map)
+    cfg["model"]["num_classes"] = num_classes
+    logger.info("num_classes=%d (loaded from %s)", num_classes, label_map_path)
+
+    train_label_counts = np.bincount(
+        train_labels, minlength=num_classes
+    ).astype(np.int64)
 
     # ── Load best params into base cfg (same as 04_train.py does) ─────────────
     bp_path = ROOT / cfg["output"]["artifacts_dir"] / "best_params.json"
@@ -381,7 +388,18 @@ def main() -> None:
         }
 
     lines += ["", "Per-class F1 (minority classes only):"]
-    minority = ["Backdoor", "DoS", "Worms", "Analysis", "Shellcode"]
+    # Derive minority class names from training label counts and threshold.
+    # A class is "minority" if its training-split count is below the threshold.
+    minority_threshold = cfg["model"].get("minority_class_threshold", 5000)
+    int_to_name = {v: k for k, v in label_map.items()}
+    minority = sorted(
+        int_to_name[cls_int]
+        for cls_int, cnt in enumerate(train_label_counts)
+        if cnt < minority_threshold and cls_int in int_to_name
+    )
+    logger.info(
+        "Minority classes (n_train < %d): %s", minority_threshold, minority
+    )
     header = f"  {'variant':<35}" + "".join(f"  {c:>10}" for c in minority)
     lines.append(header)
     lines.append("-" * (35 + 14 * len(minority) + 2))

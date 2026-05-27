@@ -37,15 +37,23 @@ from src.visualization.metrics_plots import plot_confusion_matrix, plot_roc_curv
 
 logger = logging.getLogger(__name__)
 
-# TE-G-SAGE per-class F1 baselines (class int → F1).
-# Update these keys if the label mapping for this dataset differs.
+# TE-G-SAGE per-class F1 baselines for NF-UNSW-NB15-v3.
+# These are UNSW-specific and are only printed when the class names match
+# this dataset (see Evaluator._compare_to_baselines).
 TEG_SAGE_F1_BASELINES: dict[str, float] = {
     "Backdoor": 0.071,
     "DoS":      0.26,
 }
 
+# Class names that identify NF-UNSW-NB15-v3 — used to gate baseline comparison.
+_UNSW_CLASS_NAMES: frozenset[str] = frozenset(TEG_SAGE_F1_BASELINES.keys()) | {
+    "Benign", "Generic", "Exploits", "Fuzzers", "Recon",
+    "Analysis", "Shellcode", "Worms",
+}
+
 # Default class names for NF-UNSW-NB15-v3 (Label 0-9).
-# Override via label_map.json if present.
+# This is a FALLBACK for when no label_map.json is provided.
+# All supported datasets should supply a label_map.json from 01_preprocess.py.
 DEFAULT_CLASS_NAMES: list[str] = [
     "Benign",       # 0
     "Generic",      # 1
@@ -242,7 +250,24 @@ class Evaluator:
     def _teg_sage_comparison(
         per_class: dict[str, dict],
     ) -> dict[str, dict]:
-        """Build TE-G-SAGE vs SHAP-GSD delta table for minority classes."""
+        """Build TE-G-SAGE vs SHAP-GSD delta table for NF-UNSW-NB15-v3 minority classes.
+
+        Returns an empty dict when the class names do not match the UNSW dataset
+        (i.e. when running on a different NetFlow dataset), so that no misleading
+        comparison is printed.
+        """
+        # Only produce baseline comparison if this looks like the UNSW dataset.
+        # We check that all baseline class names are present in per_class.
+        if not all(cls in per_class for cls in TEG_SAGE_F1_BASELINES):
+            logger.debug(
+                "Skipping TE-G-SAGE baseline comparison: "
+                "class names do not match NF-UNSW-NB15-v3 — "
+                "expected %s, got %s",
+                sorted(TEG_SAGE_F1_BASELINES.keys()),
+                sorted(per_class.keys()),
+            )
+            return {}
+
         comparison: dict[str, dict] = {}
         for cls_name, baseline_f1 in TEG_SAGE_F1_BASELINES.items():
             shap_gsd_f1 = per_class.get(cls_name, {}).get("f1", None)

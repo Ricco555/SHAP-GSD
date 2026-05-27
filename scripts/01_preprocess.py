@@ -60,11 +60,25 @@ def main(cfg: dict) -> None:
     train_data, val_data, test_data = pre.fit_transform(df)
     del df  # free memory — 2.4M rows × 55 cols no longer needed
 
-    # ── 3. Save transformers ───────────────────────────────────────────────────
+    # ── 3. Save label map ─────────────────────────────────────────────────────
+    artifacts_dir = repo_root / cfg["output"]["artifacts_dir"]
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    label_map_path = artifacts_dir / "label_map.json"
+    pre.save_label_map(label_map_path)
+
+    # Log per-class counts in the training split for sanity checking
+    train_labels = train_data["labels"]
+    int_to_name = {v: k for k, v in pre.label_map.items()}
+    logger.info("Training split class distribution:")
+    unique, counts = np.unique(train_labels, return_counts=True)
+    for cls_int, cnt in zip(unique.tolist(), counts.tolist()):
+        logger.info(f"  {int_to_name.get(cls_int, str(cls_int)):<20s} (int={cls_int})  n={cnt:,}")
+
+    # ── 4. Save transformers ───────────────────────────────────────────────────
     transformers_dir = repo_root / cfg["output"]["transformers_dir"]
     pre.save_transformers(transformers_dir)
 
-    # ── 4. Write feature stores ───────────────────────────────────────────────
+    # ── 5. Write feature stores ───────────────────────────────────────────────
     fs_root = repo_root / cfg["output"]["feature_store_dir"]
     for split_name, data in [("train", train_data), ("val", val_data), ("test", test_data)]:
         write_feature_store(
@@ -75,7 +89,7 @@ def main(cfg: dict) -> None:
             labels=data["labels"],
         )
 
-    # ── 5. Save split indices ─────────────────────────────────────────────────
+    # ── 6. Save split indices ─────────────────────────────────────────────────
     split_indices = pre.split_indices_dict()
     si_path = repo_root / cfg["output"]["split_indices_path"]
     with open(si_path, "w") as f:
@@ -87,7 +101,7 @@ def main(cfg: dict) -> None:
         f"test: {split_indices['splits']['test']['n_edges']:,}"
     )
 
-    # ── 6. Build and save feature groups ──────────────────────────────────────
+    # ── 7. Build and save feature groups ──────────────────────────────────────
     ohe_names = list(pre.ohe.get_feature_names_out(CATEGORICAL_COLS))
     fg = FeatureGrouping.build(
         numeric_cols_kept=pre.numeric_cols_kept,
@@ -98,7 +112,7 @@ def main(cfg: dict) -> None:
     fg.save(fg_path)
     logger.info(f"feature_groups.json → {fg_path}  (K={fg.K}, d_e={fg.d_e})")
 
-    # ── 7. Balance training split ─────────────────────────────────────────────
+    # ── 8. Balance training split ─────────────────────────────────────────────
     bal_cfg = cfg["balancer"]
     balancer = TemporalBalancer(
         strategy=bal_cfg["strategy"],
@@ -115,7 +129,7 @@ def main(cfg: dict) -> None:
     np.save(bal_path, balanced_eids)
     logger.info(f"balanced_train_indices.npy → {bal_path}  ({len(balanced_eids):,} EIDs)")
 
-    # ── 8. Class weights from ORIGINAL unbalanced distribution ────────────────
+    # ── 9. Class weights from ORIGINAL unbalanced distribution ────────────────
     class_weights = balancer.get_class_weights(
         train_data["labels"],
         method=bal_cfg.get("class_weight_method", "effective_num"),
@@ -127,7 +141,7 @@ def main(cfg: dict) -> None:
     np.save(cw_path, class_weights.numpy())
     logger.info(f"class_weights.npy → {cw_path}  (shape {class_weights.shape})")
 
-    # ── 9. Sanity summary ─────────────────────────────────────────────────────
+    # ── 10. Sanity summary ────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info("Phase 1 complete. Output summary:")
     logger.info(f"  d_e = {pre.d_e}")

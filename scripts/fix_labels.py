@@ -6,12 +6,14 @@ integer codes derived from df["Attack"]. This script patches all three splits
 without re-running the full Phase 1 pipeline.
 
 Changes:
-  feature_store/{train,val,test}/labels.npy  — overwritten with 10-class ints
-  class_weights.npy                          — recomputed from 10-class train dist
+  feature_store/{train,val,test}/labels.npy  — overwritten with N-class ints
+  class_weights.npy                          — recomputed from N-class train dist
   artifacts/label_map.json                   — written (Attack string → int)
 
 Usage:
   python scripts/fix_labels.py --config configs/experiment_unsw.yaml
+  python scripts/fix_labels.py --config configs/experiment_unsw.yaml \\
+      --label-map artifacts/label_map.json
 """
 
 import argparse
@@ -36,42 +38,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Canonical ordering must match evaluator.DEFAULT_CLASS_NAMES exactly.
-ATTACK_TO_INT: dict[str, int] = {
-    "Benign":          0,
-    "Generic":         1,
-    "Exploits":        2,
-    "Fuzzers":         3,
-    "DoS":             4,
-    "Reconnaissance":  5,   # dataset uses full name; display name is "Recon"
-    "Analysis":        6,
-    "Backdoor":        7,
-    "Shellcode":       8,
-    "Worms":           9,
-}
-N_CLASSES = len(ATTACK_TO_INT)
 
+def encode_attack(attack_series, attack_to_int: dict[str, int]) -> np.ndarray:
+    """Map Attack strings → integer codes using the provided mapping.
 
-def encode_attack(attack_series) -> np.ndarray:
-    """Map Attack strings → integer codes using ATTACK_TO_INT.
+    Raises KeyError on any value not in the mapping so we catch dataset
+    surprises immediately rather than silently producing wrong labels.
 
-    Raises KeyError on any value not in the canonical mapping so we catch
-    dataset surprises immediately rather than silently producing wrong labels.
+    Args:
+        attack_series: iterable of Attack string values.
+        attack_to_int: mapping of Attack string → integer label.
+
+    Returns:
+        int64 array of integer label codes, same length as attack_series.
     """
     codes = np.empty(len(attack_series), dtype=np.int64)
     for i, val in enumerate(attack_series):
         try:
-            codes[i] = ATTACK_TO_INT[str(val)]
+            codes[i] = attack_to_int[str(val)]
         except KeyError as exc:
             raise KeyError(
                 f"Unknown Attack value '{val}' at row {i}. "
-                f"Known values: {sorted(ATTACK_TO_INT)}"
+                f"Known values: {sorted(attack_to_int)}"
             ) from exc
     return codes
 
 
-def main(cfg: dict) -> None:
+def main(cfg: dict, label_map_path: Path) -> None:
     repo_root = REPO_ROOT
+
+    # ── 0. Load label map ──────────────────────────────────────────────────────
+    if label_map_path.exists():
+        with open(label_map_path) as f:
+            attack_to_int: dict[str, int] = json.load(f)
+        logger.info(f"Loaded label map from {label_map_path}: {attack_to_int}")
+    else:
+        # Bootstrap: derive the map from the CSV and write it
+        logger.warning(
+            f"{label_map_path} not found — deriving label map from CSV Attack column. "
+            "Run 01_preprocess.py first to generate a persistent label_map.json."
+        )
+        from src.data.preprocessor import Preprocessor
+        csv_path_tmp = repo_root / cfg["data"]["csv_path"]
+        df_tmp = load_raw(csv_path_tmp)
+        attack_to_int = Preprocessor.build_label_map(df_tmp)
+        del df_tmp
+        label_map_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(label_map_path, "w") as f:
+            json.dump(attack_to_int, f, indent=2)
+        logger.info(f"Derived label map saved → {label_map_path}: {attack_to_int}")
+
+    n_classes = len(attack_to_int)
 
     # ── 1. Load sorted CSV ─────────────────────────────────────────────────────
     csv_path = repo_root / cfg["data"]["csv_path"]
@@ -82,16 +99,16 @@ def main(cfg: dict) -> None:
     # ── 2. Sanity-check Attack values ──────────────────────────────────────────
     unique_attack = sorted(df["Attack"].unique())
     logger.info(f"Unique Attack values ({len(unique_attack)}): {unique_attack}")
-    unknown = [v for v in unique_attack if str(v) not in ATTACK_TO_INT]
+    unknown = [v for v in unique_attack if str(v) not in attack_to_int]
     if unknown:
         raise ValueError(
             f"Attack column contains unmapped values: {unknown}. "
-            "Update ATTACK_TO_INT in this script."
+            "Update the label map or re-run 01_preprocess.py."
         )
 
     # ── 3. Encode all rows ─────────────────────────────────────────────────────
     logger.info("Encoding Attack → int ...")
-    all_labels = encode_attack(df["Attack"])
+    all_labels = encode_attack(df["Attack"], attack_to_int)
     logger.info(f"Label distribution: {dict(zip(*np.unique(all_labels, return_counts=True)))}")
 
     # ── 4. Load split boundaries ───────────────────────────────────────────────
@@ -154,26 +171,13 @@ def main(cfg: dict) -> None:
     logger.info(f"class_weights.npy written → {cw_path}  shape={weights_tensor.shape}")
 
     # ── 7. Save label_map.json ─────────────────────────────────────────────────
-    # Maps display names → int (used by evaluator.py class_names lookup).
-    # "Reconnaissance" in the CSV becomes "Recon" in plots/tables.
-    display_label_map = {
-        "Benign":    0,
-        "Generic":   1,
-        "Exploits":  2,
-        "Fuzzers":   3,
-        "DoS":       4,
-        "Recon":     5,
-        "Analysis":  6,
-        "Backdoor":  7,
-        "Shellcode": 8,
-        "Worms":     9,
-    }
+    # Re-write the loaded label_map so the file reflects what was actually used.
     artifacts_dir = repo_root / cfg["output"]["artifacts_dir"]
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     lmap_path = artifacts_dir / "label_map.json"
     with open(lmap_path, "w") as f:
-        json.dump(display_label_map, f, indent=2)
-    logger.info(f"label_map.json written → {lmap_path}")
+        json.dump(attack_to_int, f, indent=2)
+    logger.info(f"label_map.json written → {lmap_path}  ({n_classes} classes)")
 
     logger.info("Label fix complete. Run scripts/02_build_graph.py next.")
 
@@ -181,6 +185,17 @@ def main(cfg: dict) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment_unsw.yaml")
+    parser.add_argument(
+        "--label-map",
+        default="artifacts/label_map.json",
+        help=(
+            "Path to label_map.json (Attack string → int). "
+            "If the file does not exist, the map is derived from the CSV "
+            "Attack column and written to this path. "
+            "Default: artifacts/label_map.json"
+        ),
+    )
     args = parser.parse_args()
     cfg = load_config(REPO_ROOT / args.config)
-    main(cfg)
+    lmap = REPO_ROOT / args.label_map
+    main(cfg, lmap)
