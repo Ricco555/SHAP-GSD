@@ -24,8 +24,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-SUMMARY_PATH = ROOT / "outputs" / "metrics" / "summary.json"
-OUT_DIR      = ROOT / "outputs" / "figures" / "explore"
+from explore._paths import paths  # noqa: E402
+_P = paths()
+SUMMARY_PATH = _P["metrics"] / "summary.json"
+OUT_DIR      = _P["figures"] / "explore"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Load data ──────────────────────────────────────────────────────────────────

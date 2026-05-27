@@ -24,15 +24,20 @@ import matplotlib
 matplotlib.use("Agg")
 
 import json
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
-ROOT    = Path(__file__).resolve().parent.parent.parent
-EXP_DIR = ROOT / "outputs" / "explanations"
-OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+EXP_DIR = _P["explanations"]
+OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "arg3_mitre_port"
@@ -56,7 +61,7 @@ PORT_SERVICES = list(MITRE_MAP.keys())
 
 def main() -> None:
     # Load fidelity for presence/absence coloring and top_k_groups
-    fid_df = pd.read_csv(ROOT / "outputs" / "metrics" / "fidelity.csv")
+    fid_df = pd.read_csv(_P["metrics"] / "fidelity.csv")
     class_mean_fid = fid_df.groupby("class_name")["fidelity_plus"].mean()
 
     # Per-class frequency: DST_PORT_GROUP in top_k_groups

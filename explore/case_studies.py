@@ -48,9 +48,12 @@ import dgl
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.utils.config import load_config
-from src.model.temporal_sampler import TemporalNeighborSampler
-from src.visualization.case_study_plots import make_case_study_figure
+from explore._paths import paths  # noqa: E402
+from src.utils.config import load_config  # noqa: E402
+from src.model.temporal_sampler import TemporalNeighborSampler  # noqa: E402
+from src.visualization.case_study_plots import make_case_study_figure  # noqa: E402
+
+_P = paths()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +76,8 @@ CANDIDATES = [
     ("Recon",     2232037, False),   # model case, regenerated for consistency
 ]
 
-CONFIG_PATH = ROOT / "configs" / "experiment_unsw.yaml"
-EXPL_DIR    = ROOT / "outputs" / "explanations"
-OUT_DIR     = ROOT / "outputs" / "figures" / "case_studies"
+EXPL_DIR = _P["explanations"]
+OUT_DIR  = _P["figures"] / "case_studies"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -176,7 +178,7 @@ def _summary(plain: dict, topo: dict, W_seconds: float) -> dict:
 
 
 def main() -> None:
-    cfg = load_config(str(CONFIG_PATH))
+    cfg = _P["cfg"]
     W_seconds = float(cfg["model"]["temporal_window_seconds"])
     fanouts   = cfg["model"]["fanouts"]
     graphs_dir = Path(cfg["graph"]["dir"])

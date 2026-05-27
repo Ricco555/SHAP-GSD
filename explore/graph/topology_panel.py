@@ -40,6 +40,7 @@ matplotlib.use("Agg")
 import bisect
 import json
 import pickle
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -50,8 +51,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 
-ROOT    = Path(__file__).resolve().parents[2]
-OUT_DIR = ROOT / "outputs" / "figures" / "graph"
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 LABEL_FS = 10
@@ -335,7 +340,7 @@ def make_class_figure(
     snaps: dict,
 ) -> None:
     """Produce topology_<cls_name>_<eid>.{pdf,png,txt} for one class."""
-    json_path = ROOT / "outputs" / "explanations" / cls_name / f"{eid}.json"
+    json_path = _P["explanations"] / cls_name / f"{eid}.json"
     if not json_path.exists():
         print(f"  SKIP {cls_name} — {json_path} not found")
         return

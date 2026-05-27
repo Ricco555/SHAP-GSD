@@ -24,14 +24,19 @@ import matplotlib
 matplotlib.use("Agg")
 
 import json
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT    = Path(__file__).resolve().parent.parent.parent
-EXP_DIR = ROOT / "outputs" / "explanations"
-OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+EXP_DIR = _P["explanations"]
+OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "arg5_node_state"

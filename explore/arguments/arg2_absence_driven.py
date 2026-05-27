@@ -21,14 +21,19 @@ Files output:
 import matplotlib
 matplotlib.use("Agg")
 
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
-ROOT    = Path(__file__).resolve().parent.parent.parent
-OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "arg2_absence_driven"
@@ -47,7 +52,7 @@ DOMINANT_NEG_GROUPS = {
 
 
 def main() -> None:
-    df = pd.read_csv(ROOT / "outputs" / "metrics" / "fidelity.csv")
+    df = pd.read_csv(_P["metrics"] / "fidelity.csv")
 
     stats = df.groupby("class_name")["fidelity_plus"].agg(["mean", "sem", "count"])
     absence_pct = df.groupby("class_name")["fidelity_plus"].apply(

@@ -28,15 +28,20 @@ matplotlib.use("Agg")
 
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-ROOT    = Path(__file__).resolve().parents[2]
-ABL_DIR = ROOT / "outputs" / "w_ablation"
-OUT_DIR = ROOT / "outputs" / "figures" / "graph"
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+ABL_DIR = _P["w_ablation"]
+OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "w_sensitivity_annotated"

@@ -36,16 +36,16 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.data.feature_store import FeatureStore
-from src.utils.config import load_config
+from explore._paths import paths  # noqa: E402
+from src.data.feature_store import FeatureStore  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-cfg       = load_config(str(ROOT / "configs" / "experiment_unsw.yaml"))
-FS        = FeatureStore(Path(cfg["output"]["feature_store_dir"]) / "test")
-FG        = json.loads((ROOT / "artifacts" / "feature_groups.json").read_text())
-EXP_DIR   = ROOT / "outputs" / "explanations"
-OUT_DIR   = ROOT / "outputs" / "figures" / "explore"
+_P        = paths()
+FS        = FeatureStore(_P["fs"] / "test")
+FG        = json.loads((ROOT / _P["cfg"]["output"]["feature_groups_path"]).read_text())
+EXP_DIR   = _P["explanations"]
+OUT_DIR   = _P["figures"] / "explore"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 LABEL_FS  = 8

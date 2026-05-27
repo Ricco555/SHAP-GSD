@@ -25,8 +25,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-OUT_DIR       = ROOT / "outputs" / "figures" / "explore"
-ABLATION_DIR  = ROOT / "outputs" / "w_ablation"
+from explore._paths import paths  # noqa: E402
+_P = paths()
+OUT_DIR       = _P["figures"] / "explore"
+ABLATION_DIR  = _P["w_ablation"]
 GAP_STATS     = ABLATION_DIR / "gap_stats.json"
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)

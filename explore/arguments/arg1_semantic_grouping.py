@@ -23,15 +23,20 @@ import matplotlib
 matplotlib.use("Agg")
 
 import json
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
-ROOT    = Path(__file__).resolve().parent.parent.parent
-EXP_DIR = ROOT / "outputs" / "explanations"
-OUT_DIR = ROOT / "outputs" / "figures" / "arguments"
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+EXP_DIR = _P["explanations"]
+OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM     = "arg1_semantic_grouping"
@@ -96,7 +101,7 @@ def top1_group(phi: list, names: list) -> str:
 
 def main() -> None:
     # --- load fidelity mean per class for coloring ---
-    fid_df = pd.read_csv(ROOT / "outputs" / "metrics" / "fidelity.csv")
+    fid_df = pd.read_csv(_P["metrics"] / "fidelity.csv")
     class_mean_fid = fid_df.groupby("class_name")["fidelity_plus"].mean()
 
     # --- load all explanation JSONs ---

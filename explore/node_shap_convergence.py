@@ -33,6 +33,7 @@ Outputs:
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -56,11 +57,6 @@ from src.explainer.node_shap import NodeNoveltySHAP
 from src.model.temporal_sampler import TemporalNeighborSampler
 
 NSAMPLES_LIST = [128, 256, 512, 1024, 2048]
-
-CONFIG_PATH = ROOT / "configs" / "experiment_unsw.yaml"
-EXPL_DIR    = ROOT / "outputs" / "explanations"
-FIG_DIR     = ROOT / "outputs" / "figures" / "explore"
-METRICS_DIR = ROOT / "outputs" / "metrics"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -177,17 +173,22 @@ def _build_flow_context(
 
 
 def main() -> None:
+    _default_cfg = os.environ.get("SHAP_GSD_CONFIG", "configs/experiment_unsw.yaml")
     parser = argparse.ArgumentParser(description="Node SHAP convergence experiment")
-    parser.add_argument("--config",       default=str(CONFIG_PATH))
+    parser.add_argument("--config",       default=_default_cfg)
     parser.add_argument("--n-per-class",  type=int, default=20,
                         help="Flows to sample per class (default 20; use 2 for quick test)")
     parser.add_argument("--seed",         type=int, default=42)
     args = parser.parse_args()
 
+    cfg = load_config(args.config)
+    outputs     = ROOT / cfg["output"]["outputs_dir"]
+    EXPL_DIR    = outputs / "explanations"
+    FIG_DIR     = outputs / "figures" / "explore"
+    METRICS_DIR = outputs / "metrics"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_config(args.config)
     device = torch.device(
         cfg.get("compute", {}).get("device", "cuda")
         if torch.cuda.is_available() else "cpu"

@@ -29,8 +29,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 ROOT = Path(__file__).resolve().parents[2]
-EXP_DIR = ROOT / "outputs" / "explanations"
-OUT_DIR = ROOT / "outputs" / "figures" / "graph"
+sys.path.insert(0, str(ROOT))
+
+from explore._paths import paths  # noqa: E402
+_P = paths()
+EXP_DIR = _P["explanations"]
+OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STEM = "attribution_decomp"

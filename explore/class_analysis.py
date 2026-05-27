@@ -27,8 +27,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-FIDELITY_CSV = ROOT / "outputs" / "metrics" / "fidelity.csv"
-OUT_DIR      = ROOT / "outputs" / "figures" / "explore"
+from explore._paths import paths  # noqa: E402
+_P = paths()
+FIDELITY_CSV = _P["metrics"] / "fidelity.csv"
+OUT_DIR      = _P["figures"] / "explore"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 LABEL_FS = 9
