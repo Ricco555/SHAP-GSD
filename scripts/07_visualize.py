@@ -156,11 +156,11 @@ def main() -> None:
     sampler = TemporalNeighborSampler(fanouts=fanouts)
 
     # --- Output directory ---
-    out_dir = Path("outputs") / "figures" / "case_studies"
+    out_dir = Path(cfg["output"]["outputs_dir"]) / "figures" / "case_studies"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     quality_rows: list[str] = []
-    explanations_dir = Path("outputs") / "explanations"
+    explanations_dir = Path(cfg["output"]["outputs_dir"]) / "explanations"
 
     for class_name, global_eid in CANDIDATES:
         logger.info(f"Processing {class_name} EID={global_eid} …")
@@ -243,7 +243,7 @@ def main() -> None:
 
     # ── Phase 7B: per-class feature-group summary plots ───────────────────────
     logger.info("=== Phase 7B: Per-class feature-group SHAP summaries ===")
-    fg_dir = Path("outputs") / "figures" / "feature_groups"
+    fg_dir = Path(cfg["output"]["outputs_dir"]) / "figures" / "feature_groups"
     fg_dir.mkdir(parents=True, exist_ok=True)
 
     # Load all explanation JSONs grouped by class

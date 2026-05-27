@@ -127,8 +127,8 @@ def main() -> None:
     graphs_dir    = Path(cfg["graph"]["dir"])
     nsm_dir       = Path(cfg["graph"]["node_state_dir"])
     fs_test_dir   = Path(cfg["output"]["feature_store_dir"]) / "test"
-    expl_dir      = Path("outputs") / "explanations"
-    out_path      = Path("outputs") / "metrics" / "efficiency.json"
+    expl_dir      = Path(cfg["output"]["outputs_dir"]) / "explanations"
+    out_path      = Path(cfg["output"]["outputs_dir"]) / "metrics" / "efficiency.json"
 
     device = torch.device(
         cfg.get("compute", {}).get("device", "cuda")

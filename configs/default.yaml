@@ -21,6 +21,7 @@ balancer:
   compute_weights_on: "original"         # never compute on balanced distribution
 
 output:
+  outputs_dir: "outputs"
   feature_store_dir: "feature_store"
   artifacts_dir: "artifacts"
   transformers_dir: "artifacts/transformers"
@@ -28,6 +29,9 @@ output:
   feature_groups_path: "artifacts/feature_groups.json"
   balanced_train_indices_path: "artifacts/balanced_train_indices.npy"
   class_weights_path: "artifacts/class_weights.npy"
+
+run:
+  dir: ""   # when set (e.g. "runs/dataset02"), prefixed onto all output/graph paths
 
 seed: 42
 
@@ -43,7 +47,9 @@ model:
   weight_decay: 0.0001
   max_epochs: 50
   patience: 10
-  num_classes: 10
+  # num_classes is derived dynamically from artifacts/label_map.json —
+  # do NOT set it here. Scripts 03_tune.py, 04_train.py, 13_ablations.py
+  # load it from the label map after 01_preprocess.py has run.
   early_stopping_metric: "macro_f1"      # "macro_f1" | "minority_macro_f1" | "composite"
   minority_class_threshold: 5000         # n_train < this → minority class
   composite_minority_weight: 0.5         # α: weight of minority_macro_f1 in composite

@@ -544,8 +544,8 @@ def main():
     nsm_dir          = Path(cfg["graph"]["node_state_dir"])
     fs_train_dir     = Path(cfg["output"]["feature_store_dir"]) / "train"
     fs_test_dir      = Path(cfg["output"]["feature_store_dir"]) / "test"
-    explanations_dir = Path("outputs") / "explanations"
-    output_dir       = Path("outputs") / "baselines"
+    explanations_dir = Path(cfg["output"]["outputs_dir"]) / "explanations"
+    output_dir       = Path(cfg["output"]["outputs_dir"]) / "baselines"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(

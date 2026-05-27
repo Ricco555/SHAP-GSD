@@ -1,7 +1,10 @@
 """
 Tests for FeatureGrouping (semantic SHAP coalition groups).
 
-Loads the actual feature_groups.json written by Phase 1.
+Loads the actual feature_groups.json written by Phase 1.  The path is
+resolved from the config selected by the ``SHAP_GSD_CONFIG`` environment
+variable (default: configs/experiment_unsw.yaml) via ``output.feature_groups_path``,
+so the tests respect ``run.dir`` automatically for multi-dataset runs.
 
 Tests:
   1 — Full coverage: union of all groups == {0, ..., d_e−1} (no gaps).
@@ -11,19 +14,23 @@ Tests:
   5 — get_group_mask: coalition vector → correct d_e-dim boolean mask.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
+from tests._paths import REPO_ROOT, resolve_cfg
 from src.data.feature_groups import FeatureGrouping
 from src.data.preprocessor import N_DST_PORT_BINS
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FG_PATH = REPO_ROOT / "artifacts" / "feature_groups.json"
+
+def _fg_path() -> Path:
+    """Return the feature_groups.json path from the active config."""
+    cfg = resolve_cfg()
+    return REPO_ROOT / cfg["output"]["feature_groups_path"]
+
+
+FG_PATH: Path = _fg_path()
 
 
 @pytest.fixture(scope="module")

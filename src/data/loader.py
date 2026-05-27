@@ -137,7 +137,11 @@ LOG_TRANSFORM_COLS: list[str] = [
 
 
 def load_raw(csv_path: Path | str) -> pd.DataFrame:
-    """Load and clean the raw NF-UNSW-NB15-v3 CSV.
+    """Load and clean a NetFlow CSV.
+
+    The CSV must have ``Label`` (binary 0/1) as the second-to-last column and
+    ``Attack`` (multi-class string) as the last column — this is the convention
+    for all NF-* datasets (UNSW-NB15, CSE-CIC-IDS2018, ToN-IoT, BoT-IoT).
 
     Returns a cleaned DataFrame retaining all original columns.
     Global EID assignment and splitting are performed downstream in preprocessor.
@@ -146,6 +150,20 @@ def load_raw(csv_path: Path | str) -> pd.DataFrame:
     logger.info(f"Loading {csv_path}")
     df = pd.read_csv(csv_path, low_memory=False)
     logger.info(f"Loaded {len(df):,} rows, {df.shape[1]} columns")
+
+    # Validate that the last two columns (by position) are Label and Attack.
+    # This is a structural invariant for all supported NetFlow datasets.
+    if df.shape[1] < 2:
+        raise ValueError(
+            f"{csv_path}: expected at least 2 columns, got {df.shape[1]}"
+        )
+    last_two = list(df.columns[-2:])
+    if last_two != LABEL_COLS:
+        raise ValueError(
+            f"{csv_path}: expected the last 2 columns to be {LABEL_COLS} "
+            f"(by position), but found {last_two}. "
+            "Check that this is a supported NF-* NetFlow dataset."
+        )
 
     n_before = len(df)
     df = df.drop_duplicates()

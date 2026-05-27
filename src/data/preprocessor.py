@@ -39,21 +39,6 @@ from src.data.loader import (
 
 logger = logging.getLogger(__name__)
 
-# Canonical Attack string → integer mapping.
-# Order must match evaluator.DEFAULT_CLASS_NAMES exactly.
-_ATTACK_TO_INT: dict[str, int] = {
-    "Benign":          0,
-    "Generic":         1,
-    "Exploits":        2,
-    "Fuzzers":         3,
-    "DoS":             4,
-    "Reconnaissance":  5,   # dataset uses full name; display name is "Recon"
-    "Analysis":        6,
-    "Backdoor":        7,
-    "Shellcode":       8,
-    "Worms":           9,
-}
-
 # 16-bin DST port scheme (finalized after dataset pilot — CLAUDE.md phase 4)
 # Each entry: (bin_name, predicate_fn)
 _DST_PORT_BINS: list[tuple[str, Any]] = [
@@ -186,6 +171,10 @@ class Preprocessor:
         self.feature_names: list[str] = []             # final d_e names
         self.d_e: int = 0
 
+        # Label map (populated by fit_transform via build_label_map)
+        self.label_map: dict[str, int] = {}
+        self.num_classes: int = 0
+
         # Split metadata
         self.n_total: int = 0
         self.tau_train_ms: int = 0
@@ -212,6 +201,15 @@ class Preprocessor:
         )
         df["GLOBAL_EID"] = np.arange(len(df), dtype=np.int64)
         self.n_total = len(df)
+
+        # Build label map from full dataset before splitting so that any class
+        # absent from train but present in val/test still receives a stable int.
+        self.label_map = self.build_label_map(df)
+        self.num_classes = len(self.label_map)
+        logger.info(
+            f"Label map ({self.num_classes} classes): "
+            + ", ".join(f"{k}={v}" for k, v in sorted(self.label_map.items(), key=lambda x: x[1]))
+        )
 
         train_df, val_df, test_df = self._temporal_split(df)
         logger.info(
@@ -274,11 +272,15 @@ class Preprocessor:
 
         # Encode multi-class Attack labels (must happen before _pack)
         for sub_df in (train_df, val_df, test_df):
-            sub_df["_attack_int"] = sub_df["Attack"].map(_ATTACK_TO_INT)
+            sub_df["_attack_int"] = sub_df["Attack"].map(self.label_map)
             unknown = sub_df["_attack_int"].isna()
             if unknown.any():
                 bad = sub_df.loc[unknown, "Attack"].unique().tolist()
-                raise ValueError(f"Unknown Attack values: {bad}. Update _ATTACK_TO_INT.")
+                raise ValueError(
+                    f"Unknown Attack values: {bad}. "
+                    "These classes were absent from the full dataset — "
+                    "check the Attack column for unexpected values."
+                )
             sub_df["_attack_int"] = sub_df["_attack_int"].astype(np.int64)
 
         # Build feature name list and record d_e
@@ -311,6 +313,52 @@ class Preprocessor:
             _pack(val_df,   val_X),
             _pack(test_df,  test_X),
         )
+
+    @staticmethod
+    def build_label_map(df: pd.DataFrame) -> dict[str, int]:
+        """Derive a deterministic class → int mapping from df["Attack"].
+
+        ``"Benign"`` always receives int 0.  All remaining unique class names
+        are sorted alphabetically and assigned ints 1, 2, ..., N-1.  This
+        guarantees identical mappings across independent runs on the same
+        dataset.
+
+        Args:
+            df: DataFrame containing an ``Attack`` column with class strings.
+
+        Returns:
+            Mapping of Attack string → integer label (e.g. ``{"Benign": 0, ...}``).
+        """
+        classes = df["Attack"].unique().tolist()
+        if "Benign" not in classes:
+            raise ValueError(
+                "Attack column does not contain 'Benign'. "
+                "Check that this is a supported NetFlow dataset."
+            )
+        others = sorted(c for c in classes if c != "Benign")
+        label_map: dict[str, int] = {"Benign": 0}
+        for i, cls in enumerate(others, start=1):
+            label_map[cls] = i
+        return label_map
+
+    def save_label_map(self, path: Path | str) -> None:
+        """Write self.label_map to a JSON file (Attack string → int).
+
+        The file is compatible with the format read by evaluator.py,
+        scripts/06_explain.py, scripts/08_metrics.py, etc.
+
+        Args:
+            path: destination file path (will be created/overwritten).
+        """
+        if not self.label_map:
+            raise RuntimeError(
+                "label_map is empty — call fit_transform() before save_label_map()."
+            )
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.label_map, f, indent=2)
+        logger.info(f"label_map.json saved → {path}  ({self.num_classes} classes)")
 
     def save_transformers(self, transformers_dir: Path | str) -> None:
         """Persist fitted transformers for later use on val/test/inference."""

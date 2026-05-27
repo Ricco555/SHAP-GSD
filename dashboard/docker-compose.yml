@@ -1,0 +1,7 @@
+services:
+  dashboard:
+    container_name: shap-gsd-dashboard
+    build: .
+    ports:
+      - "8080:80"
+    restart: unless-stopped

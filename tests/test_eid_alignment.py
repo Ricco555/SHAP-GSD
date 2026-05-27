@@ -8,25 +8,34 @@ For 1000 random edges per split:
 
 Skipped automatically if graphs/*.bin do not exist yet
 (run scripts/02_build_graph.py first).
+
+Graph and feature-store paths are resolved from the config selected by the
+``SHAP_GSD_CONFIG`` environment variable (default: configs/experiment_unsw.yaml),
+so the tests automatically respect ``run.dir`` for multi-dataset runs.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tests._paths import REPO_ROOT, resolve_cfg
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-GRAPH_DIR = REPO_ROOT / "graphs"
+
+def _resolve_paths() -> tuple[Path, Path]:
+    """Return (graph_dir, feature_store_root) from the active config."""
+    cfg = resolve_cfg()
+    graph_dir = REPO_ROOT / cfg["graph"]["dir"]
+    fs_root = REPO_ROOT / cfg["output"]["feature_store_dir"]
+    return graph_dir, fs_root
 
 
 def _graphs_available() -> bool:
+    graph_dir, _ = _resolve_paths()
     return (
-        (GRAPH_DIR / "train.bin").exists()
-        and (GRAPH_DIR / "val.bin").exists()
-        and (GRAPH_DIR / "test.bin").exists()
+        (graph_dir / "train.bin").exists()
+        and (graph_dir / "val.bin").exists()
+        and (graph_dir / "test.bin").exists()
     )
 
 
@@ -35,7 +44,7 @@ def _graphs_available() -> bool:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
-def test_eid_alignment(split: str):
+def test_eid_alignment(split: str) -> None:
     """g.edata[dgl.EID][i] must equal feature_store/edge_indices.npy[i] for all i."""
     if not _graphs_available():
         pytest.skip("graphs/*.bin not found — run scripts/02_build_graph.py first")
@@ -43,10 +52,12 @@ def test_eid_alignment(split: str):
     import dgl
     from src.data.feature_store import FeatureStore
 
-    g_list, _ = dgl.load_graphs(str(GRAPH_DIR / f"{split}.bin"))
+    graph_dir, fs_root = _resolve_paths()
+
+    g_list, _ = dgl.load_graphs(str(graph_dir / f"{split}.bin"))
     g = g_list[0]
 
-    fs = FeatureStore(REPO_ROOT / "feature_store" / split)
+    fs = FeatureStore(fs_root / split)
 
     rng = np.random.default_rng(42)
     n_edges = g.num_edges()
@@ -63,7 +74,7 @@ def test_eid_alignment(split: str):
 
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
-def test_timestamp_alignment(split: str):
+def test_timestamp_alignment(split: str) -> None:
     """Graph edge timestamps must match feature_store/timestamps.npy."""
     if not _graphs_available():
         pytest.skip("graphs/*.bin not found — run scripts/02_build_graph.py first")
@@ -71,10 +82,12 @@ def test_timestamp_alignment(split: str):
     import dgl
     from src.data.feature_store import FeatureStore
 
-    g_list, _ = dgl.load_graphs(str(GRAPH_DIR / f"{split}.bin"))
+    graph_dir, fs_root = _resolve_paths()
+
+    g_list, _ = dgl.load_graphs(str(graph_dir / f"{split}.bin"))
     g = g_list[0]
 
-    fs = FeatureStore(REPO_ROOT / "feature_store" / split)
+    fs = FeatureStore(fs_root / split)
 
     rng = np.random.default_rng(99)
     n_edges = g.num_edges()
@@ -92,16 +105,18 @@ def test_timestamp_alignment(split: str):
 
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
-def test_global_node_count_consistent(split: str):
+def test_global_node_count_consistent(split: str) -> None:
     """All split graphs must have the same num_nodes (global IP count)."""
     if not _graphs_available():
         pytest.skip("graphs/*.bin not found — run scripts/02_build_graph.py first")
 
     import dgl
 
-    node_counts = {}
+    graph_dir, _ = _resolve_paths()
+
+    node_counts: dict[str, int] = {}
     for s in ("train", "val", "test"):
-        g_list, _ = dgl.load_graphs(str(GRAPH_DIR / f"{s}.bin"))
+        g_list, _ = dgl.load_graphs(str(graph_dir / f"{s}.bin"))
         node_counts[s] = g_list[0].num_nodes()
 
     assert node_counts["train"] == node_counts["val"] == node_counts["test"], (

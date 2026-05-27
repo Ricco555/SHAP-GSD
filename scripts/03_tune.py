@@ -73,8 +73,17 @@ def main(cfg: dict) -> None:
     train_labels = np.load(
         repo_root / cfg["output"]["feature_store_dir"] / "train" / "labels.npy"
     )
+
+    # Derive num_classes from label_map.json (produced by 01_preprocess.py).
+    label_map_path = repo_root / cfg["output"]["artifacts_dir"] / "label_map.json"
+    with open(label_map_path) as f:
+        label_map = json.load(f)
+    num_classes = len(label_map)
+    cfg["model"]["num_classes"] = num_classes
+    logger.info(f"num_classes={num_classes} (loaded from {label_map_path})")
+
     train_label_counts = np.bincount(
-        train_labels, minlength=cfg["model"]["num_classes"]
+        train_labels, minlength=num_classes
     ).astype(np.int64)
 
     logger.info(

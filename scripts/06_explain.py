@@ -143,7 +143,7 @@ def main() -> None:
     fs_test_dir   = Path(cfg["output"]["feature_store_dir"]) / "test"
     graphs_dir    = Path(cfg["graph"]["dir"])
     nsm_dir       = Path(cfg["graph"]["node_state_dir"])
-    output_dir    = Path("outputs") / "explanations"
+    output_dir    = Path(cfg["output"]["outputs_dir"]) / "explanations"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(
@@ -298,7 +298,7 @@ def main() -> None:
             "node_novelty": _stats(rt_node),
             "total_end_to_end": _stats(rt_total),
         }
-        rt_path = Path("outputs") / "metrics" / "runtime_by_layer.json"
+        rt_path = Path(cfg["output"]["outputs_dir"]) / "metrics" / "runtime_by_layer.json"
         with open(rt_path, "w") as f:
             json.dump(runtime_summary, f, indent=2)
         logger.info(f"Runtime-by-layer summary → {rt_path}")
