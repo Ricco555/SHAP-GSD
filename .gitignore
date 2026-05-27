@@ -5,6 +5,7 @@ feature_store/
 graphs/
 node_state_snapshots/
 outputs/
+runs/
 specs/
 
 # Dataset directories and large data files — never commit raw data to Git

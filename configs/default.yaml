@@ -21,6 +21,7 @@ balancer:
   compute_weights_on: "original"         # never compute on balanced distribution
 
 output:
+  outputs_dir: "outputs"
   feature_store_dir: "feature_store"
   artifacts_dir: "artifacts"
   transformers_dir: "artifacts/transformers"
@@ -28,6 +29,9 @@ output:
   feature_groups_path: "artifacts/feature_groups.json"
   balanced_train_indices_path: "artifacts/balanced_train_indices.npy"
   class_weights_path: "artifacts/class_weights.npy"
+
+run:
+  dir: ""   # when set (e.g. "runs/dataset02"), prefixed onto all output/graph paths
 
 seed: 42
 

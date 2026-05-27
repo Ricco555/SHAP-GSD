@@ -336,7 +336,7 @@ def main() -> None:
     fs_test_dir   = Path(cfg["output"]["feature_store_dir"]) / "test"
     graphs_dir    = Path(cfg["graph"]["dir"])
     nsm_dir       = Path(cfg["graph"]["node_state_dir"])
-    out_dir       = Path("outputs") / "w_ablation"
+    out_dir       = Path(cfg["output"]["outputs_dir"]) / "w_ablation"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(
@@ -356,7 +356,7 @@ def main() -> None:
     sampler = TemporalNeighborSampler(fanouts=cfg["model"]["fanouts"])
 
     # Load all explanation records
-    explanations_dir = Path("outputs") / "explanations"
+    explanations_dir = Path(cfg["output"]["outputs_dir"]) / "explanations"
     records: list[dict] = []
     for cls_dir in sorted(explanations_dir.iterdir()):
         if not cls_dir.is_dir():
