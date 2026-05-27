@@ -446,6 +446,57 @@ SHAP_GSD_CONFIG=configs/experiment_nf_bot_iot_v3.yaml pytest tests/ -v
 
 ---
 
+## Exploration scripts (`explore/`)
+
+The `explore/` folder contains paper-figure scripts that read from pipeline
+outputs and produce publication-quality charts and reasoning files. Scripts are
+committed to git and follow the same `SHAP_GSD_CONFIG` convention as tests.
+
+### Choosing the dataset
+
+```bash
+# Default — reads from outputs/ (UNSW reference run)
+python explore/table2_figure.py
+
+# Per-run dataset — reads from runs/nf_bot_iot_v3/outputs/
+SHAP_GSD_CONFIG=configs/experiment_nf_bot_iot_v3.yaml python explore/table2_figure.py
+```
+
+All path resolution goes through `explore/_paths.py`, which calls `load_config`
+and respects `cfg["run"]["dir"]` so outputs land in the correct `runs/<id>/`
+subdirectory when a per-dataset config is active.
+
+### Script index
+
+| Script | Output | Status |
+|--------|--------|--------|
+| `explore/table2_figure.py` | `figures/explore/table2_fidelity_stability.*` | Dataset-agnostic |
+| `explore/class_analysis.py` | `figures/explore/class_accuracy_fidelity.*` | Dataset-agnostic |
+| `explore/fidelity_distributions.py` | `figures/explore/fidelity_violins.*` | Dataset-agnostic |
+| `explore/method_comparison_figure.py` | `figures/explore/method_comparison_fg.*` | Dataset-agnostic |
+| `explore/w_ablation_figure.py` | `figures/explore/w_ablation.*` | Dataset-agnostic |
+| `explore/shap_scatter.py` | `figures/explore/shap_beeswarm_*.*` | Dataset-agnostic |
+| `explore/node_shap_convergence.py` | `figures/explore/node_shap_convergence.*` | Dataset-agnostic |
+| `explore/case_studies.py` | `figures/case_studies/<Class>_<EID>.*` | UNSW-specific (hardcoded EIDs) |
+| `explore/graph/attribution_decomp.py` | `figures/graph/attribution_decomp.*` | Dataset-agnostic |
+| `explore/graph/w_sensitivity_full.py` | `figures/graph/w_sensitivity_annotated.*` | Dataset-agnostic |
+| `explore/graph/topology_panel.py` | `figures/graph/topology_<Class>_<EID>.*` | UNSW-specific (hardcoded EIDs) |
+| `explore/arguments/arg1_semantic_grouping.py` | `figures/arguments/arg1_*` | Borderline |
+| `explore/arguments/arg2_absence_driven.py` | `figures/arguments/arg2_*` | UNSW-specific |
+| `explore/arguments/arg3_mitre_port.py` | `figures/arguments/arg3_*` | UNSW-specific |
+| `explore/arguments/arg5_node_state.py` | `figures/arguments/arg5_*` | UNSW-specific |
+| `explore/arguments/arg8_temporal_faithfulness.py` | `figures/arguments/arg8_*` | Borderline |
+| `explore/arguments/arg10_global_profiles.py` | `figures/arguments/arg10_*` | UNSW-specific |
+
+**Dataset-agnostic** scripts work on any dataset that has completed phases 01–13.
+**UNSW-specific** scripts use hardcoded class names or flow EIDs; class-name
+decoupling is deferred to a future EX-C phase.
+
+See `explore/AGENT.md`, `explore/arguments/AGENT.md`, and `explore/graph/AGENT.md`
+for full conventions (output location, `.txt` reasoning format, style constants).
+
+---
+
 ## Baseline Explainer Comparison (Table 2)
 
 Five baseline GNN explainers are benchmarked against SHAP-GSD.
