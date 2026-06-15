@@ -2,7 +2,10 @@
 
 **Version 2.1.0**
 
-Multi-granularity Shapley explanations for GNN-based Network Intrusion Detection.
+**SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
+temporally constrained Shapley explanation framework for GNN-based network
+intrusion detection systems (NIDS).
+
 Extends TE-G-SAGE with IP-level nodes, temporally-faithful neighbour sampling,
 a 15-dim temporal node state, and three-granularity SHAP coalitions:
 feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
@@ -444,7 +447,13 @@ Runtime-generated directories (`runs/`, `feature_store/`, `graphs/`,
 
 ---
 
-## Acknowledgements
+## Acknowledgments
 
-Experiments performed using the Advanced Computing service provided by the
-University of Zagreb University Computing Centre (SRCE).
+This work has been supported by the European Union through the European
+Regional Development Fund and the Cohesion Fund under the Competitiveness and
+Cohesion Programme 2021–2027, project **GreenSecure360 — Convergent platform
+for compliance, security, and sustainable operations** (PK.1.1.12.0210).
+
+Computational experiments were carried out using the advanced computing
+service provided by the University of Zagreb University Computing Centre
+(SRCE).
