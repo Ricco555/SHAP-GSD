@@ -65,6 +65,7 @@ def plot_feature_shap(
     shap_values: np.ndarray,
     top_n: int = 15,
     class_name: str = "",
+    caption: bool = True,
 ) -> None:
     """Horizontal bar chart of the top_n feature groups by |φ|."""
     idx = np.argsort(np.abs(shap_values))[::-1][:top_n]
@@ -92,9 +93,10 @@ def plot_feature_shap(
     pos_patch = mpatches.Patch(color=_POS, label="Positive")
     neg_patch = mpatches.Patch(color=_NEG, label="Negative")
     ax.legend(handles=[pos_patch, neg_patch], fontsize=9, loc="lower right")
-    ax.text(0.5, -0.20, f"(a) Feature-group SHAP — {class_name}",
-            transform=ax.transAxes, ha="center", va="top",
-            fontsize=9, fontweight="bold")
+    if caption:
+        ax.text(0.5, -0.20, f"(a) Feature-group SHAP — {class_name}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=9, fontweight="bold")
 
 
 # ── Panel B: 2-hop neighbourhood topology ────────────────────────────────────
@@ -107,6 +109,7 @@ def plot_topology(
     hop2_nodes: list[int],
     id2ip: dict[int, str],
     class_name: str = "",
+    caption: bool = True,
 ) -> None:
     """NetworkX spring-layout graph of the 2-hop neighbourhood."""
     import networkx as nx
@@ -161,9 +164,10 @@ def plot_topology(
         if any(role.get(n) == r for n in G.nodes())
     ]
     ax.legend(handles=legend_handles, fontsize=9, loc="lower left")
-    ax.text(0.5, -0.08, f"(b) 2-hop neighbourhood topology — {class_name}",
-            transform=ax.transAxes, ha="center", va="top",
-            fontsize=9, fontweight="bold")
+    if caption:
+        ax.text(0.5, -0.08, f"(b) 2-hop neighbourhood topology — {class_name}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=9, fontweight="bold")
 
 
 # ── Panel C: node SHAP ────────────────────────────────────────────────────────
@@ -176,6 +180,7 @@ def plot_node_shap(
     id2ip: dict[int, str],
     class_name: str = "",
     top_n: int = 12,
+    caption: bool = True,
 ) -> None:
     """Bar chart of node SHAP values (novelty + top non-target nodes)."""
     names: list[str] = []
@@ -212,9 +217,10 @@ def plot_node_shap(
                alpha=0.08, color="gold", zorder=0)
     ax.text(0.98, 0.98, "gold = novelty flags",
             transform=ax.transAxes, ha="right", va="top", fontsize=9, color="goldenrod")
-    ax.text(0.5, -0.20, f"(c) Node SHAP — {class_name}",
-            transform=ax.transAxes, ha="center", va="top",
-            fontsize=9, fontweight="bold")
+    if caption:
+        ax.text(0.5, -0.20, f"(c) Node SHAP — {class_name}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=9, fontweight="bold")
 
 
 # ── Panel D: temporal gap distribution ────────────────────────────────────────
@@ -224,14 +230,16 @@ def plot_temporal_gaps(
     neighbor_gap_seconds: np.ndarray,
     W_seconds: float,
     class_name: str = "",
+    caption: bool = True,
 ) -> None:
     """Histogram of (target_ts − neighbor_ts) with W-second cutoff marked."""
     if len(neighbor_gap_seconds) == 0:
         ax.text(0.5, 0.5, "No neighbour edges sampled",
                 ha="center", va="center", transform=ax.transAxes, fontsize=9)
-        ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
-                transform=ax.transAxes, ha="center", va="top",
-                fontsize=8, fontweight="bold")
+        if caption:
+            ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
+                    transform=ax.transAxes, ha="center", va="top",
+                    fontsize=8, fontweight="bold")
         return
 
     in_window = neighbor_gap_seconds[neighbor_gap_seconds <= W_seconds]
@@ -258,9 +266,10 @@ def plot_temporal_gaps(
     ax.set_ylabel("Edge count", fontsize=10)
     ax.tick_params(labelsize=10)
     ax.legend(fontsize=9)
-    ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
-            transform=ax.transAxes, ha="center", va="top",
-            fontsize=9, fontweight="bold")
+    if caption:
+        ax.text(0.5, -0.20, f"(d) Temporal neighbour gap — {class_name}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=9, fontweight="bold")
 
 
 # ── Composite figure ──────────────────────────────────────────────────────────
@@ -334,6 +343,92 @@ def make_case_study_figure(
 
     plt.tight_layout(h_pad=3.5)
     return fig
+
+
+# ── Individual panel figures ──────────────────────────────────────────────────
+
+def make_panel_figures(
+    explanation: dict,
+    topo: dict,
+    id2ip: dict[int, str],
+    class_name: str,
+    W_seconds: float = 60.0,
+    top_feat: int = 15,
+) -> dict[str, plt.Figure]:
+    """Return four single-panel figures keyed by panel label (a, b, c, d).
+
+    Uses the same plot functions as make_case_study_figure so the visuals are
+    identical to the corresponding panels in the composite PDF.
+
+    Args:
+        explanation:  parsed explanation dict (output of _adapt_explanation).
+        topo:         dict with 'hop1_nodes', 'hop2_nodes', 'all_neighbor_gaps_s'.
+        id2ip:        node_id (int) → IP string.
+        class_name:   attack class name for titles.
+        W_seconds:    temporal window in seconds.
+        top_feat:     number of feature groups to show in panel (a).
+
+    Returns:
+        dict mapping filename slug → matplotlib Figure.  Each key is
+        ``"{label}_{description_underscored}"`` derived from the caption text,
+        without the class name (already present in the caller's stem).
+        Caller builds the full path as ``f"{stem}_{slug}.png"``.
+    """
+    group_names = explanation["feature_group_names"]
+    shap_values = np.array(explanation["feature_group_shap"])
+    gaps        = np.array(topo.get("all_neighbor_gaps_s", []))
+    node_dict   = explanation.get("node_shap_dict", {})
+
+    # Slugs mirror the caption descriptive text (spaces → underscores, no class suffix).
+    slugs = {
+        "a": "a_Feature-group_SHAP",
+        "b": "b_2-hop_neighbourhood_topology",
+        "c": "c_Node_SHAP",
+        "d": "d_Temporal_neighbour_gap",
+    }
+
+    panels: dict[str, plt.Figure] = {}
+
+    fig_a, ax_a = plt.subplots(1, 1, figsize=(7, 6))
+    plot_feature_shap(ax_a, group_names, shap_values, top_n=top_feat,
+                      class_name=class_name, caption=False)
+    plt.tight_layout()
+    panels[slugs["a"]] = fig_a
+
+    fig_b, ax_b = plt.subplots(1, 1, figsize=(7, 6))
+    plot_topology(
+        ax_b,
+        src_nid=explanation["src_nid"],
+        dst_nid=explanation["dst_nid"],
+        hop1_nodes=topo.get("hop1_nodes", []),
+        hop2_nodes=topo.get("hop2_nodes", []),
+        id2ip=id2ip,
+        class_name=class_name,
+        caption=False,
+    )
+    plt.tight_layout()
+    panels[slugs["b"]] = fig_b
+
+    fig_c, ax_c = plt.subplots(1, 1, figsize=(7, 6))
+    plot_node_shap(
+        ax_c,
+        node_shap_dict=node_dict if isinstance(node_dict, dict) else {},
+        src_novelty_shap=float(explanation.get("src_novelty_shap", 0.0)),
+        dst_novelty_shap=float(explanation.get("dst_novelty_shap", 0.0)),
+        id2ip=id2ip,
+        class_name=class_name,
+        caption=False,
+    )
+    plt.tight_layout()
+    panels[slugs["c"]] = fig_c
+
+    fig_d, ax_d = plt.subplots(1, 1, figsize=(7, 5))
+    plot_temporal_gaps(ax_d, gaps, W_seconds=W_seconds, class_name=class_name,
+                       caption=False)
+    plt.tight_layout()
+    panels[slugs["d"]] = fig_d
+
+    return panels
 
 
 # ── Per-class feature-group summary ───────────────────────────────────────────

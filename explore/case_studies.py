@@ -22,9 +22,10 @@ Selected flows:
     Recon     2232037
 
 Outputs:
-  outputs/figures/case_studies/<Class>_<EID>.{pdf,png}
-  outputs/figures/case_studies/<Class>_<EID>_summary.json
-  outputs/figures/case_studies/quality_report.txt  (all 9 cases)
+  outputs/figures/case_studies/<Class>/<Class>_<EID>.{pdf,png}      (composite)
+  outputs/figures/case_studies/<Class>/<Class>_<EID>_{a,b,c,d}.png  (individual panels)
+  outputs/figures/case_studies/<Class>/<Class>_<EID>_summary.json
+  outputs/figures/case_studies/quality_report.txt                    (all 9 cases)
 
 Reads:
   outputs/explanations/<Class>/<EID>.json
@@ -51,7 +52,7 @@ sys.path.insert(0, str(ROOT))
 from explore._paths import paths  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.model.temporal_sampler import TemporalNeighborSampler  # noqa: E402
-from src.visualization.case_study_plots import make_case_study_figure  # noqa: E402
+from src.visualization.case_study_plots import make_case_study_figure, make_panel_figures  # noqa: E402
 
 _P = paths()
 
@@ -178,6 +179,12 @@ def _summary(plain: dict, topo: dict, W_seconds: float) -> dict:
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--class", dest="filter_class", default=None,
+                    help="Run only this attack class (e.g. Shellcode)")
+    args = ap.parse_args()
+
     cfg = _P["cfg"]
     W_seconds = float(cfg["model"]["temporal_window_seconds"])
     fanouts   = cfg["model"]["fanouts"]
@@ -201,7 +208,15 @@ def main() -> None:
 
     quality_rows: list[str] = []
 
-    for class_name, global_eid, has_nbrs in CANDIDATES:
+    candidates = CANDIDATES
+    if args.filter_class:
+        candidates = [(c, e, h) for c, e, h in CANDIDATES if c == args.filter_class]
+        if not candidates:
+            logger.error(f"No candidate found for class '{args.filter_class}'. "
+                         f"Valid classes: {[c for c,_,_ in CANDIDATES]}")
+            return
+
+    for class_name, global_eid, has_nbrs in candidates:
         logger.info(f"Processing {class_name} EID={global_eid} …")
 
         json_path = EXPL_DIR / class_name / f"{global_eid}.json"
@@ -245,17 +260,35 @@ def main() -> None:
         )
 
         stem = f"{class_name}_{global_eid}"
-        fig.savefig(str(OUT_DIR / f"{stem}.pdf"), bbox_inches="tight", dpi=300)
-        fig.savefig(str(OUT_DIR / f"{stem}.png"), bbox_inches="tight", dpi=150)
+        class_dir = OUT_DIR / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+
+        fig.savefig(str(class_dir / f"{stem}.pdf"), bbox_inches="tight", dpi=300)
+        fig.savefig(str(class_dir / f"{stem}.png"), bbox_inches="tight", dpi=150)
         plt.close(fig)
-        logger.info(f"  Saved {stem}.pdf / {stem}.png")
+        logger.info(f"  Saved {class_name}/{stem}.pdf / .png")
+
+        # Individual panel PNGs — keyed by caption string, used as filename stem
+        panels = make_panel_figures(
+            explanation=explanation,
+            topo=topo,
+            id2ip=id2ip,
+            class_name=class_name,
+            W_seconds=W_seconds,
+            top_feat=20,
+        )
+        for slug, panel_fig in panels.items():
+            panel_path = class_dir / f"{stem}_{slug}.png"
+            panel_fig.savefig(str(panel_path), bbox_inches="tight", dpi=150)
+            plt.close(panel_fig)
+        logger.info(f"  Saved 4 individual panels → {class_name}/")
 
         # Summary JSON
         summ = _summary(explanation, topo, W_seconds)
-        summ_path = OUT_DIR / f"{stem}_summary.json"
+        summ_path = class_dir / f"{stem}_summary.json"
         with open(summ_path, "w") as f:
             json.dump(summ, f, indent=2)
-        logger.info(f"  Summary → {summ_path.name}")
+        logger.info(f"  Summary → {class_name}/{summ_path.name}")
 
         # Quality report row
         fg   = np.array(plain["feature_group_shap"])
