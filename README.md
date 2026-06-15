@@ -10,6 +10,10 @@ Extends TE-G-SAGE with IP-level nodes, temporally-faithful neighbour sampling,
 a 15-dim temporal node state, and three-granularity SHAP coalitions:
 feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
 
+> **Paper:** *SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural
+> Networks in Network Intrusion Detection* — currently under peer review.
+> Full citation to follow upon acceptance.
+
 ---
 
 ## For reviewers
@@ -17,13 +21,13 @@ feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
 This repository supports two papers that share the same pipeline code.
 Jump to the section that matches the paper you are reviewing:
 
-- **[Paper 2 — SHAP-GSD](#paper-2--shap-gsd-peer-review-pending)** — single-dataset
+- **[SHAP-GSD (under peer review)](#shap-gsd-under-peer-review)** — single-dataset
   experiments on NF-UNSW-NB15-v3; all results reported in the paper come from
   this run.
-- **[Paper 3 — Proxy Ground-Truth Evaluation Framework](#paper-3--proxy-ground-truth-evaluation-framework-working-title)** — multi-dataset
+- **[Paper 3 — Proxy Ground-Truth Evaluation Framework](#paper-3--proxy-ground-truth-evaluation-framework-in-preparation)** — multi-dataset
   cross-validation using the same pipeline across NF-CSE-CIC-IDS2018-v3,
-  NF-ToN-IoT-v3, and NF-BoT-IoT-v3. The pipeline is ready; dataset runs
-  are in progress.
+  NF-ToN-IoT-v3, and NF-BoT-IoT-v3. In preparation; pipeline ready, dataset runs
+  in progress.
 
 Both papers use the `run_dataset.py` orchestrator. Each dataset run is
 fully isolated under `runs/<run_id>/` — results never collide.
@@ -44,7 +48,10 @@ pip install dgl -f https://data.dgl.ai/wheels/repo.html
 
 ---
 
-## Paper 2 — SHAP-GSD (peer-review pending)
+## SHAP-GSD (under peer review)
+
+*SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural Networks
+in Network Intrusion Detection* — full citation to follow upon acceptance.
 
 SHAP-GSD introduces a temporally-faithful, multi-granularity Shapley explanation
 framework evaluated on **NF-UNSW-NB15-v3**. The paper reports classification
@@ -278,14 +285,14 @@ and deployment instructions.
 
 ---
 
-## Paper 3 — Proxy Ground-Truth Evaluation Framework (working title)
+## Paper 3 — Proxy Ground-Truth Evaluation Framework (in preparation)
 
 Paper 3 validates the SHAP-GSD approach across multiple NetFlow datasets to
 assess whether explanation quality and node novelty engagement generalise
-beyond a single network environment. The pipeline is identical to Paper 2 —
+beyond a single network environment. The pipeline is identical to SHAP-GSD —
 the orchestrator handles per-dataset isolation automatically.
 
-**Status:** pipeline ready (v2.0.0+). Dataset runs in progress.
+**Status:** In preparation. Pipeline ready (v2.0.0+); dataset runs in progress.
 
 ### Datasets
 
