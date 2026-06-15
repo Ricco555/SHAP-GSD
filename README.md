@@ -18,19 +18,12 @@ feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
 
 ## For reviewers
 
-This repository supports two papers that share the same pipeline code.
-Jump to the section that matches the paper you are reviewing:
+This repository accompanies *SHAP-GSD: Temporal Multi-granular Explanation Method
+for Graph Neural Networks in Network Intrusion Detection* (under peer review).
+All results in the paper are from the single-dataset run on **NF-UNSW-NB15-v3**.
 
-- **[SHAP-GSD (under peer review)](#shap-gsd-under-peer-review)** — single-dataset
-  experiments on NF-UNSW-NB15-v3; all results reported in the paper come from
-  this run.
-- **[Paper 3 — Proxy Ground-Truth Evaluation Framework](#paper-3--proxy-ground-truth-evaluation-framework-in-preparation)** — multi-dataset
-  cross-validation using the same pipeline across NF-CSE-CIC-IDS2018-v3,
-  NF-ToN-IoT-v3, and NF-BoT-IoT-v3. In preparation; pipeline ready, dataset runs
-  in progress.
-
-Both papers use the `run_dataset.py` orchestrator. Each dataset run is
-fully isolated under `runs/<run_id>/` — results never collide.
+Jump to the **[SHAP-GSD](#shap-gsd-under-peer-review)** section for reproduction
+instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ---
 
@@ -219,8 +212,7 @@ All path resolution goes through `explore/_paths.py`, which reads
 | `explore/arguments/arg10_global_profiles.py` | `figures/arguments/arg10_*` | UNSW-specific |
 
 **Dataset-agnostic** scripts work on any completed run.
-**UNSW-specific** scripts contain hardcoded class names or flow EIDs (class-name
-decoupling is deferred to EX-C).
+**UNSW-specific** scripts contain hardcoded class names or flow EIDs.
 
 `explore/case_studies.py` produces one subfolder per attack class under
 `figures/case_studies/<Class>/`, each containing the composite 4-panel figure
@@ -228,8 +220,9 @@ decoupling is deferred to EX-C).
 captions (`<Class>_<EID>_{a,b,c,d}_<description>.png`). Run a single class
 with `--class <Name>` (e.g. `--class Shellcode`).
 
-See `explore/AGENT.md`, `explore/arguments/AGENT.md`, and `explore/graph/AGENT.md`
-for output location, reasoning-file format, and style constants.
+See [`explore/README.md`](explore/README.md) for output location, reasoning-file
+format, and style constants. Subfolder conventions: [`explore/arguments/README.md`](explore/arguments/README.md)
+and [`explore/graph/README.md`](explore/graph/README.md).
 
 ### Baseline explainer comparison (Table 2)
 
@@ -282,93 +275,6 @@ the three-granularity attribution panels (φ_F, φ_T, φ_N) side by side.
 
 See [`dashboard/README.md`](dashboard/README.md) for install, dev, Docker,
 and deployment instructions.
-
----
-
-## Paper 3 — Proxy Ground-Truth Evaluation Framework (in preparation)
-
-Paper 3 validates the SHAP-GSD approach across multiple NetFlow datasets to
-assess whether explanation quality and node novelty engagement generalise
-beyond a single network environment. The pipeline is identical to SHAP-GSD —
-the orchestrator handles per-dataset isolation automatically.
-
-**Status:** In preparation. Pipeline ready (v2.0.0+); dataset runs in progress.
-
-### Datasets
-
-Download any or all of the following from <https://staff.itee.uq.edu.au/marius/NIDS_datasets/>
-and place them under `data/`:
-
-```
-data/NF-CSE-CIC-IDS2018-v3.csv
-data/NF-ToN-IoT-v3.csv
-data/NF-BoT-IoT-v3.csv
-```
-
-**Column contract:** the last two columns must be named `Label` (binary 0/1)
-and `Attack` (string class name). All standard NF-* v3 files already follow
-this convention. Class enumeration is automatic — `Benign=0`, all other classes
-numbered alphabetically. Nothing is hardcoded.
-
-### Running the pipeline
-
-Each dataset is one command. Results are fully isolated under `runs/<run_id>/`:
-
-```bash
-python scripts/run_dataset.py --csv data/NF-CSE-CIC-IDS2018-v3.csv
-python scripts/run_dataset.py --csv data/NF-ToN-IoT-v3.csv
-python scripts/run_dataset.py --csv data/NF-BoT-IoT-v3.csv
-```
-
-Or run all datasets in one invocation (phases execute sequentially per dataset):
-
-```bash
-python scripts/run_dataset.py \
-    --csv data/NF-CSE-CIC-IDS2018-v3.csv \
-          data/NF-ToN-IoT-v3.csv \
-          data/NF-BoT-IoT-v3.csv
-```
-
-Additional flags:
-
-```bash
-# Run only specific phases:
-python scripts/run_dataset.py --csv data/NF-ToN-IoT-v3.csv --from-phase 1 --to-phase 2
-
-# Skip the pytest gate after phase 02 (not recommended):
-python scripts/run_dataset.py --csv data/NF-ToN-IoT-v3.csv --skip-tests
-
-# Regenerate the per-dataset config (overwrites manual edits):
-python scripts/run_dataset.py --csv data/NF-ToN-IoT-v3.csv --force-config
-```
-
-### Exploration figures across datasets
-
-Set `SHAP_GSD_CONFIG` to select which dataset run's outputs an exploration
-script reads from:
-
-```bash
-SHAP_GSD_CONFIG=configs/experiment_nf_ton_iot_v3.yaml python explore/table2_figure.py
-SHAP_GSD_CONFIG=configs/experiment_nf_bot_iot_v3.yaml python explore/class_analysis.py
-```
-
-Dataset-agnostic scripts (see table above) work on any completed run without
-modification.
-
-### What v2.0.0 introduced (multi-dataset foundation)
-
-- Dataset-agnostic label map: `Benign=0`, all other classes alphabetically
-- Per-dataset `run.dir` path isolation under `runs/<run_id>/`
-- `scripts/run_dataset.py` orchestrator
-- Column contract enforced at load time
-
-### What v2.1.0 introduced (explore/ alignment)
-
-- `explore/_paths.py` reads `SHAP_GSD_CONFIG` and resolves all output paths
-  to the correct `runs/<id>/` subdirectory
-- All 12 exploration scripts and 3 `AGENT.md` files updated for multi-dataset use
-- `SHAP_GSD_CONFIG` env var propagated through the orchestrator to every
-  sub-process, test, and explore script
 
 ---
 

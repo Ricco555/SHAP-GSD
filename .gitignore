@@ -16,6 +16,7 @@ datasets/
 
 # instructions and guides
 CLAUDE.md
+AGENT.md
 research_plan.md
 papers_34_plan.md
 implementation_log.md
