@@ -8,6 +8,5 @@ shap
 matplotlib
 joblib
 pyyaml
-xgboost
 pyarrow
 pydantic
