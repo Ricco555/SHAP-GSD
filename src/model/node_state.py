@@ -43,8 +43,15 @@ SEASONALITY:
 DATASET NOTE: UNSW-NB15 covers ~2 days. ~2 samples per hour-bucket per node.
 volume_deviation will have high variance — acknowledged in paper.
 
-SNAPSHOTS: Pre-compute node state every snapshot_interval edges in temporal
-order. Mini-batch looks up nearest snapshot <= t_e, applies delta updates.
+SNAPSHOTS (OFF by default — see NodeStateManager docstring): optionally
+pre-compute node state every snapshot_interval edges in temporal order.
+Mini-batch looks up nearest snapshot <= t_e, applies delta updates. Disabled
+by default (snapshot_interval=0) because nothing in the runtime query path
+(get_state_at_time / get_batch_states / rollback_edge(s), all below) reads
+these snapshots — they all recompute from _histories/_baselines directly.
+The only consumer anywhere in the codebase is the optional exploration
+figure script explore/graph/topology_panel.py, which already degrades
+gracefully (no snapshot overlay) when snapshots.pkl is empty.
 
 ROLLBACK (for temporal SHAP coalitions):
 When masking neighbor edge e' from node u:
@@ -62,6 +69,8 @@ Pre-compute per-node sorted edge lists for O(log n) rollback.
 
 import logging
 import pickle
+import resource
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +80,16 @@ from scipy.stats import entropy as scipy_entropy
 from src.data.preprocessor import port_to_bin_indices
 
 logger = logging.getLogger(__name__)
+
+
+def _maxrss_mb() -> float:
+    """Return the process' peak resident set size so far, in MiB.
+
+    ``ru_maxrss`` is kilobytes on Linux and bytes on macOS; this project only
+    targets Linux (HPC + dev), so we assume kilobytes. It is a monotonically
+    increasing high-water mark, not an instantaneous RSS reading.
+    """
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
 class _NodeHistory:
@@ -153,9 +172,26 @@ class NodeStateManager:
     State is computed from a rolling window W around the query time.
     Seasonal features use per-node per-hour baselines from training data only.
 
+    Periodic snapshotting (``build_snapshots``' Pass 2) is OFF by default
+    (``snapshot_interval=0``/``None``). It exists as an optional, disabled-
+    by-default capability: nothing on the real query path
+    (``get_state_at_time``, ``get_batch_states``, ``rollback_edge(s)``) reads
+    the snapshot dict — every one of those recomputes state on demand from
+    ``_histories``/``_baselines``. Snapshotting was originally meant as a
+    fast-lookup cache, but at Paper-3 scale (19-25M edges, up to ~205K nodes)
+    it is an O(n_snapshots × n_nodes) memory/time sink (observed ~90-100GB
+    for one dataset, projected 600-850GB for another) for a structure nothing
+    reads. The ONLY consumer anywhere in the codebase is the optional
+    exploration figure script ``explore/graph/topology_panel.py``, which
+    already degrades gracefully (no node-state overlay on its plots) when
+    ``snapshots.pkl`` holds the empty ``{"times": [], "states": []}`` shape.
+    Set ``snapshot_interval`` to a positive int (per-experiment config or
+    directly) to re-enable it for a given run — Pass 2 behaves exactly as it
+    always has when enabled.
+
     Typical workflow::
 
-        nsm = NodeStateManager(window_seconds=60, snapshot_interval=1000)
+        nsm = NodeStateManager(window_seconds=60, snapshot_interval=0)
         nsm.set_is_internal(is_internal_arr)          # from GraphBuilder
         nsm.build_hourly_baselines(train_src, train_dst, train_ts, in_b, out_b)
         nsm.build_snapshots(all_src, all_dst, all_ts, in_b, out_b, dst_ports)
@@ -168,12 +204,16 @@ class NodeStateManager:
     def __init__(
         self,
         window_seconds: float = 60.0,
-        snapshot_interval: int = 1000,
+        snapshot_interval: Optional[int] = 0,
     ) -> None:
         """
         Args:
             window_seconds:    rolling window width W in seconds (default 60).
-            snapshot_interval: edges between periodic state snapshots (default 1000).
+            snapshot_interval: edges between periodic state snapshots. Default
+                                0 (disabled — see class docstring for why: no
+                                runtime query path reads snapshots). ``None``
+                                is also treated as disabled. Set to a positive
+                                int to re-enable snapshot generation.
         """
         self.window_seconds    = window_seconds
         self._W_ms: float      = window_seconds * 1000.0
@@ -231,8 +271,10 @@ class NodeStateManager:
             in_bytes:      raw IN_BYTES per flow (n_train,).
             out_bytes:     raw OUT_BYTES per flow (n_train,).
         """
+        t0 = time.monotonic()
         logger.info(
-            f"Building hourly baselines from {len(src_node_ids):,} training edges"
+            f"Building hourly baselines from {len(src_node_ids):,} training edges "
+            f"(maxrss={_maxrss_mb():.0f} MiB)"
         )
 
         # accumulator[node_id][hour] = list of log(1+bytes) values
@@ -272,7 +314,8 @@ class NodeStateManager:
 
         logger.info(
             f"Hourly baselines built: {len(self._baselines):,} nodes, "
-            f"global fallback={self._global_baseline:.4f}"
+            f"global fallback={self._global_baseline:.4f}, "
+            f"elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB"
         )
 
     def build_snapshots(
@@ -285,11 +328,23 @@ class NodeStateManager:
         dst_ports: np.ndarray,
         snapshot_interval: Optional[int] = None,
     ) -> None:
-        """Build per-node edge histories and periodic state snapshots.
+        """Build per-node edge histories and (optionally) periodic state snapshots.
 
         Processes ALL edges (train + val + test) in temporal order so that
         val/test node states correctly reflect prior training history.
         Call build_hourly_baselines() first.
+
+        Pass 1 (edge histories, below) always runs — it populates
+        ``_histories``, which every real state query
+        (``get_state_at_time``/``get_batch_states``/``rollback_edge(s)``) reads.
+
+        Pass 2 (periodic snapshots) is SKIPPED when ``interval`` resolves to 0
+        or None (the default — see class docstring). This is a pure
+        performance/memory optimization: nothing on the query path reads
+        ``_snap_times``/``_snap_states``, so skipping Pass 2 changes no
+        computed value, only whether the (unused-by-runtime) snapshot cache
+        gets built. At Paper-3 scale (19-25M edges) Pass 2 was an
+        O(n_snapshots × n_nodes) sink of both time and memory.
 
         Note: extends the spec's (graph, timestamps, snapshot_interval)
         signature to include the raw byte and port data required for
@@ -305,18 +360,21 @@ class NodeStateManager:
                               to semantic bin indices (0-15) internally so that
                               dst_port_entropy reflects service diversity, not
                               raw port diversity.
-            snapshot_interval: edges between snapshots; defaults to self.snapshot_interval.
+            snapshot_interval: edges between snapshots; defaults to
+                              self.snapshot_interval. 0/None disables Pass 2.
         """
         interval = snapshot_interval if snapshot_interval is not None else self.snapshot_interval
         n = len(src_node_ids)
         logger.info(
-            f"Building node histories: {n:,} edges, interval={interval}"
+            f"Building node histories: {n:,} edges, interval={interval or 'disabled'} "
+            f"(maxrss={_maxrss_mb():.0f} MiB)"
         )
 
         # Pass 1: populate per-node edge lists.
         # Convert raw L4_DST_PORT values to semantic bin indices (0-15) ONCE
         # before the loop so that dst_port_entropy and unique_dst_port_count
         # operate over the 16-service taxonomy, not raw port numbers.
+        t0 = time.monotonic()
         bin_indices = port_to_bin_indices(np.asarray(dst_ports))
 
         self._histories.clear()
@@ -347,12 +405,23 @@ class NodeStateManager:
         for hist in self._histories.values():
             hist.finalize()
 
-        logger.info(f"Edge histories finalized for {len(self._histories):,} nodes")
+        logger.info(
+            f"Edge histories finalized for {len(self._histories):,} nodes "
+            f"(pass1 elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB)"
+        )
 
-        # Pass 2: take periodic state snapshots
+        # Pass 2: take periodic state snapshots (OFF by default — see docstring)
         self._snap_times.clear()
         self._snap_states.clear()
 
+        if not interval:
+            logger.info(
+                "Snapshot generation disabled (snapshot_interval=0/None) — "
+                "skipping Pass 2; _snap_times/_snap_states left empty."
+            )
+            return
+
+        t1 = time.monotonic()
         for step in range(interval - 1, n, interval):
             t_ms = int(timestamps_ms[step])
             # Only snapshot nodes that have been seen up to this point
@@ -363,7 +432,10 @@ class NodeStateManager:
             self._snap_times.append(t_ms)
             self._snap_states.append(snap)
 
-        logger.info(f"Snapshots taken: {len(self._snap_times):,}")
+        logger.info(
+            f"Snapshots taken: {len(self._snap_times):,} "
+            f"(pass2 elapsed={time.monotonic() - t1:.1f}s, maxrss={_maxrss_mb():.0f} MiB)"
+        )
 
     # ------------------------------------------------------------------
     # State queries
@@ -472,6 +544,7 @@ class NodeStateManager:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        t0 = time.monotonic()
 
         with open(output_dir / "baselines.pkl", "wb") as f:
             pickle.dump(
@@ -492,7 +565,10 @@ class NodeStateManager:
                 {"window_seconds": self.window_seconds,
                  "snapshot_interval": self.snapshot_interval}, f,
             )
-        logger.info(f"NodeStateManager saved → {output_dir}")
+        logger.info(
+            f"NodeStateManager saved → {output_dir} "
+            f"(save elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB)"
+        )
 
     @classmethod
     def load(cls, output_dir: Path | str) -> "NodeStateManager":

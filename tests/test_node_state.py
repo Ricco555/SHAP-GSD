@@ -11,9 +11,18 @@ Tests:
   4 — Multi-rollback:  three successive single-edge rollbacks match expectations.
   5 — Seasonal:        time_sin/cos computed from known timestamp; volume_deviation=0
                        when current volume equals hourly baseline.
+  6 — Snapshots disabled by default: build_snapshots() with snapshot_interval=0/None
+                       (the new default) leaves _snap_times/_snap_states empty, and
+                       an empty snapshots.pkl round-trips through save()/load().
+  7 — Snapshots still work when explicitly enabled: same edges, interval>0,
+                       produces non-empty snapshots exactly as before this change.
+  8 — Query-path parity: get_state_at_time/rollback_edge results are identical
+                       whether snapshot generation is enabled or disabled — proving
+                       snapshots were always dead weight for the real query path.
 """
 
 import math
+import pickle
 import sys
 from pathlib import Path
 
@@ -273,3 +282,190 @@ def test_seasonal_features():
     assert abs(state[13]) < 0.5, (
         f"volume_deviation={state[13]} too large when current matches baseline"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared fixture edges for the snapshot on/off tests below
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_TEST_EDGES = [
+    {"ts": 100, "src": 0, "dst": 1, "in_bytes": 0,   "out_bytes": 100, "dst_port": 80},
+    {"ts": 200, "src": 0, "dst": 2, "in_bytes": 0,   "out_bytes": 200, "dst_port": 443},
+    {"ts": 300, "src": 0, "dst": 1, "in_bytes": 0,   "out_bytes": 150, "dst_port": 80},
+    {"ts": 400, "src": 3, "dst": 0, "in_bytes": 500, "out_bytes": 0,   "dst_port": 9999},
+    {"ts": 500, "src": 0, "dst": 2, "in_bytes": 0,   "out_bytes": 300, "dst_port": 22},
+    {"ts": 600, "src": 2, "dst": 3, "in_bytes": 50,  "out_bytes": 0,   "dst_port": 8080},
+]
+
+
+def _arrays_from_edges(edges: list[dict]) -> dict[str, np.ndarray]:
+    return {
+        "src": np.array([e["src"] for e in edges], dtype=np.int64),
+        "dst": np.array([e["dst"] for e in edges], dtype=np.int64),
+        "ts":  np.array([e["ts"] for e in edges], dtype=np.int64),
+        "ib":  np.array([e["in_bytes"] for e in edges], dtype=np.float32),
+        "ob":  np.array([e["out_bytes"] for e in edges], dtype=np.float32),
+        "dp":  np.array([e["dst_port"] for e in edges], dtype=np.int32),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Snapshot generation disabled by default
+# ---------------------------------------------------------------------------
+
+def test_snapshots_disabled_by_default():
+    """Default snapshot_interval (0) skips Pass 2: empty lists, valid empty pkl."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    nsm = NodeStateManager(window_seconds=1.0)   # default snapshot_interval=0
+    assert nsm.snapshot_interval == 0
+
+    nsm.build_hourly_baselines(
+        arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+        arr["ib"][:half], arr["ob"][:half],
+    )
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+
+    assert nsm._snap_times == []
+    assert nsm._snap_states == []
+    # Pass 1 (histories) must still have run — the real query path depends on it.
+    assert len(nsm._histories) > 0
+
+
+def test_snapshots_disabled_explicit_none():
+    """snapshot_interval=None is also treated as disabled (YAML null)."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=None)
+    nsm.build_hourly_baselines(
+        arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+        arr["ib"][:half], arr["ob"][:half],
+    )
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+
+    assert nsm._snap_times == []
+    assert nsm._snap_states == []
+
+
+def test_disabled_snapshots_save_load_roundtrip(tmp_path):
+    """save()/load() round-trip a valid empty snapshots.pkl when disabled."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=0)
+    nsm.build_hourly_baselines(
+        arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+        arr["ib"][:half], arr["ob"][:half],
+    )
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+    max_node = max(int(arr["src"].max()), int(arr["dst"].max())) + 1
+    nsm.set_is_internal(np.zeros(max_node, dtype=np.float32))
+
+    out_dir = tmp_path / "node_state"
+    nsm.save(out_dir)
+
+    with open(out_dir / "snapshots.pkl", "rb") as f:
+        snaps = pickle.load(f)
+    assert snaps == {"times": [], "states": []}
+
+    loaded = NodeStateManager.load(out_dir)
+    assert loaded._snap_times == []
+    assert loaded._snap_states == []
+    assert loaded.snapshot_interval == 0
+
+    # get_state_at_time still works normally after a disabled-snapshot round-trip.
+    state = loaded.get_state_at_time(node_id=0, time_ms=600.0)
+    assert state.shape == (15,)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Snapshot generation still works when explicitly enabled
+# ---------------------------------------------------------------------------
+
+def test_snapshots_enabled_explicitly():
+    """snapshot_interval>0 still builds non-empty snapshots exactly as before."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=2)
+    nsm.build_hourly_baselines(
+        arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+        arr["ib"][:half], arr["ob"][:half],
+    )
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+
+    n = len(_SNAPSHOT_TEST_EDGES)
+    expected_n_snaps = len(range(2 - 1, n, 2))
+    assert len(nsm._snap_times) == expected_n_snaps
+    assert len(nsm._snap_states) == expected_n_snaps
+    assert expected_n_snaps > 0
+    # Every snapshot dict maps node_id -> 15-dim vector.
+    for snap in nsm._snap_states:
+        for vec in snap.values():
+            assert vec.shape == (15,)
+
+
+def test_snapshots_enabled_save_load_roundtrip(tmp_path):
+    """Enabled snapshots survive a save()/load() round-trip with real content."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=2)
+    nsm.build_hourly_baselines(
+        arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+        arr["ib"][:half], arr["ob"][:half],
+    )
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+    max_node = max(int(arr["src"].max()), int(arr["dst"].max())) + 1
+    nsm.set_is_internal(np.zeros(max_node, dtype=np.float32))
+
+    out_dir = tmp_path / "node_state_enabled"
+    nsm.save(out_dir)
+    loaded = NodeStateManager.load(out_dir)
+
+    assert len(loaded._snap_times) == len(nsm._snap_times)
+    assert len(loaded._snap_states) == len(nsm._snap_states)
+    assert loaded.snapshot_interval == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Query-path parity — snapshots on vs off must not change real queries
+# ---------------------------------------------------------------------------
+
+def test_query_results_identical_with_snapshots_on_or_off():
+    """get_state_at_time / rollback_edge give identical results regardless of
+    whether snapshot generation (Pass 2) ran — proving the snapshot cache is
+    never consulted by the real query path."""
+    arr = _arrays_from_edges(_SNAPSHOT_TEST_EDGES)
+    half = len(_SNAPSHOT_TEST_EDGES) // 2
+
+    def _make(interval):
+        nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=interval)
+        nsm.build_hourly_baselines(
+            arr["src"][:half], arr["dst"][:half], arr["ts"][:half],
+            arr["ib"][:half], arr["ob"][:half],
+        )
+        nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"], arr["ib"], arr["ob"], arr["dp"])
+        max_node = max(int(arr["src"].max()), int(arr["dst"].max())) + 1
+        nsm.set_is_internal(np.zeros(max_node, dtype=np.float32))
+        return nsm
+
+    nsm_off = _make(0)
+    nsm_on  = _make(2)
+
+    for node_id in range(4):
+        s_off = nsm_off.get_state_at_time(node_id=node_id, time_ms=600.0)
+        s_on  = nsm_on.get_state_at_time(node_id=node_id, time_ms=600.0)
+        np.testing.assert_array_equal(s_off, s_on)
+
+    rb_off = nsm_off.rollback_edge(
+        node_id=0, edge_timestamp_ms=500.0, edge_direction="outgoing",
+        edge_features={"peer_id": 2}, query_time_ms=600.0,
+    )
+    rb_on = nsm_on.rollback_edge(
+        node_id=0, edge_timestamp_ms=500.0, edge_direction="outgoing",
+        edge_features={"peer_id": 2}, query_time_ms=600.0,
+    )
+    np.testing.assert_array_equal(rb_off, rb_on)
