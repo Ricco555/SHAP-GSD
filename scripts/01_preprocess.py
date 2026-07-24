@@ -29,7 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.balancer import TemporalBalancer
 from src.data.feature_groups import FeatureGrouping
-from src.data.feature_store import write_feature_store
+from src.data.feature_store import write_edges_meta, write_feature_store
 from src.data.loader import CATEGORICAL_COLS, load_raw
 from src.data.preprocessor import Preprocessor
 from src.utils.config import load_config
@@ -87,6 +87,13 @@ def main(cfg: dict) -> None:
             edge_indices=data["edge_indices"],
             timestamps=data["timestamps"],
             labels=data["labels"],
+        )
+        # Persist the raw columns Phase 2 needs (IPs, bytes, dst_port), aligned
+        # row-for-row with edge_indices — lets Phase 2 skip the CSV reload+sort.
+        write_edges_meta(
+            fs_root / split_name,
+            data["edges_meta"],
+            n_expected=len(data["edge_indices"]),
         )
 
     # ── 6. Save split indices ─────────────────────────────────────────────────

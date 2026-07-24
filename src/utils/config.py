@@ -19,17 +19,31 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _apply_run_dir_prefix(cfg: dict) -> dict:
-    """Prefix all relative output/graph paths with ``run.dir`` when it is set.
+    """Prefix all relative output/graph/topology paths with ``run.dir`` when set.
 
     When ``run.dir`` is empty (the default) the config is returned unchanged,
     preserving backwards-compatibility with existing on-disk artifacts.
     Absolute paths are never modified.
+
+    ``topology`` is in the allowlist so spec 05's future ``topology:`` block
+    gets the same ``runs/<run_id>/`` isolation as ``output``/``graph``; while no
+    such flat output key exists yet this is a no-op, but it isolates one the
+    moment it is added. The loop deliberately walks only ONE level deep, so any
+    run.dir-isolated section must keep its output-path key exactly one level
+    below the section root (``topology.output_path``, never
+    ``topology.<sub>.output_path``): a nested value is not a ``str`` and the
+    guard skips it silently. Do NOT make the loop recursive to "support"
+    nesting — a recursive walk would also rewrite non-path relative-looking
+    scalars (e.g. a future ``topology.internal_prefixes: "auto"``), a
+    higher-blast-radius hazard on this load-bearing function (spec 06 §2.1.3-B).
     """
     run_dir = cfg.get("run", {}).get("dir", "") or ""
     if not run_dir:
         return cfg
     prefix = Path(run_dir)
-    for section in ("output", "graph"):
+    # flat-schema allowlist: output-path keys must sit exactly one level below
+    # the section root (see specs/06 §2.1.3-B)
+    for section in ("output", "graph", "topology"):
         if section not in cfg:
             continue
         for k, v in cfg[section].items():
