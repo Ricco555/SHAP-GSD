@@ -63,9 +63,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-EXPL_DIR    = ROOT / "outputs" / "explanations"
-METRICS_DIR = ROOT / "outputs" / "metrics"
-
 # ── IP classification ─────────────────────────────────────────────────────────
 
 def _ip_type(ip_str: str) -> str:
@@ -112,7 +109,7 @@ def audit_node_map(graphs_dir: Path) -> dict:
 
 # ── Pass 2: explanation JSON scan ─────────────────────────────────────────────
 
-def audit_explanation_jsons() -> dict:
+def audit_explanation_jsons(expl_dir: Path) -> dict:
     """Scan all explanation JSONs for non-zero src/dst novelty shap values."""
     total = 0
     n_nonzero_src = 0
@@ -120,7 +117,7 @@ def audit_explanation_jsons() -> dict:
     n_nonzero_either = 0
     by_class: dict[str, dict] = {}
 
-    for cls_dir in sorted(EXPL_DIR.iterdir()):
+    for cls_dir in sorted(expl_dir.iterdir()):
         if not cls_dir.is_dir():
             continue
         cls_name = cls_dir.name
@@ -315,17 +312,19 @@ def main() -> None:
     parser.add_argument("--seed",     type=int, default=42)
     args = parser.parse_args()
 
-    METRICS_DIR.mkdir(parents=True, exist_ok=True)
-
     cfg = load_config(args.config)
-    graphs_dir = Path(cfg["graph"]["dir"])
+    graphs_dir  = Path(cfg["graph"]["dir"])
+    outputs_dir = Path(cfg["output"]["outputs_dir"])
+    expl_dir    = outputs_dir / "explanations"
+    metrics_dir = outputs_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass 1
     node_map = audit_node_map(graphs_dir)
 
     # Pass 2
     logger.info("Scanning explanation JSONs …")
-    json_audit = audit_explanation_jsons()
+    json_audit = audit_explanation_jsons(expl_dir)
 
     # Pass 3 (optional)
     state_audit: dict | None = None
@@ -342,11 +341,11 @@ def main() -> None:
         "explanation_json_audit": json_audit,
         "node_state_audit":       state_audit,
     }
-    json_path = METRICS_DIR / "novelty_audit.json"
+    json_path = metrics_dir / "novelty_audit.json"
     json_path.write_text(json.dumps(output, indent=2))
     logger.info(f"JSON → {json_path}")
 
-    _write_report(node_map, json_audit, state_audit, METRICS_DIR / "novelty_audit.txt")
+    _write_report(node_map, json_audit, state_audit, metrics_dir / "novelty_audit.txt")
 
 
 if __name__ == "__main__":

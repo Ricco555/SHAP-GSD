@@ -8,5 +8,6 @@ shap
 matplotlib
 joblib
 pyyaml
-pyarrow
+pyarrow==24.0.0
 pydantic
+pytest==8.1.1
