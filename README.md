@@ -67,7 +67,7 @@ data/NF-UNSW-NB15-v3.csv
 python scripts/run_dataset.py --csv data/NF-UNSW-NB15-v3.csv
 ```
 
-Runs all 13 phases in order. Outputs are written to `runs/nf_unsw_nb15_v3/`.
+Runs all 14 phases in order. Outputs are written to `runs/nf_unsw_nb15_v3/`.
 The orchestrator sets `SHAP_GSD_CONFIG=configs/experiment_nf_unsw_nb15_v3.yaml`
 for every sub-process automatically.
 
@@ -121,6 +121,10 @@ data/NF-UNSW-NB15-v3.csv
         │
         ▼
 13_ablations.py     →  runs/nf_unsw_nb15_v3/outputs/metrics/ablation_results.json
+        │
+        ▼
+14_gateway_distance.py →  runs/nf_unsw_nb15_v3/outputs/topology/gateway_distance.json
+                          (malicious-subgraph gateway distance; derives k*)
 ```
 
 ### Phase notes
@@ -178,10 +182,25 @@ Benign 25.0%.
 | Balancing         | −0.034    |
 | Tuning vs defaults| −0.001    |
 
+**Phase 14 — Gateway distance (topology diagnostic)**
+
+Measures, on the malicious-only training subgraph, the reverse-hop distance
+from each attacked host to the internal/external role boundary (`d_gw`), and
+derives `k* = max d_gw + 1` — the neighbourhood depth justified by measured
+topology rather than inherited as a default. Runs by default on every
+pipeline execution; disable per-run with `--skip-gateway-distance` (CLI) or
+`topology.gateway_distance.enabled: false` (config). Writes
+`outputs/topology/gateway_distance.{json,txt}`; the headline `k_star` is
+logged and stored in the JSON. On NF-UNSW-NB15-v3 the malicious subgraph is
+degenerate (`d_gw ≡ 1` for every victim, `k* = 2`), which is consistent with
+— though does not by itself prove optimal — the model's existing k=2 depth;
+deriving model depth from `k*` on other datasets remains a separate, manual
+step.
+
 ### Exploration figures (`explore/`)
 
 The `explore/` folder contains paper-figure scripts that read from pipeline
-outputs and produce publication-quality charts. Run after phases 01–13 complete.
+outputs and produce publication-quality charts. Run after phases 01–14 complete.
 
 ```bash
 # Uses runs/nf_unsw_nb15_v3/ outputs automatically via SHAP_GSD_CONFIG
@@ -325,6 +344,10 @@ model:
 balancer:
   class_weight_method: "effective_num"   # Cui et al. CVPR 2019
   effective_num_beta: 0.9999
+
+topology:
+  gateway_distance:
+    enabled: true   # phase 14 (gateway-distance diagnostic) runs by default
 ```
 
 ---
@@ -351,6 +374,7 @@ All paths are relative to `runs/<run_id>/`.
 | `outputs/metrics/runtime_by_layer.json` | Mean/std/p95 runtime per SHAP granularity |
 | `outputs/metrics/efficiency.json` | Shapley efficiency audit results |
 | `outputs/metrics/novelty_audit.json` | Node IP topology + per-class novelty engagement |
+| `outputs/topology/gateway_distance.json` | Malicious-subgraph gateway-distance diagnostic (`k_star`, role assignment, per-class `d_gw`) |
 | `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
 | `outputs/baselines/` | Baseline comparison results and Table 2 |
 | `outputs/figures/` | All publication figures from explore/ scripts |
