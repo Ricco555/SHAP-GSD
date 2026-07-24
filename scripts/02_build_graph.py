@@ -11,7 +11,6 @@ Outputs:
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -21,9 +20,8 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.data.feature_store import FeatureStore
+from src.data.feature_store import read_edges_meta
 from src.data.graph_builder import GraphBuilder
-from src.data.loader import load_raw
 from src.model.node_state import NodeStateManager
 from src.utils.config import load_config
 
@@ -38,54 +36,59 @@ logger = logging.getLogger(__name__)
 def main(cfg: dict) -> None:
     repo_root = REPO_ROOT
 
-    # ── 1. Load and sort raw data (same order as Phase 1) ─────────────────────
-    csv_path = repo_root / cfg["data"]["csv_path"]
-    logger.info(f"Loading {csv_path}")
-    df = load_raw(csv_path)
-    df = df.sort_values("FLOW_START_MILLISECONDS", kind="mergesort").reset_index(drop=True)
-    logger.info(f"Sorted dataset: {len(df):,} rows")
+    # ── 1. Read Phase 1's per-split feature-store artifacts (no CSV reload) ────
+    # Phase 2 is a consumer of Phase 1's global EID ordering. Rather than
+    # re-load + re-sort the raw CSV (two independent sorts agreeing only by
+    # coincidence), we read the per-split artifacts Phase 1 already wrote. The
+    # raw columns Phase 2 still needs (IPs, bytes, dst_port) come from the new
+    # edges_meta.parquet, aligned row-for-row with edge_indices.npy.
+    fs_root = repo_root / cfg["output"]["feature_store_dir"]
+    SPLITS: tuple[str, ...] = ("train", "val", "test")
+    per_split: dict[str, dict[str, np.ndarray]] = {}
+    for s in SPLITS:
+        d = fs_root / s
+        m = read_edges_meta(d)
+        per_split[s] = {
+            "edge_indices": np.load(d / "edge_indices.npy"),
+            "timestamps":   np.load(d / "timestamps.npy"),
+            "labels":       np.load(d / "labels.npy"),
+            "src_ip":       m["src_ip"],
+            "dst_ip":       m["dst_ip"],
+            "in_bytes":     m["in_bytes"],    # already float32
+            "out_bytes":    m["out_bytes"],   # already float32
+            "dst_port":     m["dst_port"],    # already int32
+        }
+        logger.info(f"Read split '{s}': {len(per_split[s]['edge_indices']):,} edges")
 
-    # ── 2. Load split boundaries from Phase 1 ─────────────────────────────────
-    si_path = repo_root / cfg["output"]["split_indices_path"]
-    with open(si_path) as f:
-        si = json.load(f)
-    tau_train_ms = si["tau_train_ms"]
-    tau_val_ms   = si["tau_val_ms"]
-    n_total      = si["n_total"]
+    def _cat(key: str) -> np.ndarray:
+        """Concatenate a per-split array across train→val→test in EID order."""
+        return np.concatenate([per_split[s][key] for s in SPLITS])
 
-    assert len(df) == n_total, (
-        f"CSV row count {len(df):,} != split_indices n_total {n_total:,}. "
-        "Re-run Phase 1 if the CSV was changed."
+    # All-edges arrays in global temporal order. Concatenating the contiguous
+    # per-split EID ranges (train [0,n_train), val [n_train,…), test remainder)
+    # reproduces Phase 1's exact arange-ordered global sequence — no second sort.
+    src_ips_all   = _cat("src_ip")
+    dst_ips_all   = _cat("dst_ip")
+    ts_all        = _cat("timestamps")
+    global_eids   = _cat("edge_indices")
+    all_in_bytes  = _cat("in_bytes")     # already float32
+    all_out_bytes = _cat("out_bytes")    # already float32
+    all_dst_ports = _cat("dst_port")     # already int32
+
+    # Tripwire (replaces the deleted CSV-length check): the concatenated per-split
+    # EIDs must be the contiguous global arange (CRITICAL INVARIANT 2). A failure
+    # means Phase 1's splits are no longer contiguous ranges — re-run Phase 1.
+    assert np.array_equal(global_eids, np.arange(len(global_eids), dtype=np.int64)), (
+        "Concatenated per-split EIDs are not the contiguous global arange — "
+        "splits diverged; re-run Phase 1."
     )
-
-    ts_all = df["FLOW_START_MILLISECONDS"].values.astype(np.int64)
-
-    # Assign global EIDs (position in sorted dataset, 0-indexed)
-    global_eids = np.arange(n_total, dtype=np.int64)
-
-    train_mask = ts_all <= tau_train_ms
-    val_mask   = (ts_all > tau_train_ms) & (ts_all <= tau_val_ms)
-    test_mask  = ts_all > tau_val_ms
-
     logger.info(
-        f"Split sizes — train: {train_mask.sum():,}  "
-        f"val: {val_mask.sum():,}  test: {test_mask.sum():,}"
+        f"Split sizes — train: {len(per_split['train']['edge_indices']):,}  "
+        f"val: {len(per_split['val']['edge_indices']):,}  "
+        f"test: {len(per_split['test']['edge_indices']):,}"
     )
 
-    src_ips_all = df["IPV4_SRC_ADDR"].values
-    dst_ips_all = df["IPV4_DST_ADDR"].values
-
-    # Multi-class labels from Attack column — mapping loaded from artifacts
-    # produced by Phase 1 (01_preprocess.py → Preprocessor.save_label_map).
-    label_map_path = repo_root / cfg["output"]["artifacts_dir"] / "label_map.json"
-    with open(label_map_path) as f:
-        attack_to_int: dict[str, int] = json.load(f)
-    logger.info(f"Loaded label map from {label_map_path}: {attack_to_int}")
-    labels_all = np.array(
-        [attack_to_int[str(v)] for v in df["Attack"].values], dtype=np.int64
-    )
-
-    # ── 3. Build global node map ───────────────────────────────────────────────
+    # ── 2. Build global node map ───────────────────────────────────────────────
     graph_dir = repo_root / cfg["graph"]["dir"]
     builder   = GraphBuilder(graph_dir=graph_dir)
     builder.build_global_node_map(src_ips_all, dst_ips_all)
@@ -93,32 +96,23 @@ def main(cfg: dict) -> None:
 
     is_internal_arr = GraphBuilder.compute_is_internal_array(builder.node_id_map)
 
-    # ── 4. Build and save split graphs ─────────────────────────────────────────
-    splits = {
-        "train": train_mask,
-        "val":   val_mask,
-        "test":  test_mask,
-    }
+    # ── 3. Build and save split graphs (directly from per-split arrays) ────────
     graphs = {}
-    for split_name, mask in splits.items():
-        fs = FeatureStore(repo_root / cfg["output"]["feature_store_dir"] / split_name)
-
+    for s in SPLITS:
+        ps = per_split[s]
         g = builder.build_split_graph(
-            split_name=split_name,
-            src_ips=src_ips_all[mask],
-            dst_ips=dst_ips_all[mask],
-            global_eids=global_eids[mask],
-            timestamps=ts_all[mask],
-            labels=labels_all[mask],
+            split_name=s,
+            src_ips=ps["src_ip"],
+            dst_ips=ps["dst_ip"],
+            global_eids=ps["edge_indices"],
+            timestamps=ps["timestamps"],
+            labels=ps["labels"],
         )
-        builder.validate_eid_alignment(
-            g,
-            repo_root / cfg["output"]["feature_store_dir"] / split_name,
-        )
-        builder.save_split_graph(split_name, g)
-        graphs[split_name] = g
+        builder.validate_eid_alignment(g, fs_root / s)
+        builder.save_split_graph(s, g)
+        graphs[s] = g
 
-    # ── 5. Build NodeStateManager ──────────────────────────────────────────────
+    # ── 4. Build NodeStateManager ──────────────────────────────────────────────
     window_s    = cfg["model"]["temporal_window_seconds"]
     snap_interval = cfg["model"]["snapshot_interval"]
 
@@ -128,9 +122,10 @@ def main(cfg: dict) -> None:
     )
     nsm.set_is_internal(is_internal_arr)
 
-    # Baselines from training data only (EIDs 0..n_train-1)
-    train_src = src_ips_all[train_mask]
-    train_dst = dst_ips_all[train_mask]
+    # Baselines from training data only (the first per-split array, EIDs 0..n_train-1)
+    train_ps = per_split["train"]
+    train_src = train_ps["src_ip"]
+    train_dst = train_ps["dst_ip"]
 
     # Convert IP strings to node IDs
     train_src_ids = np.array(
@@ -140,11 +135,11 @@ def main(cfg: dict) -> None:
         [builder.node_id_map[str(ip)] for ip in train_dst], dtype=np.int64
     )
 
-    train_ts = ts_all[train_mask]
+    train_ts = train_ps["timestamps"]
 
-    # IN_BYTES and OUT_BYTES for baseline and snapshot computation
-    train_in_bytes  = df["IN_BYTES"].values[train_mask].astype(np.float32)
-    train_out_bytes = df["OUT_BYTES"].values[train_mask].astype(np.float32)
+    # IN_BYTES and OUT_BYTES for baseline computation (already float32)
+    train_in_bytes  = train_ps["in_bytes"]
+    train_out_bytes = train_ps["out_bytes"]
 
     logger.info("Building hourly baselines from training data...")
     nsm.build_hourly_baselines(
@@ -162,10 +157,7 @@ def main(cfg: dict) -> None:
     all_dst_ids = np.array(
         [builder.node_id_map[str(ip)] for ip in dst_ips_all], dtype=np.int64
     )
-    all_in_bytes  = df["IN_BYTES"].values.astype(np.float32)
-    all_out_bytes = df["OUT_BYTES"].values.astype(np.float32)
-    all_dst_ports = df["L4_DST_PORT"].values.astype(np.int32)
-
+    # Concatenated all-edges byte/port arrays (already float32 / int32).
     logger.info("Building node state snapshots (all edges)...")
     nsm.build_snapshots(
         src_node_ids=all_src_ids,
@@ -180,7 +172,7 @@ def main(cfg: dict) -> None:
     snap_dir = repo_root / cfg["graph"]["node_state_dir"]
     nsm.save(snap_dir)
 
-    # ── 6. Summary ─────────────────────────────────────────────────────────────
+    # ── 5. Summary ─────────────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info("Phase 2 complete:")
     logger.info(f"  Graphs:     {graph_dir}/  (train/val/test.bin)")

@@ -187,7 +187,7 @@ class Preprocessor:
 
     def fit_transform(
         self, df: pd.DataFrame
-    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Sort, split, fit on train, transform all splits.
 
         Returns three dicts keyed by split name, each containing:
@@ -195,6 +195,10 @@ class Preprocessor:
           "edge_indices"  : int64 array   (n,) global EIDs
           "timestamps"    : int64 array   (n,) FLOW_START_MILLISECONDS
           "labels"        : int64 array   (n,) Label (integer class)
+          "edges_meta"    : dict[str, np.ndarray] — raw columns Phase 2 needs,
+                            aligned row-for-row with "edge_indices". Keys:
+                            "src_ip"/"dst_ip" (object-str), "in_bytes"/"out_bytes"
+                            (float32), "dst_port" (int32).
         """
         df = df.sort_values("FLOW_START_MILLISECONDS", kind="mergesort").reset_index(
             drop=True
@@ -300,12 +304,25 @@ class Preprocessor:
             "test":  len(test_df),
         }
 
-        def _pack(sub_df: pd.DataFrame, X: np.ndarray) -> dict[str, np.ndarray]:
+        def _pack(sub_df: pd.DataFrame, X: np.ndarray) -> dict[str, Any]:
             return {
                 "features":     X,
                 "edge_indices": sub_df["GLOBAL_EID"].values.astype(np.int64),
                 "timestamps":   sub_df["FLOW_START_MILLISECONDS"].values.astype(np.int64),
                 "labels":       sub_df["_attack_int"].values.astype(np.int64),
+                # Raw columns Phase 2 needs, same rows / same order as
+                # edge_indices — eliminates Phase 2's redundant CSV reload+sort.
+                # in_bytes/out_bytes are stored float32 (NOT int64): loader.py
+                # imputes NaNs with a possibly-fractional median → float64, and
+                # today's Phase 2 casts to float32, so float32 is byte-identical
+                # while int64 would silently truncate.
+                "edges_meta": {
+                    "src_ip":    sub_df["IPV4_SRC_ADDR"].values.astype(str),
+                    "dst_ip":    sub_df["IPV4_DST_ADDR"].values.astype(str),
+                    "in_bytes":  sub_df["IN_BYTES"].values.astype(np.float32),
+                    "out_bytes": sub_df["OUT_BYTES"].values.astype(np.float32),
+                    "dst_port":  sub_df["L4_DST_PORT"].values.astype(np.int32),
+                },
             }
 
         return (
