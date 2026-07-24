@@ -108,6 +108,74 @@ def _pivot_fixture():
     return node_id_map, mal_src, mal_dst
 
 
+def _pivot_with_shortcut_fixture():
+    """E(external) -> M(internal), E -> W(internal), M -> W: M is a pivot
+    (dst of E->M, src of M->W) but the direct E->W edge means W is still
+    only 1 hop from an external root, so max(d_gw)==1 despite pivot_count!=0.
+    Counterexample to the converse of "pivot_count==0 => max(d_gw)<=1".
+    """
+    node_id_map = {
+        "8.8.8.1": 0,   # E (external)
+        "10.0.0.1": 1,  # M (internal, pivot)
+        "10.0.0.2": 2,  # W (internal, reached directly by E too)
+    }
+    mal_src = np.array([0, 0, 1], dtype=np.int64)
+    mal_dst = np.array([1, 2, 2], dtype=np.int64)
+    return node_id_map, mal_src, mal_dst
+
+
+def _incomplete_bipartite_chain_fixture():
+    """E1->V1, E2->{V1,V2}, E3->{V2,V3}, E4->{V3,V4} — miniature of the real
+    UNSW Worms per-class subgraph (28/40 attacker-victim edges): every edge
+    is external->internal (pivot_count==0), every victim is 1 hop from some
+    external attacker (max d_gw==1), but the undirected shape is a long path
+    (diameter==7). Demonstrates diameter is independent of pivot/d_gw.
+    """
+    node_id_map = {
+        "8.8.8.1": 0, "8.8.8.2": 1, "8.8.8.3": 2, "8.8.8.4": 3,  # E1..E4 (external)
+        "10.0.0.1": 4, "10.0.0.2": 5, "10.0.0.3": 6, "10.0.0.4": 7,  # V1..V4 (internal)
+    }
+    mal_src = np.array([0, 1, 1, 2, 2, 3, 3], dtype=np.int64)
+    mal_dst = np.array([4, 4, 5, 5, 6, 6, 7], dtype=np.int64)
+    return node_id_map, mal_src, mal_dst
+
+
+def _internal_to_external_fixture():
+    """attacker(external) -> victim(internal) -> c2(external): exercises
+    a malicious internal->external edge, invisible under UNSW's
+    victim_fallback mode but present on multi-subnet Paper-3 datasets.
+    """
+    node_id_map = {
+        "8.8.8.1": 0,  # external attacker
+        "10.0.0.1": 1,  # internal victim (also a malicious source -> external C2)
+        "9.9.9.9": 2,  # external C2/exfil destination
+    }
+    mal_src = np.array([0, 1], dtype=np.int64)
+    mal_dst = np.array([1, 2], dtype=np.int64)
+    return node_id_map, mal_src, mal_dst
+
+
+def _unreachable_external_dst_fixture():
+    """8.8.8.1(ext) -> 10.0.0.1(int) [normal, reachable], plus an isolated
+    10.0.0.2(int) -> 9.9.9.9(ext) edge whose internal source is never reached
+    from any external BFS root. Node 3 (external) is absent from d_gw
+    entirely (unreachable), unlike _internal_to_external_fixture() where the
+    external destination IS reached (d_gw=2). This isolates n_unreachable as
+    the discriminator: pre-fix (unfiltered dst_c) counts the unreachable
+    external node 3 against n_unreachable; post-fix (is_internal-filtered)
+    does not, since node 3 is never an internal destination to begin with.
+    """
+    node_id_map = {
+        "8.8.8.1": 0,   # external attacker (reachable root)
+        "10.0.0.1": 1,  # internal victim (reachable, d_gw=1)
+        "10.0.0.2": 2,  # internal node (never reached by any BFS root)
+        "9.9.9.9": 3,   # external node (isolated exfil dst, unreachable)
+    }
+    mal_src = np.array([0, 2], dtype=np.int64)
+    mal_dst = np.array([1, 3], dtype=np.int64)
+    return node_id_map, mal_src, mal_dst
+
+
 def _make_synthetic_graph(mal_src: np.ndarray, mal_dst: np.ndarray, n_nodes: int) -> "dgl.DGLGraph":
     """Build a synthetic DGL graph with monotonic timestamps, mirroring
     tests/test_temporal_sampler.py's ``_make_synthetic_graph`` convention.
@@ -299,14 +367,13 @@ def test_compute_diameter_chain():
 # in the spec's own §8.1 item 2 (E -> A -> B -> C): by construction A and B
 # are each the destination of one malicious edge AND the source of the next,
 # so compute_pivot_nodes's own spec'd definition (§3.4: dst_set ∩ src_set)
-# correctly reports {A, B} as pivots for the chain fixture. This is also
-# consistent with the spec's own §3.4 cross-invariant note ("pivot_count == 0
-# <=> diameter <= 2 <=> max(d_gw) <= 1 all collapse together" — the chain
-# fixture has diameter=3 and max(d_gw)=3, both non-degenerate, so a
-# pivot_count of 0 would *contradict* that same cross-invariant). The
-# "genuine mid-path node -> pivot_count == 1" fixture is implemented as
-# _pivot_fixture(), separate from the chain fixture, per the spec's own
-# description of that third case.
+# correctly reports {A, B} as pivots for the chain fixture. This rests solely
+# on that plain dst_set ∩ src_set definition — see specs/07 §3.4's corrected
+# cross-invariant note (post-review: pivot_count == 0 only ever *implies*
+# max(d_gw) <= 1, never the converse, and diameter is independent of both)
+# for why no biconditional claim is invoked here. The "genuine mid-path node
+# -> pivot_count == 1" fixture is implemented as _pivot_fixture(), separate
+# from the chain fixture, per the spec's own description of that third case.
 # ---------------------------------------------------------------------------
 
 def test_compute_pivot_nodes_bipartite_zero():
@@ -333,6 +400,51 @@ def test_compute_pivot_nodes_per_class_breakdown():
     pivots, per_class_count = compute_pivot_nodes(mal_src, mal_dst, mal_labels, INT_TO_NAME)
     assert pivots == {1}
     assert per_class_count["AttackClass"] == 1
+
+
+def test_pivot_zero_and_low_d_gw_does_not_imply_low_diameter():
+    """Regression test for the corrected (non-)relationship between
+    pivot_count, max(d_gw), and diameter — see specs/07_phase14_gateway_
+    distance_impl.md §3.4's corrected note: pivot_count == 0 only ever
+    *implies* max(d_gw) <= 1 (never the converse), and undirected diameter
+    is independent of both. This fixture has pivot_count == 0 and
+    max(d_gw) == 1 simultaneously with diameter == 7.
+    """
+    node_id_map, mal_src, mal_dst = _incomplete_bipartite_chain_fixture()
+    is_internal, _ = assign_roles(node_id_map, mal_src, mal_dst, "auto")
+    assert is_internal[4] and not is_internal[0]  # expected internal/external split
+
+    pivots, _ = compute_pivot_nodes(mal_src, mal_dst)
+    assert len(pivots) == 0
+
+    d_gw = compute_d_gw(mal_src, mal_dst, is_internal)
+    internal_ids = [4, 5, 6, 7]
+    assert max(d_gw[v] for v in internal_ids) == 1.0
+
+    result = compute_diameter(mal_src, mal_dst)
+    assert result["diameter"] == 7
+
+
+def test_low_d_gw_does_not_imply_pivot_zero():
+    """Regression test for the converse-false half of the corrected §3.4
+    note: max(d_gw) <= 1 does NOT imply pivot_count == 0. E->M, E->W, M->W
+    gives pivot_count == 1 (M is both dst of E->M and src of M->W) while
+    max(d_gw) == 1 (W is reached directly from external root E, one hop,
+    regardless of the longer M->W path). The forward implication
+    (pivot_count==0 => max(d_gw)<=1) is unaffected by this — this fixture
+    has a nonzero pivot count, so it is not a counterexample to that
+    direction, only to its converse.
+    """
+    node_id_map, mal_src, mal_dst = _pivot_with_shortcut_fixture()
+    is_internal, _ = assign_roles(node_id_map, mal_src, mal_dst, "auto")
+    assert is_internal[1] and is_internal[2] and not is_internal[0]
+
+    pivots, _ = compute_pivot_nodes(mal_src, mal_dst)
+    assert pivots == {1}  # M is a pivot: dst of E->M, src of M->W
+
+    d_gw = compute_d_gw(mal_src, mal_dst, is_internal)
+    internal_ids = [1, 2]
+    assert max(d_gw[v] for v in internal_ids) == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -422,9 +534,56 @@ def test_per_class_stats_independent_of_correlation_step():
     d_gw = compute_d_gw(mal_src, mal_dst, is_internal)
     mal_labels = np.full(len(mal_src), LABEL_MAP["AttackClass"], dtype=np.int64)
 
-    stats = per_class_stats(mal_src, mal_dst, mal_labels, d_gw, INT_TO_NAME)
+    stats = per_class_stats(mal_src, mal_dst, mal_labels, d_gw, INT_TO_NAME, is_internal)
     assert stats["AttackClass"]["mean"] == 1.0
     assert stats["AttackClass"]["n_dst_nodes"] == len(victim_ids)
+
+
+def test_per_class_stats_excludes_external_destinations_from_dgw_aggregation():
+    """A malicious internal->external edge (e.g. a victim exfiltrating to a
+    C2 host) must not pull an external destination into the d_gw mean/max/
+    std/n_unreachable aggregation — those restrict to internal destinations
+    only, mirroring the global-stats block in run_gateway_distance_diagnostic.
+    n_dst_nodes/n_src_nodes remain full, unfiltered counts.
+    """
+    node_id_map, mal_src, mal_dst = _internal_to_external_fixture()
+    is_internal, mode = assign_roles(node_id_map, mal_src, mal_dst, "auto")
+    assert mode == "rfc1918_auto"  # node 1 is internal among malicious dsts -> no fallback
+    d_gw = compute_d_gw(mal_src, mal_dst, is_internal)
+    mal_labels = np.full(len(mal_src), LABEL_MAP["AttackClass"], dtype=np.int64)
+
+    stats = per_class_stats(mal_src, mal_dst, mal_labels, d_gw, INT_TO_NAME, is_internal)
+    cls = stats["AttackClass"]
+    assert cls["mean"] == 1.0        # only node 1 (internal) counted, not node 2 (external, d_gw=2)
+    assert cls["max"] == 1.0
+    assert cls["std"] == 0.0
+    assert cls["n_unreachable"] == 0
+    assert cls["n_dst_nodes"] == 2   # full footprint still includes the external C2 node
+
+
+def test_per_class_stats_excludes_unreachable_external_destination_from_n_unreachable():
+    """Complements test_per_class_stats_excludes_external_destinations_from_
+    dgw_aggregation: that test's external destination happens to be BFS-
+    reachable (d_gw=2), so n_unreachable==0 regardless of whether the
+    is_internal filter is applied (pre-fix would also report 0). This
+    fixture's external destination is never reached by any BFS root, so it
+    isolates n_unreachable as the sole discriminator between pre-fix
+    (unfiltered dst_c, which would count the unreachable external node,
+    n_unreachable=1) and post-fix (is_internal-filtered, n_unreachable=0)
+    behavior.
+    """
+    node_id_map, mal_src, mal_dst = _unreachable_external_dst_fixture()
+    is_internal, mode = assign_roles(node_id_map, mal_src, mal_dst, "auto")
+    assert mode == "rfc1918_auto"
+    d_gw = compute_d_gw(mal_src, mal_dst, is_internal)
+    assert d_gw == {0: 0.0, 1: 1.0}  # nodes 2, 3 never reached
+    mal_labels = np.full(len(mal_src), LABEL_MAP["AttackClass"], dtype=np.int64)
+
+    stats = per_class_stats(mal_src, mal_dst, mal_labels, d_gw, INT_TO_NAME, is_internal)
+    cls = stats["AttackClass"]
+    assert cls["mean"] == 1.0
+    assert cls["n_unreachable"] == 0  # pre-fix would have reported 1 (node 3 counted)
+    assert cls["n_dst_nodes"] == 2    # full footprint: nodes 1 and 3
 
 
 def test_spearman_dgw_vs_f1_graceful_degrade_on_missing_metrics():

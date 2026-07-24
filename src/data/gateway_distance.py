@@ -23,9 +23,14 @@ spec for the full derivation):
     the same "in" direction TemporalNeighborSampler uses — see
     src/model/temporal_sampler.py) from v to the nearest node NOT in
     V_int (an external/unprotected node), computed over the
-    malicious-only edge set. d_gw(v) = 0 iff v is not in V_int; missing
-    from the result dict (treated as +inf by callers) if no external
-    node is reverse-reachable from v.
+    malicious-only edge set. d_gw(v) = 0 for every external node that is
+    itself a BFS root (i.e. appears in mal_src_ids) — NOT for every
+    external node categorically: an external node reached only as a
+    malicious destination (e.g. an internal->external C2/exfil target)
+    gets whatever positive distance forward propagation assigns it, and
+    one touched by no malicious edge at all is simply absent from the
+    dict; missing from the result dict (treated as +inf by callers) if
+    no external node is reverse-reachable from v.
 
 Equivalently, and far cheaper to compute: a single multi-source FORWARD BFS
 seeded at distance 0 on every external-role node that appears as a malicious
@@ -41,6 +46,9 @@ Convention note: this module never accepts an "edge_dir" config knob. The
 reverse-hop / forward-BFS equivalence above is a fixed algorithmic identity,
 not a tunable choice, so it is documented here rather than exposed as a dead
 config key.
+
+Ratification status: PENDING supervisor sign-off (specs/05_graph_node_distance.md
+§10). Code/tests are valid regardless; paper-facing claims are not yet.
 """
 
 from __future__ import annotations
@@ -329,6 +337,7 @@ def per_class_stats(
     mal_labels: np.ndarray,
     d_gw: dict[int, float],
     int_to_name: dict[int, str],
+    is_internal: np.ndarray,
 ) -> dict[str, dict[str, Any]]:
     """Compute per-attack-class gateway-distance and endpoint-count stats.
 
@@ -338,6 +347,12 @@ def per_class_stats(
         mal_labels: malicious-edge integer class labels (n_mal,), int64.
         d_gw: output of ``compute_d_gw``.
         int_to_name: integer class id -> class name (inverse of label_map).
+        is_internal: bool array (n_nodes,) from ``assign_roles`` — restricts
+            ``mean``/``max``/``std``/``n_unreachable`` to internal
+            destinations, mirroring the global-stats block below.
+            ``n_dst_nodes``/``n_src_nodes`` intentionally remain full counts
+            (structural footprint — fan-in/fan-out over *all* of the class's
+            endpoints, internal or external), unaffected by this filter.
 
     Returns:
         Mapping ``{class_name: {"mean", "max", "std", "n_dst_nodes",
@@ -349,8 +364,9 @@ def per_class_stats(
         dst_c = np.unique(mal_dst_ids[rows])
         src_c = np.unique(mal_src_ids[rows])
 
-        finite_vals = [d_gw[v] for v in dst_c.tolist() if v in d_gw]
-        n_unreachable = len(dst_c) - len(finite_vals)
+        internal_dst_c = [int(v) for v in dst_c.tolist() if is_internal[v]]
+        finite_vals = [d_gw[v] for v in internal_dst_c if v in d_gw]
+        n_unreachable = len(internal_dst_c) - len(finite_vals)
 
         name = int_to_name[int(c)]
         result[name] = {
@@ -679,7 +695,7 @@ def run_gateway_distance_diagnostic(
         "n_unreachable": len(internal_dst) - len(global_finite),
     }
 
-    per_class = per_class_stats(mal_src_ids, mal_dst_ids, mal_labels, d_gw, int_to_name)
+    per_class = per_class_stats(mal_src_ids, mal_dst_ids, mal_labels, d_gw, int_to_name, is_internal)
     diameter = compute_diameter(mal_src_ids, mal_dst_ids, mal_labels, int_to_name)
     pivots, per_class_pivots = compute_pivot_nodes(mal_src_ids, mal_dst_ids, mal_labels, int_to_name)
 
