@@ -25,6 +25,38 @@ All results in the paper are from the single-dataset run on **NF-UNSW-NB15-v3**.
 Jump to the **[SHAP-GSD](#shap-gsd-under-peer-review)** section for reproduction
 instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
+### Version note for reviewers
+
+The paper was **submitted at version `v2.1.0`** (tag `v2.1.0`, commit `a024a6d`,
+2026-06-16) — that snapshot is the exact code that produced every number in the
+paper (macro-F1 = 0.508, weighted-F1 = 0.961, Table 2, and all other reported
+results). To reproduce the paper exactly, check out that tag:
+
+```bash
+git checkout v2.1.0
+```
+
+The current `main` branch (version `2.2.1` and counting) contains, on top of that
+submitted state:
+
+1. **Infrastructure fixes** — an out-of-memory bug at larger dataset scale
+   (fixed by disabling an unused node-state cache; verified to produce identical
+   results with it enabled or disabled), hardcoded developer-machine paths
+   removed from three baseline-explainer wrappers, and an internal lookup
+   optimization (O(n) → O(log n), same data). **None of these change any number
+   reported in the paper** — verified by diffing `v2.1.0..main` for the
+   reported metric strings (they are unchanged).
+2. **New, additive groundwork for a separate, forthcoming paper** (working name
+   PROXEVAL) — most visibly Phase 14 (a read-only topology diagnostic), plus
+   config/tooling for three additional NetFlow datasets. This is new research
+   code, not a bug fix, and is **not part of the SHAP-GSD paper** — it never
+   feeds this paper's model, training, or evaluation, and on this paper's
+   dataset its own measurement is degenerate (constant across all
+   destinations/classes), so it changes nothing about this paper's results
+   either. See [`README_PROX.md`](README_PROX.md) for what this work is and
+   why it's tracked separately from the paper this repository was submitted
+   to accompany.
+
 ---
 
 ## Requirements
@@ -54,8 +86,14 @@ All results are reproducible with the single command below.
 
 ### Dataset
 
-Download **NF-UNSW-NB15-v3** from <https://staff.itee.uq.edu.au/marius/NIDS_datasets/>
-and place it at:
+Download **NF-UNSW-NB15-v3** from the UQ eSpace repository:
+<https://espace.library.uq.edu.au/view/UQ:6e0eda1>
+
+(The dataset was originally distributed at
+`https://staff.itee.uq.edu.au/marius/NIDS_datasets/`, kept here for historical
+reference — that link is no longer reachable. Use the eSpace link above.)
+
+Place the downloaded CSV at:
 
 ```
 data/NF-UNSW-NB15-v3.csv
