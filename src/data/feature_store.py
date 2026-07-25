@@ -49,17 +49,95 @@ class FeatureStore:
         self._mmap = self._mmap.reshape(n, d)
         self._d_e = d
 
-        # Build O(1) global-EID → local-position lookup
-        self._eid_to_pos: dict[int, int] = {
-            int(eid): pos for pos, eid in enumerate(self._edge_indices)
-        }
-        self._eid_start = int(self._edge_indices.min())
-        self._eid_end   = int(self._edge_indices.max())
+        # O(log n) global-EID → local-position lookup via binary search
+        # over this sorted array — see _pos_of/_pos_of_batch below. No
+        # auxiliary structure is built (this is the point of the change).
+        # Sortedness (strictly ascending, no duplicates) is guaranteed by
+        # preprocessor.py's sort-then-arange-then-order-preserving-mask
+        # pipeline (specs/12 §2), but that guarantee lives in a different
+        # module this class does not control — assert it here so a future
+        # violation (e.g. a corrupted file or a new split scheme) fails
+        # loudly at construction time instead of corrupting lookups
+        # silently, per CODING STANDARDS #7 ("assert invariants ... in
+        # production code, not only in tests"). One transient boolean array
+        # of length n-1, freed immediately after the check.
+        assert np.all(self._edge_indices[1:] > self._edge_indices[:-1]), (
+            "edge_indices.npy must be strictly ascending with no duplicates "
+            "— required for the searchsorted-based EID lookup in _pos_of/"
+            "_pos_of_batch to be correct"
+        )
+        self._eid_start = int(self._edge_indices[0])
+        self._eid_end   = int(self._edge_indices[-1])
 
         logger.info(
             f"FeatureStore opened: {n:,} edges, d_e={d}, "
             f"EIDs [{self._eid_start}, {self._eid_end}]"
         )
+
+    def _pos_of(self, global_eid: int) -> int:
+        """Return this split's local row position for a global EID.
+
+        O(log n) binary search over the sorted ``edge_indices`` array — no
+        auxiliary structure is built or consulted. Safe because every split's
+        ``edge_indices.npy`` is sorted ascending and duplicate-free by
+        construction (see specs/12 §2); this method only relies on sortedness,
+        not on the stronger contiguous-range property.
+
+        Args:
+            global_eid: global EID to look up.
+
+        Returns:
+            Local row position into ``self._mmap`` / ``self._labels``.
+
+        Raises:
+            KeyError: if ``global_eid`` is not present in this split's
+                ``edge_indices``. Every legitimate caller derives its EID from
+                this split's own DGL graph (``g_split.edata[dgl.EID]``), which
+                by CRITICAL INVARIANT 1 is always present here — a KeyError
+                signals programmer error (wrong split's store), not a data
+                condition to handle gracefully.
+        """
+        eid = int(global_eid)
+        pos = int(np.searchsorted(self._edge_indices, eid))
+        if pos == len(self._edge_indices) or int(self._edge_indices[pos]) != eid:
+            raise KeyError(f"Global EID {eid} not in this split")
+        return pos
+
+    def _pos_of_batch(self, global_eids: np.ndarray) -> np.ndarray:
+        """Vectorized batch equivalent of ``_pos_of`` — O(k log n) total, no
+        per-element Python-level loop.
+
+        Args:
+            global_eids: numpy array (or list/tuple) of global EIDs to look
+                up, any order. Must not be a GPU-resident tensor — call
+                .numpy() first, matching every existing caller in
+                src/model/trainer.py, src/model/evaluator.py,
+                src/model/temporal_sampler.py, and src/explainer/shap_gsd.py.
+
+        Returns:
+            int64 array of local row positions, same length and order as
+            ``global_eids``.
+
+        Raises:
+            KeyError: if any EID in ``global_eids`` is not present in this
+                split's ``edge_indices``. Reports the first offending EID (by
+                position in the input array) for a debuggable message.
+        """
+        eids = np.asarray(global_eids, dtype=np.int64)
+        n = len(self._edge_indices)
+        positions = np.searchsorted(self._edge_indices, eids)
+        out_of_bounds = positions == n
+        # Clamp before indexing so the bounds check below never IndexErrors —
+        # this is the vectorized form of the same pos == n trap as _pos_of.
+        safe_positions = np.where(out_of_bounds, 0, positions)
+        mismatch = out_of_bounds | (self._edge_indices[safe_positions] != eids)
+        if mismatch.any():
+            bad_idx = int(np.argmax(mismatch))
+            raise KeyError(
+                f"Global EID {int(eids[bad_idx])} not in this split "
+                f"(batch input position {bad_idx})"
+            )
+        return positions
 
     @property
     def d_e(self) -> int:
@@ -82,20 +160,44 @@ class FeatureStore:
         return self._labels
 
     def __getitem__(self, global_eid: int) -> np.ndarray:
-        """Return feature vector for a single edge by global EID."""
-        pos = self._eid_to_pos.get(int(global_eid))
-        assert pos is not None, f"Global EID {global_eid} not in this split"
-        return self._mmap[pos]
+        """Return feature vector for a single edge by global EID.
+
+        Raises:
+            KeyError: if ``global_eid`` is not present in this split.
+        """
+        return self._mmap[self._pos_of(global_eid)]
 
     def get_batch(self, global_eids: np.ndarray) -> np.ndarray:
-        """Return feature matrix for a batch of global EIDs, shape (k, d_e)."""
-        positions = np.array([self._eid_to_pos[int(e)] for e in global_eids])
-        return self._mmap[positions]
+        """Return feature matrix for a batch of global EIDs, shape (k, d_e).
+
+        Args:
+            global_eids: numpy array (or list/tuple) of global EIDs. Must not
+                be a GPU-resident tensor — call .numpy() first, matching
+                every existing caller in src/model/trainer.py,
+                src/model/evaluator.py, src/model/temporal_sampler.py, and
+                src/explainer/shap_gsd.py.
+
+        Raises:
+            KeyError: if any EID in ``global_eids`` is not present in this
+                split.
+        """
+        return self._mmap[self._pos_of_batch(global_eids)]
 
     def get_labels_batch(self, global_eids: np.ndarray) -> np.ndarray:
-        """Return label array for a batch of global EIDs, shape (k,)."""
-        positions = np.array([self._eid_to_pos[int(e)] for e in global_eids])
-        return self._labels[positions]
+        """Return label array for a batch of global EIDs, shape (k,).
+
+        Args:
+            global_eids: numpy array (or list/tuple) of global EIDs. Must not
+                be a GPU-resident tensor — call .numpy() first, matching
+                every existing caller in src/model/trainer.py,
+                src/model/evaluator.py, src/model/temporal_sampler.py, and
+                src/explainer/shap_gsd.py.
+
+        Raises:
+            KeyError: if any EID in ``global_eids`` is not present in this
+                split.
+        """
+        return self._labels[self._pos_of_batch(global_eids)]
 
 
 def write_feature_store(
