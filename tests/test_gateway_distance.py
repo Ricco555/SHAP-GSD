@@ -357,6 +357,22 @@ def test_compute_diameter_chain():
     assert result["diameter"] == 3
 
 
+def test_compute_diameter_large_component_falls_back_to_estimate():
+    """A component exceeding the injected cap takes the double-sweep
+    lower-bound fallback (spec 10 §7). The 14-node K(4,10) bipartite fixture
+    exceeds ``max_component_nodes=3``, so the single component is estimated:
+    ``diameter_exact`` is False, ``component_exact == [False]``, and the
+    returned diameter is a valid lower bound (double-sweep yields exactly 2 on
+    K(4,10)). The function must not raise.
+    """
+    _, mal_src, mal_dst, _, _ = _bipartite_fixture()
+    result = compute_diameter(mal_src, mal_dst, max_component_nodes=3)
+    assert result["diameter_exact"] is False
+    assert result["component_exact"] == [False]
+    assert 1 <= result["diameter"] <= 2  # lower bound on the true diameter (2)
+    assert result["diameter"] == 2
+
+
 # ---------------------------------------------------------------------------
 # 6 — compute_pivot_nodes
 #

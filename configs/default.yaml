@@ -81,6 +81,8 @@ topology:
                                 # when zero internal nodes receive malicious flows (UNSW case)
     drift_check: true          # emit train-first-half vs second-half k*/d_gw drift
     k_max: 4                   # cap on reported k* (tuning-grid upper bound)
+    diameter_max_component_nodes: 2000   # exact (usebounds) at/below; double-sweep lower bound above
+    diameter_max_component_edges: 5000   # exact (usebounds) at/below; double-sweep lower bound above
 
 compute:
   device: "cuda"

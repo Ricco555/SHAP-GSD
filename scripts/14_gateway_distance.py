@@ -103,13 +103,22 @@ def _write_report(result: dict[str, Any], out_txt: Path) -> None:
 
     diam = result.get("diameter", {})
     g_diam = diam.get("global", diam)
+    # Annotate estimated (double-sweep lower-bound) diameters per scope so a
+    # downstream reader never cites an estimate as exact (spec 10 §2.1/§9 Q3).
+    # ``.get(..., True)`` treats a pre-annotation JSON (no flag) as exact.
+    g_lb = "  (diameter is a lower bound — one or more components estimated)" \
+        if g_diam.get("diameter_exact", True) is False else ""
     lines += [
         "── Diameter (undirected, malicious subgraph) ──",
         f"  global: diameter={g_diam.get('diameter', 'N/A')}  "
-        f"n_components={g_diam.get('n_components', 'N/A')}",
+        f"n_components={g_diam.get('n_components', 'N/A')}{g_lb}",
     ]
     for cls, v in sorted(diam.get("per_class", {}).items()):
-        lines.append(f"    {cls:15s}: diameter={v.get('diameter')}  n_components={v.get('n_components')}")
+        lb = " (lower bound)" if v.get("diameter_exact", True) is False else ""
+        lines.append(
+            f"    {cls:15s}: diameter={v.get('diameter')}  "
+            f"n_components={v.get('n_components')}{lb}"
+        )
     lines.append("")
 
     pv = result.get("pivot_nodes", {})

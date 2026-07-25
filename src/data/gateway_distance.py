@@ -420,13 +420,60 @@ def compute_pivot_nodes(
     return pivots, per_class_count
 
 
+def _double_sweep_lower_bound(subgraph: Any) -> int:
+    """Deterministic O(V+E) double-sweep (2-BFS) lower bound on a connected graph's diameter.
+
+    BFS from a fixed start node (``min`` node id) to find a farthest node ``u``
+    (ties broken by min node id), then BFS from ``u``; the greatest distance
+    from ``u`` is a lower bound on the true diameter (Magnien, Latapy, Habib,
+    2009). Exact on trees; a lower bound in general (see
+    ``specs/10_phase14_diameter_optimization.md`` §2.1).
+
+    Args:
+        subgraph: a CONNECTED ``networkx.Graph`` (a single connected component).
+
+    Returns:
+        A non-negative integer lower bound on the component's diameter.
+    """
+    import networkx as nx
+
+    start = min(subgraph.nodes())
+    lengths = nx.single_source_shortest_path_length(subgraph, start)
+    max_dist = max(lengths.values())
+    # Deterministic tiebreak: farthest node by min node id (plain max() would
+    # depend on neighbor-iteration/insertion order — coding standard #6).
+    u = min(n for n, d in lengths.items() if d == max_dist)
+
+    second = nx.single_source_shortest_path_length(subgraph, u)
+    return int(max(second.values()))
+
+
 def compute_diameter(
     mal_src_ids: np.ndarray,
     mal_dst_ids: np.ndarray,
     mal_labels: Optional[np.ndarray] = None,
     int_to_name: Optional[dict[int, str]] = None,
+    max_component_nodes: int = 2000,
+    max_component_edges: int = 5000,
 ) -> dict[str, Any]:
     """Compute the undirected diameter of the malicious subgraph, per component.
+
+    Tiered cost guard (see ``specs/10_phase14_diameter_optimization.md`` §4).
+    Per connected component:
+
+    - ``<= 1`` node: diameter 0, exact (trivial guard; ``usebounds`` is not
+      called on a single-node component).
+    - ``n_nodes <= max_component_nodes`` AND ``n_edges <= max_component_edges``:
+      exact via ``nx.diameter(subgraph, usebounds=True)`` — value identical to
+      the previous unbounded ``nx.diameter``, just faster. Marked exact.
+    - otherwise: deterministic double-sweep (2-BFS) linear lower bound, marked
+      NOT exact, with one ``WARNING`` logged. The headline ``diameter`` is then
+      a lower bound on the true value (§2.1).
+
+    Both cap dimensions are read from the ``subgraph`` object (post-``nx.Graph``
+    parallel-edge dedup), NOT from raw array lengths — a component with many
+    duplicate malicious flows over few unique edges must not spuriously trip the
+    edge cap (spec §3.2).
 
     Args:
         mal_src_ids: malicious-edge source node ids (n_mal,), int64.
@@ -435,12 +482,20 @@ def compute_diameter(
             per-class diameter breakdown (restricting edges to that class
             first).
         int_to_name: optional integer class id -> class name mapping.
+        max_component_nodes: components with more nodes than this take the
+            double-sweep lower-bound fallback (config:
+            ``topology.gateway_distance.diameter_max_component_nodes``).
+        max_component_edges: components with more unique edges than this take
+            the double-sweep lower-bound fallback (config:
+            ``topology.gateway_distance.diameter_max_component_edges``).
 
     Returns:
-        ``{"global": {"diameter", "n_components", "component_diameters"},
-        "per_class": {name: {...}}}`` if ``mal_labels``/``int_to_name`` are
-        given, otherwise just the flat global stats dict
-        ``{"diameter", "n_components", "component_diameters"}``.
+        ``{"global": {"diameter", "n_components", "component_diameters",
+        "component_exact", "diameter_exact"}, "per_class": {name: {...}}}`` if
+        ``mal_labels``/``int_to_name`` are given, otherwise just the flat global
+        stats dict with the same five keys. ``component_exact`` is a
+        ``list[bool]`` positionally parallel to ``component_diameters``;
+        ``diameter_exact`` is ``all(component_exact)``.
     """
     import networkx as nx
 
@@ -448,14 +503,43 @@ def compute_diameter(
         g = nx.Graph()
         g.add_edges_from(zip(src.tolist(), dst.tolist()))
         if g.number_of_nodes() == 0:
-            return {"diameter": None, "n_components": 0, "component_diameters": []}
-        component_diameters = [
-            nx.diameter(g.subgraph(comp)) for comp in nx.connected_components(g)
-        ]
+            return {
+                "diameter": None,
+                "n_components": 0,
+                "component_diameters": [],
+                "component_exact": [],
+                "diameter_exact": True,
+            }
+
+        component_diameters: list[int] = []
+        component_exact: list[bool] = []
+        for comp in nx.connected_components(g):
+            subgraph = g.subgraph(comp)
+            n_nodes = subgraph.number_of_nodes()
+            n_edges = subgraph.number_of_edges()
+
+            if n_nodes <= 1:
+                component_diameters.append(0)
+                component_exact.append(True)
+            elif n_nodes <= max_component_nodes and n_edges <= max_component_edges:
+                component_diameters.append(nx.diameter(subgraph, usebounds=True))
+                component_exact.append(True)
+            else:
+                logger.warning(
+                    "compute_diameter: component with %d nodes / %d edges exceeds "
+                    "caps (%d nodes / %d edges); substituting a double-sweep "
+                    "lower-bound estimate for the exact diameter.",
+                    n_nodes, n_edges, max_component_nodes, max_component_edges,
+                )
+                component_diameters.append(_double_sweep_lower_bound(subgraph))
+                component_exact.append(False)
+
         return {
             "diameter": max(component_diameters) if component_diameters else None,
             "n_components": len(component_diameters),
             "component_diameters": component_diameters,
+            "component_exact": component_exact,
+            "diameter_exact": all(component_exact),
         }
 
     global_stats = _diameter_stats(mal_src_ids, mal_dst_ids)
@@ -650,8 +734,9 @@ def run_gateway_distance_diagnostic(
         artifacts_dir: ``cfg["output"]["artifacts_dir"]`` (run.dir-prefixed),
             containing ``label_map.json``.
         topology_cfg: ``cfg["topology"]["gateway_distance"]`` dict — keys
-            ``internal_prefixes``, ``drift_check``, ``k_max`` (``enabled`` is
-            handled by the calling script, not here).
+            ``internal_prefixes``, ``drift_check``, ``k_max``,
+            ``diameter_max_component_nodes``, ``diameter_max_component_edges``
+            (``enabled`` is handled by the calling script, not here).
         metrics_json_path: path to ``artifacts/evaluation/metrics.json``, or
             None if the caller has already determined it does not exist.
 
@@ -674,6 +759,8 @@ def run_gateway_distance_diagnostic(
     internal_prefixes = topology_cfg.get("internal_prefixes", "auto")
     k_max = int(topology_cfg.get("k_max", 4))
     do_drift_check = bool(topology_cfg.get("drift_check", True))
+    diameter_max_nodes = int(topology_cfg.get("diameter_max_component_nodes", 2000))
+    diameter_max_edges = int(topology_cfg.get("diameter_max_component_edges", 5000))
 
     mal_src_ids, mal_dst_ids, mal_labels = build_malicious_subgraph(g_train, label_map)
     is_internal, mode = assign_roles(node_id_map, mal_src_ids, mal_dst_ids, internal_prefixes)
@@ -696,7 +783,11 @@ def run_gateway_distance_diagnostic(
     }
 
     per_class = per_class_stats(mal_src_ids, mal_dst_ids, mal_labels, d_gw, int_to_name, is_internal)
-    diameter = compute_diameter(mal_src_ids, mal_dst_ids, mal_labels, int_to_name)
+    diameter = compute_diameter(
+        mal_src_ids, mal_dst_ids, mal_labels, int_to_name,
+        max_component_nodes=diameter_max_nodes,
+        max_component_edges=diameter_max_edges,
+    )
     pivots, per_class_pivots = compute_pivot_nodes(mal_src_ids, mal_dst_ids, mal_labels, int_to_name)
 
     if do_drift_check:
