@@ -164,7 +164,7 @@ class SHAPGSDExplainer:
         target_dst = int(dst_t[0])
 
         x_e = self.fs[global_eid].copy()  # (d_e,)
-        true_label = int(self.fs.labels[self.fs._eid_to_pos[global_eid]])
+        true_label = int(self.fs.labels[self.fs._pos_of(global_eid)])
 
         # --- Build base node features (all neighbors present) ---
         input_node_ids = input_nodes.cpu().numpy()
@@ -345,10 +345,7 @@ class SHAPGSDExplainer:
             # Get local EIDs for this class: local EID i maps to global EID
             # via g_split.edata[dgl.EID][i]
             global_eids = self.g_split.edata[dgl.EID].numpy()
-            labels = np.array([
-                self.fs.labels[self.fs._eid_to_pos[int(geid)]]
-                for geid in global_eids
-            ])
+            labels = self.fs.get_labels_batch(global_eids)
             class_local_eids = np.where(labels == c)[0]
 
             if len(class_local_eids) == 0:

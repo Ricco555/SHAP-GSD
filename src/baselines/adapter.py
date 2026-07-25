@@ -127,7 +127,7 @@ def build_flow_context(
         logit = model.classify(h_fixed, x_e_t, src_pos, dst_pos)
         proba = torch.softmax(logit, dim=1).cpu().numpy()[0]
 
-    true_label = int(fs.labels[fs._eid_to_pos[global_eid]])
+    true_label = int(fs.labels[fs._pos_of(global_eid)])
     predicted_label = int(np.argmax(proba))
     p_full = float(proba[true_label])
 

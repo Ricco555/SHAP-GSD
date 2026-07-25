@@ -150,7 +150,7 @@ def _build_flow_context(
 
     actual_geid = int(g.edata[dgl.EID][local_eid])
     x_e = fs[actual_geid].copy()
-    true_label = int(fs.labels[fs._eid_to_pos[actual_geid]])
+    true_label = int(fs.labels[fs._pos_of(actual_geid)])
 
     coalition_size = 2 + sum(
         1 for nid in input_node_ids
