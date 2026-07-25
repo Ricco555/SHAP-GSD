@@ -78,7 +78,6 @@ Pre-compute per-node sorted edge lists for O(log n) rollback.
 
 import logging
 import pickle
-import resource
 import time
 from pathlib import Path
 from typing import Optional
@@ -87,18 +86,9 @@ import numpy as np
 from scipy.stats import entropy as scipy_entropy
 
 from src.data.preprocessor import port_to_bin_indices
+from src.utils.memory import _maxrss_mb
 
 logger = logging.getLogger(__name__)
-
-
-def _maxrss_mb() -> float:
-    """Return the process' peak resident set size so far, in MiB.
-
-    ``ru_maxrss`` is kilobytes on Linux and bytes on macOS; this project only
-    targets Linux (HPC + dev), so we assume kilobytes. It is a monotonically
-    increasing high-water mark, not an instantaneous RSS reading.
-    """
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
 class _NodeHistory:
