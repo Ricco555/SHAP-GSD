@@ -9,10 +9,13 @@ classification by supplying a graph-level model wrapper.
 Attribution space: EDGES in the k-hop subgraph → aggregated to N_input nodes.
 Fidelity is computed via fidelity_from_node_mask (top-k nodes).
 
-Dependencies: rdkit, rdkit-heatmaps (used by EdgeSHAPer visualisation; pip
-install rdkit rdkit-heatmaps)
+Dependencies: rdkit, rdkit-heatmaps — required at import time (EdgeSHAPer's
+own edgeshaper.py imports both unconditionally at module load, regardless of
+whether visualization is used); pip install rdkit rdkit-heatmaps
 
-EDGESHAPER_SRC = /home/ricco555/src/phd-i4sec/EdgeSHAPer/src
+EDGESHAPER_SRC defaults to <repo_root>/external/edgeshaper/src; override the
+clone root (not the /src subpath) with the SHAP_GSD_EDGESHAPER_DIR
+environment variable.
 """
 
 from __future__ import annotations
@@ -27,13 +30,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from src.baselines._paths import resolve_baseline_dir
+
 if TYPE_CHECKING:
     from src.baselines.adapter import FlowContext
     from src.explainer.background import BackgroundDistributions
 
 logger = logging.getLogger(__name__)
 
-EDGESHAPER_SRC = "/home/ricco555/src/phd-i4sec/EdgeSHAPer/src"
+EDGESHAPER_SRC = resolve_baseline_dir("SHAP_GSD_EDGESHAPER_DIR", "edgeshaper", "src")
 
 
 # ── EdgeSHAPer-compatible model wrapper ───────────────────────────────────────

@@ -11,7 +11,8 @@ Fidelity is computed via fidelity_from_node_mask (top-k nodes).
 Import note: GNNShap's CUDA extension requires os.chdir to GNNShap's root.
 The wrapper handles this internally.
 
-GNNSHAP_DIR = /home/ricco555/src/phd-i4sec/GNNShap
+GNNSHAP_DIR defaults to <repo_root>/external/gnnshap; override with the
+SHAP_GSD_GNNSHAP_DIR environment variable.
 """
 
 from __future__ import annotations
@@ -27,13 +28,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from src.baselines._paths import resolve_baseline_dir
+
 if TYPE_CHECKING:
     from src.baselines.adapter import FlowContext
     from src.explainer.background import BackgroundDistributions
 
 logger = logging.getLogger(__name__)
 
-GNNSHAP_DIR = "/home/ricco555/src/phd-i4sec/GNNShap"
+GNNSHAP_DIR = resolve_baseline_dir("SHAP_GSD_GNNSHAP_DIR", "gnnshap")
 
 
 # ── Dummy MessagePassing layer for GNNShap compatibility ─────────────────────

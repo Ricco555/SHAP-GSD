@@ -8,6 +8,10 @@ outputs/
 runs/
 specs/
 
+# Third-party baseline-explainer checkouts (Phase 10) — cloned per README,
+# never committed
+/external/
+
 # Dataset directories and large data files — never commit raw data to Git
 /data/
 *.csv
