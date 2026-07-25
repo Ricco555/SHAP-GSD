@@ -429,7 +429,7 @@ Runtime-generated directories (`runs/`, `feature_store/`, `graphs/`,
 
 ## Acknowledgments
 
-This work has been supported by the European Union through the European
+The work on SHAP-GSD has been supported by the European Union through the European
 Regional Development Fund and the Cohesion Fund under the Competitiveness and
 Cohesion Programme 2021–2027, project **GreenSecure360 — Convergent platform
 for compliance, security, and sustainable operations** (PK.1.1.12.0210).
