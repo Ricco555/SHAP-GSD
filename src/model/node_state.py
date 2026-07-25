@@ -53,6 +53,15 @@ The only consumer anywhere in the codebase is the optional exploration
 figure script explore/graph/topology_panel.py, which already degrades
 gracefully (no snapshot overlay) when snapshots.pkl is empty.
 
+EMPIRICAL VALIDATION (2026-07-25, HPC, NF-CSE-CIC-IDS2018-v3, 19.5M edges /
+205,801 nodes): the snapshot cache was confirmed to be both the dominant
+memory cost AND the dominant runtime cost of Phase 2. Before this fix:
+OOM-killed after ~2h wall-clock at ~95.8 GiB peak (96 GB cgroup limit,
+exit -9). After: completed in 00:03:55 at ~9.5 GiB peak — a ~10x memory
+reduction and a ~30x+ wall-clock reduction. Most of the pre-fix 2h was
+spent computing per-node state for every retained snapshot, not building
+edge histories.
+
 ROLLBACK (for temporal SHAP coalitions):
 When masking neighbor edge e' from node u:
   - incoming: decrement rolling_in_degree, update unique_src_ip_count
