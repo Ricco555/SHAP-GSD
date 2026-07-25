@@ -16,7 +16,6 @@ Outputs:
 import argparse
 import gc
 import logging
-import resource
 import sys
 import time
 from pathlib import Path
@@ -30,6 +29,7 @@ from src.data.feature_store import read_edges_meta
 from src.data.graph_builder import GraphBuilder
 from src.model.node_state import NodeStateManager
 from src.utils.config import load_config
+from src.utils.memory import _maxrss_mb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,11 +37,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def _maxrss_mb() -> float:
-    """Peak resident set size so far, in MiB (kilobytes on Linux, this project's target)."""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
 def _log_stage(stage: str, t_start: float) -> None:
