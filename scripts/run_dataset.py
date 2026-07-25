@@ -3,8 +3,8 @@
 Usage
 -----
     python scripts/run_dataset.py --csv data/dataset01.csv [data/dataset02.csv ...]
-                                  [--from-phase 01] [--to-phase 13]
-                                  [--skip-tests]
+                                  [--from-phase 01] [--to-phase 14]
+                                  [--skip-tests] [--skip-gateway-distance]
                                   [--config-template configs/experiment_unsw.yaml]
                                   [--force-config]
 
@@ -13,7 +13,7 @@ For each CSV the orchestrator
   2. Creates ``runs/<run_id>/``.
   3. Materialises ``configs/experiment_<run_id>.yaml`` (two-key overlay:
      ``data.csv_path`` and ``run.dir``).
-  4. Invokes pipeline scripts 01–13 (or the requested sub-range) in order,
+  4. Invokes pipeline scripts 01–14 (or the requested sub-range) in order,
      streaming output directly to the console.
   5. Optionally runs the pytest gate after phase 02.
 """
@@ -53,6 +53,7 @@ PIPELINE: list[tuple[int, str, str]] = [
     (11, "11_efficiency.py",    "efficiency audit"),
     (12, "12_novelty_audit.py", "node novelty audit"),
     (13, "13_ablations.py",     "model ablation study"),
+    (14, "14_gateway_distance.py", "gateway distance measurement"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -253,6 +254,7 @@ def run_dataset(
     from_phase: int,
     to_phase: int,
     skip_tests: bool,
+    skip_gateway_distance: bool,
     force_config: bool,
 ) -> bool:
     """Run the pipeline for a single dataset CSV.
@@ -269,6 +271,8 @@ def run_dataset(
         Inclusive phase range to execute.
     skip_tests:
         When *True*, skip the pytest gate after phase 02.
+    skip_gateway_distance:
+        When *True*, force-skip phase 14 for this dataset regardless of config.
     force_config:
         When *True*, overwrite an existing per-dataset config.
 
@@ -306,6 +310,7 @@ def run_dataset(
         (num, script, label)
         for num, script, label in PIPELINE
         if from_phase <= num <= to_phase
+        and not (num == 14 and skip_gateway_distance)
     ]
 
     if not phases_to_run:
@@ -342,7 +347,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_dataset.py",
         description=(
-            "Run the SHAP-GSD pipeline (phases 01–13) against one or more "
+            "Run the SHAP-GSD pipeline (phases 01–14) against one or more "
             "NetFlow CSV files. Each CSV gets its own isolated run directory "
             "and experiment config so results never collide."
         ),
@@ -376,14 +381,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="N",
         type=int,
         default=1,
-        help="First phase to execute (1–13, inclusive). Default: 1.",
+        help="First phase to execute (1–14, inclusive). Default: 1.",
     )
     parser.add_argument(
         "--to-phase",
         metavar="N",
         type=int,
-        default=13,
-        help="Last phase to execute (1–13, inclusive). Default: 13.",
+        default=14,
+        help="Last phase to execute (1–14, inclusive). Default: 14.",
     )
     parser.add_argument(
         "--skip-tests",
@@ -392,6 +397,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Skip the pytest gate that normally runs after phase 02 completes. "
             "Not recommended for production runs."
+        ),
+    )
+    parser.add_argument(
+        "--skip-gateway-distance",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip phase 14 (gateway-distance measurement) for this run, "
+            "regardless of the topology.gateway_distance.enabled config value."
         ),
     )
     parser.add_argument(
@@ -423,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
     # Validate phase range — allow any positive integer; values beyond the
-    # pipeline range (1–13) simply produce an empty phase selection (no-op).
+    # pipeline range (1–14) simply produce an empty phase selection (no-op).
     if args.from_phase < 1:
         log.error("--from-phase must be >= 1 (got %d).", args.from_phase)
         return 1
@@ -459,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from_phase=args.from_phase,
             to_phase=args.to_phase,
             skip_tests=args.skip_tests,
+            skip_gateway_distance=args.skip_gateway_distance,
             force_config=args.force_config,
         )
         if not ok:

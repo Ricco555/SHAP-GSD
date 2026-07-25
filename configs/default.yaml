@@ -69,6 +69,19 @@ graph:
   dir: "graphs"
   node_state_dir: "node_state_snapshots"
 
+topology:
+  # Malicious-subgraph gateway-distance diagnostic (spec 05, implementation
+  # spec for phase 14). Stage-0 only — read-only measurement, never feeds
+  # model.num_layers/fanouts automatically (that would be Stage 2, manual).
+  gateway_distance:
+    enabled: true              # phase 14 runs by default; false -> phase self-skips (exit 0)
+    internal_prefixes: "auto"  # "auto" | list of CIDR strings, e.g. ["10.0.0.0/8"]
+                                # auto: RFC1918/loopback via graph_builder + local loopback
+                                # check; falls back to malicious-flow-destination inference
+                                # when zero internal nodes receive malicious flows (UNSW case)
+    drift_check: true          # emit train-first-half vs second-half k*/d_gw drift
+    k_max: 4                   # cap on reported k* (tuning-grid upper bound)
+
 compute:
   device: "cuda"
   num_workers: 0
