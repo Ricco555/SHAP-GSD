@@ -54,7 +54,16 @@ model:
   minority_class_threshold: 5000         # n_train < this → minority class
   composite_minority_weight: 0.5         # α: weight of minority_macro_f1 in composite
   temporal_window_seconds: 60
-  snapshot_interval: 1000
+  # Periodic node-state snapshot cache built by NodeStateManager.build_snapshots
+  # Pass 2. Disabled by default (0). Nothing on the runtime query path
+  # (get_state_at_time/get_batch_states/rollback_edge(s)) reads it — every
+  # real query recomputes from per-node edge histories directly. At Paper-3
+  # scale (19-25M edges) this Pass 2 was an O(n_snapshots x n_nodes) memory
+  # sink that OOM'd on HPC for zero runtime benefit. Its only consumer is the
+  # optional exploration figure script explore/graph/topology_panel.py, which
+  # degrades gracefully (no node-state overlay) with this disabled. Set to a
+  # positive int (e.g. 1000) in an experiment config to re-enable per run.
+  snapshot_interval: 0
 
 graph:
   dir: "graphs"

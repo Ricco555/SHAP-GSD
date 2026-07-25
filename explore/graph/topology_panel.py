@@ -24,11 +24,11 @@ Candidates (n_nbr = in-window temporal neighbours):
   Generic   2280979  n_nbr=0   max|φ_N|=1.293
   Worms     2267785  n_nbr=0   max|φ_N|=1.614
 
-Files read:
+Files read (all resolved via explore._paths.paths(), run.dir-aware):
   outputs/explanations/<Class>/<EID>.json
   graphs/test.bin
   graphs/node_id_map.json
-  node_state_snapshots/snapshots.pkl  (optional)
+  node_state_snapshots/snapshots.pkl  (optional — empty when snapshots disabled)
 
 Files output:
   outputs/figures/graph/topology_<Class>_<EID>.{pdf,png,txt}
@@ -97,7 +97,8 @@ _CLASS_COLORS = {
 
 def load_graph() -> tuple[dict, dict]:
     """Return (eid_to_edge, inv_map int→IP)."""
-    gs, _ = dgl.load_graphs(str(ROOT / "graphs" / "test.bin"))
+    graphs_dir = _P["graphs"]
+    gs, _ = dgl.load_graphs(str(graphs_dir / "test.bin"))
     g = gs[0]
     src_arr = g.edges()[0].numpy()
     dst_arr = g.edges()[1].numpy()
@@ -107,14 +108,14 @@ def load_graph() -> tuple[dict, dict]:
         int(eid_arr[i]): (int(src_arr[i]), int(dst_arr[i]), int(ts_arr[i]))
         for i in range(g.num_edges())
     }
-    nmap    = json.loads((ROOT / "graphs" / "node_id_map.json").read_text())
+    nmap    = json.loads((graphs_dir / "node_id_map.json").read_text())
     inv_map = {v: k for k, v in nmap.items()}
     return eid_to_edge, inv_map
 
 
 def load_snapshots() -> dict:
-    """Load node-state snapshot pickle."""
-    p = ROOT / "node_state_snapshots" / "snapshots.pkl"
+    """Load node-state snapshot pickle (optional — empty when snapshots disabled)."""
+    p = _P["node_state"] / "snapshots.pkl"
     if not p.exists():
         return {"times": [], "states": []}
     with open(p, "rb") as f:

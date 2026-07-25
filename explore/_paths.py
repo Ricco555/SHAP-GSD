@@ -45,6 +45,7 @@ def paths() -> dict:
         "figures":      outputs / "figures",
         "fs":           REPO_ROOT / cfg["output"]["feature_store_dir"],
         "graphs":       REPO_ROOT / cfg["graph"]["dir"],
+        "node_state":   REPO_ROOT / cfg["graph"]["node_state_dir"],
         "label_map":    REPO_ROOT / cfg["output"]["artifacts_dir"] / "label_map.json",
         "dataset_name": Path(cfg["data"]["csv_path"]).stem,
     }
