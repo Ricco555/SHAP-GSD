@@ -15,8 +15,11 @@ For each mini-batch:
      Seed-edge endpoints: cutoff = min(their seed-edge timestamps).
      All other nodes: cutoff = batch_max_time (fallback, same as Option A for
      nodes not directly adjacent to any seed edge).
-  3. Build a temporally filtered subgraph: edge i valid iff ts[i] <= cutoff[dst[i]].
-  4. Sample fan-out on the filtered subgraph.
+  3. Build, per seed node, the set of eligible in-edges (ts[e] <= cutoff[dst]) via
+     a precomputed per-node timestamp-sorted CSC + np.searchsorted (O(log deg)
+     per seed instead of an O(E) full-graph boolean mask every hop).
+  4. Sample fan-out from the eligible set per seed node (take-all if the
+     eligible count is <= fanout, else an O(fanout) Floyd draw).
   5. After each hop, propagate cutoffs to next-level seed nodes using the
      timestamps of the just-sampled edges (scatter_min over hop-src IDs).
      This gives EXACT guarantees for multi-hop neighborhoods:
@@ -35,15 +38,48 @@ CRITICAL TEST — zero violations required:
   For 1000 random target edges (tested as individual batches or in sorted
   mini-batches of realistic size): every sampled neighbor edge timestamp
   <= target edge timestamp.
+
+PERFORMANCE (spec 18/19): the per-hop candidate generation is
+O(seeds * (log deg + fanout)) via a precomputed per-node timestamp-sorted
+in-adjacency (CSC) + np.searchsorted eligible-prefix + an O(fanout) Floyd
+draw, replacing an earlier O(E)-per-hop full-split boolean mask
+(`_filtered_subgraph` + dgl.sampling.sample_neighbors). This is E-independent
+per call and required for Paper-3 scale (see specs/18, specs/19).
+
+BLOCK-EID CONTRACT: block.edata[dgl.EID] holds the g-LOCAL edge position
+(index into the split graph passed to sample_blocks) of every sampled edge —
+not a frontier-local or subgraph-local position. Downstream consumers
+(temporal_shap.py, 07_visualize.py, 09_w_ablation.py, explore/case_studies.py)
+index the split graph directly with this field and require the true g-local
+position. Mechanism: DGL 2.5's dgl.to_block unconditionally overwrites any
+pre-set frontier.edata[dgl.EID] with frontier-local induced edge IDs
+(utils/internal.py extract_edge_subframes, store_ids=True), so the g-local
+EID must be restored AFTER to_block, composed through the induced IDs
+to_block writes: block.edata[dgl.EID] = frontier.edata['_leid'][induced].
 """
 
+import hashlib
 import logging
 from typing import Optional
 
 import dgl
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
+
+
+def floyd_sample(rng: "np.random.Generator", p: int, k: int) -> np.ndarray:
+    """Draw k distinct ints from [0, p) in O(k) time/space (Floyd's algorithm)."""
+    sel: dict[int, None] = {}
+    for j in range(p - k, p):
+        t = int(rng.integers(0, j + 1))
+        if t in sel:
+            sel[j] = None
+        else:
+            sel[t] = None
+    out = np.fromiter(sel.keys(), dtype=np.int64, count=k)
+    return out
 
 
 class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
@@ -70,6 +106,7 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         self,
         fanouts: list[int],
         timestamp_key: str = "timestamp",
+        deterministic: bool = True,
     ) -> None:
         """
         Args:
@@ -77,10 +114,18 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
                            fanouts[0] = first hop (closest to input features),
                            fanouts[-1] = last hop (closest to output).
             timestamp_key: edata key holding int64 FLOW_START_MILLISECONDS.
+            deterministic: when True (default), the per-hop subsampling draw is
+                           seeded from a hash of seed_eids, so identical
+                           (g, seed_eids) always yields identical blocks. When
+                           False, draws from a fresh np.random.default_rng()
+                           each call — a debug/reproducibility escape hatch,
+                           not a config-driven hyperparameter.
         """
         super().__init__()
         self.fanouts = fanouts
         self.timestamp_key = timestamp_key
+        self.deterministic = deterministic
+        self._csc_cache: dict[int, tuple] = {}  # id(g) -> (g, csc arrays)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -125,6 +170,15 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
                 "the temporal neighbour sampler to provide exact cutoffs."
             )
 
+        # Deterministic-from-seed RNG (or a fresh non-deterministic one) drives
+        # the Floyd draw used whenever a node's eligible in-edge count exceeds
+        # the fanout for that hop.
+        if self.deterministic:
+            h = hashlib.sha256(seed_eids.numpy().tobytes()).digest()
+            rng = np.random.default_rng(int.from_bytes(h[:8], "little"))
+        else:
+            rng = np.random.default_rng()
+
         # Step 1: per-node cutoff tensor.
         # Seed-edge endpoints get the min of their incident seed-edge timestamps.
         # All other nodes default to batch_max_time (identical to Option A fallback).
@@ -141,12 +195,18 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
 
         # DGL convention: enumerate hops from OUTPUT to INPUT, then reverse.
         for hop_idx, fanout in enumerate(reversed(self.fanouts)):
-            sg = self._filtered_subgraph(g, curr_cutoffs)
+            frontier = self._sample_frontier(g, curr_seeds, curr_cutoffs, fanout, rng)
 
-            frontier = dgl.sampling.sample_neighbors(
-                sg, curr_seeds, fanout, edge_dir="in"
-            )
             block = dgl.to_block(frontier, curr_seeds)
+            # dgl.to_block unconditionally overwrites block.edata[dgl.EID]
+            # with frontier-local induced edge IDs (DGL 2.5 internals), so
+            # the g-local EID carried on the frontier as '_leid' is lost
+            # unless restored here. Downstream consumers (temporal_shap.py,
+            # visualize/w_ablation scripts) index g directly with
+            # block.edata[dgl.EID] and require the true g-local position, so
+            # restore it by composing through the induced IDs to_block just
+            # wrote.
+            block.edata[dgl.EID] = frontier.edata["_leid"][block.edata[dgl.EID]]
             blocks.insert(0, block)
 
             # Input nodes of this block become seed nodes for the next hop.
@@ -188,22 +248,6 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         cutoffs.scatter_reduce_(0, dst, ts, reduce="amin", include_self=True)
         return cutoffs
 
-    def _filtered_subgraph(
-        self,
-        g: dgl.DGLGraph,
-        cutoffs: torch.Tensor,
-    ) -> dgl.DGLGraph:
-        """Return a view of g containing only edges with ts[e] <= cutoffs[dst[e]].
-
-        Uses relabel_nodes=False so global node IDs are preserved throughout
-        the sampling pipeline, enabling correct scatter_reduce_ in propagation.
-        """
-        ts = g.edata[self.timestamp_key]
-        _, dst = g.edges()
-        valid_mask = ts <= cutoffs[dst]
-        valid_eids = valid_mask.nonzero(as_tuple=False).view(-1)
-        return g.edge_subgraph(valid_eids, relabel_nodes=False)
-
     def _propagate_cutoffs(
         self,
         frontier: dgl.DGLGraph,
@@ -216,7 +260,7 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         This ensures: hop-2 neighbors of u have timestamp <= t_uv <= t_e.
 
         Args:
-            frontier: graph returned by sample_neighbors for this hop.
+            frontier: graph returned by _sample_frontier for this hop.
             cutoffs:  current per-node cutoff tensor (will not be mutated).
 
         Returns:
@@ -231,3 +275,137 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
             0, hop_src, hop_ts, reduce="amin", include_self=True
         )
         return new_cutoffs
+
+    # ------------------------------------------------------------------
+    # Searchsorted CSC + Floyd-draw candidate generation (spec 18/19)
+    # ------------------------------------------------------------------
+
+    def _get_csc(
+        self, g: dgl.DGLGraph
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (indptr, in_src, in_ts, in_leid, geid) for g, cached per graph.
+
+        Precomputes a per-node timestamp-sorted in-adjacency (CSC-style):
+        for destination node v, the in-edges with local EIDs
+        in_leid[indptr[v]:indptr[v+1]] are sorted by timestamp ascending,
+        with sources in_src[...] and timestamps in_ts[...] aligned.
+
+        Cache is keyed by id(g) but stores (g, csc) and verifies `stored_g is
+        g` on hit — a bare id(g)-keyed cache can otherwise return stale
+        arrays if a graph object is garbage-collected and a new object
+        reuses the same id() (CPython does reuse ids of freed objects).
+        """
+        key = id(g)
+        cached = self._csc_cache.get(key)
+        if cached is not None:
+            stored_g, csc = cached
+            if stored_g is g:
+                return csc
+            # id() reused by a different graph object — stale entry, rebuild.
+
+        src, dst = g.edges()
+        src = src.numpy().astype(np.int64)
+        dst = dst.numpy().astype(np.int64)
+        ts = g.edata[self.timestamp_key].numpy().astype(np.int64)
+        n = g.num_nodes()
+
+        # Precondition — assert, don't assume (CODING STANDARDS 7).
+        assert np.all(np.diff(ts) >= 0), (
+            "Edge timestamps are not globally non-decreasing in edge index; "
+            "the stable group-by-dst CSC would not be per-segment sorted."
+        )
+
+        order = np.argsort(dst, kind="stable")  # stable ⇒ ts-sorted per segment
+        in_src = src[order]
+        in_ts = ts[order]
+        in_leid = order  # local eid of each CSC slot
+        counts = np.bincount(dst, minlength=n)
+        indptr = np.zeros(n + 1, dtype=np.int64)
+        np.cumsum(counts, out=indptr[1:])
+
+        # Assert per-segment sortedness explicitly as well (belt and braces).
+        seg_ok = np.ones(len(in_ts), dtype=bool)
+        if len(in_ts) > 1:
+            same_seg = np.repeat(np.arange(n), counts)
+            seg_ok[1:] = (np.diff(in_ts) >= 0) | (same_seg[1:] != same_seg[:-1])
+        assert bool(seg_ok.all()), "per-destination CSC segment not ts-sorted"
+
+        geid = (
+            g.edata[dgl.EID].numpy().astype(np.int64)[in_leid]
+            if dgl.EID in g.edata
+            else in_leid.copy()
+        )
+
+        csc = (indptr, in_src, in_ts, in_leid, geid)
+        self._csc_cache[key] = (g, csc)
+        return csc
+
+    def eligible_local_eids(
+        self, g: dgl.DGLGraph, node: int, cutoff: int
+    ) -> np.ndarray:
+        """Local EIDs of node's in-edges with ts <= cutoff, in timestamp order."""
+        indptr, _, in_ts, in_leid, _ = self._get_csc(g)
+        lo, hi = int(indptr[node]), int(indptr[node + 1])
+        p = int(np.searchsorted(in_ts[lo:hi], cutoff, side="right"))
+        return in_leid[lo:lo + p]
+
+    def _sample_frontier(
+        self,
+        g: dgl.DGLGraph,
+        curr_seeds: torch.Tensor,
+        cutoffs: torch.Tensor,
+        fanout: int,
+        rng: "np.random.Generator",
+    ) -> dgl.DGLGraph:
+        """Build one hop's frontier via searchsorted CSC + Floyd-draw sampling.
+
+        Replaces the O(E)-per-hop `_filtered_subgraph` + dgl.sampling.
+        sample_neighbors pair: for each seed node, the eligible in-edges
+        (ts <= cutoff[node]) are located in O(log deg) via np.searchsorted on
+        the precomputed per-node timestamp-sorted CSC, then either taken
+        whole (eligible count <= fanout) or subsampled via an O(fanout)
+        Floyd draw.
+
+        Returns a frontier graph carrying edata[timestamp_key], edata['_leid']
+        (g-local edge position — required by sample_blocks' EID-restoration
+        line) and edata['_geid'] (global EID — carried for round-trip
+        convenience, recoverable as g.edata[dgl.EID][block.edata[dgl.EID]]).
+        """
+        indptr, in_src, in_ts, in_leid, geid = self._get_csc(g)
+        seeds = curr_seeds.numpy().astype(np.int64)
+        cut = cutoffs.numpy()
+
+        src_parts, dst_parts, pos_parts = [], [], []
+        for v in seeds:
+            lo, hi = int(indptr[v]), int(indptr[v + 1])
+            if hi == lo:
+                continue
+            c = int(cut[v])
+            p = int(np.searchsorted(in_ts[lo:hi], c, side="right"))
+            if p == 0:
+                continue
+            if p <= fanout:
+                chosen = np.arange(lo, lo + p, dtype=np.int64)
+            else:
+                chosen = lo + floyd_sample(rng, p, fanout)
+            pos_parts.append(chosen)
+            src_parts.append(in_src[chosen])
+            dst_parts.append(np.full(len(chosen), v, dtype=np.int64))
+
+        if pos_parts:
+            pos = np.concatenate(pos_parts)
+            fsrc = np.concatenate(src_parts)
+            fdst = np.concatenate(dst_parts)
+        else:
+            pos = np.empty(0, dtype=np.int64)
+            fsrc = np.empty(0, dtype=np.int64)
+            fdst = np.empty(0, dtype=np.int64)
+
+        frontier = dgl.graph(
+            (torch.from_numpy(fsrc), torch.from_numpy(fdst)),
+            num_nodes=g.num_nodes(),
+        )
+        frontier.edata[self.timestamp_key] = torch.from_numpy(in_ts[pos])
+        frontier.edata["_leid"] = torch.from_numpy(in_leid[pos])
+        frontier.edata["_geid"] = torch.from_numpy(geid[pos])
+        return frontier
