@@ -251,11 +251,28 @@ the baseline comparison:
 
 ```bash
 pip install torch_geometric
-pip install gnnshap
-pip install edgeshaper
+
+git clone https://github.com/HipGraph/GNNShap.git external/gnnshap
+pip install -r external/gnnshap/requirements.txt
+
 git clone https://github.com/AlexDuvalinho/GraphSVX.git external/graphsvx
-pip install -e external/graphsvx
+# Do NOT run `pip install -r external/graphsvx/requirements.txt` — it pins
+# seaborn==0.10.1 exactly and would downgrade the seaborn already installed
+# for src/visualization/metrics_plots.py. GraphSVX's actual import path
+# (torch, torch_geometric, networkx, scipy, scikit-learn, seaborn) is already
+# covered by SHAP-GSD's own dependencies plus the torch_geometric line above.
+
+git clone https://github.com/AndMastro/EdgeSHAPer.git external/edgeshaper
+pip install rdkit rdkit-heatmaps
 ```
+
+Each wrapper resolves its clone directory as `external/<name>/` relative to
+the repo root by default. To use a checkout kept elsewhere, set
+`SHAP_GSD_GNNSHAP_DIR`, `SHAP_GSD_GRAPHSVX_DIR`, or `SHAP_GSD_EDGESHAPER_DIR`
+to that checkout's root directory before running `scripts/10_baselines.py`.
+
+GNNShap compiles a CUDA extension on first import — the first run can take
+several minutes; this is expected, not a hang.
 
 ```bash
 # Full run (~2–4 h):

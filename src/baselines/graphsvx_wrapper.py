@@ -14,7 +14,8 @@ Fidelity is computed via fidelity_from_node_mask (top-k nodes).
 Import note: GraphSVX must be imported with os.chdir / sys.path pointing to
 its own directory (src/ has non-package-style relative imports).
 
-GRAPHSVX_DIR = /home/ricco555/src/phd-i4sec/GraphSVX
+GRAPHSVX_DIR defaults to <repo_root>/external/graphsvx; override with the
+SHAP_GSD_GRAPHSVX_DIR environment variable.
 """
 
 from __future__ import annotations
@@ -30,13 +31,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from src.baselines._paths import resolve_baseline_dir
+
 if TYPE_CHECKING:
     from src.baselines.adapter import FlowContext
     from src.explainer.background import BackgroundDistributions
 
 logger = logging.getLogger(__name__)
 
-GRAPHSVX_DIR = "/home/ricco555/src/phd-i4sec/GraphSVX"
+GRAPHSVX_DIR = resolve_baseline_dir("SHAP_GSD_GRAPHSVX_DIR", "graphsvx")
 
 
 # ── GraphSVX-compatible model wrapper ─────────────────────────────────────────
