@@ -20,11 +20,13 @@ datasets/
 
 # instructions and guides
 CLAUDE.md
+CHANGELOG.md
 AGENT.md
 research_plan.md
 papers_34_plan.md
 implementation_log.md
 git-push-guide.txt
+README_PROX.md
 
 # dashboard — node_modules only; source is committed
 dashboard/node_modules/

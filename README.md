@@ -37,25 +37,13 @@ git checkout v2.1.0
 ```
 
 The current `main` branch (version `2.2.1` and counting) contains, on top of that
-submitted state:
-
-1. **Infrastructure fixes** — an out-of-memory bug at larger dataset scale
-   (fixed by disabling an unused node-state cache; verified to produce identical
-   results with it enabled or disabled), hardcoded developer-machine paths
-   removed from three baseline-explainer wrappers, and an internal lookup
-   optimization (O(n) → O(log n), same data). **None of these change any number
-   reported in the paper** — verified by diffing `v2.1.0..main` for the
-   reported metric strings (they are unchanged).
-2. **New, additive groundwork for a separate, forthcoming paper** (working name
-   PROXEVAL) — most visibly Phase 14 (a read-only topology diagnostic), plus
-   config/tooling for three additional NetFlow datasets. This is new research
-   code, not a bug fix, and is **not part of the SHAP-GSD paper** — it never
-   feeds this paper's model, training, or evaluation, and on this paper's
-   dataset its own measurement is degenerate (constant across all
-   destinations/classes), so it changes nothing about this paper's results
-   either. See [`README_PROX.md`](README_PROX.md) for what this work is and
-   why it's tracked separately from the paper this repository was submitted
-   to accompany.
+submitted state, **infrastructure fixes**: an out-of-memory bug at larger
+dataset scale (fixed by disabling an unused node-state cache; verified to
+produce identical results with it enabled or disabled), hardcoded
+developer-machine paths removed from three baseline-explainer wrappers, and an
+internal lookup optimization (O(n) → O(log n), same data). **None of these
+change any number reported in the paper** — verified by diffing `v2.1.0..main`
+for the reported metric strings (they are unchanged).
 
 ---
 
