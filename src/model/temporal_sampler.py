@@ -430,6 +430,17 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         floyd_sample loop, iterated in seeds-array order so output is
         bit-identical (same edges, same draws) to the pre-vectorization
         per-seed loop.
+
+        Scope of that bit-identity: it holds for a SINGLE _sample_frontier
+        call given identical (curr_seeds, cutoffs, rng). It does NOT extend to
+        full multi-hop sample_blocks output — the frontier edge order changes
+        (take-all block before subsample block), so a hop-1 reorder shifts the
+        induced block.srcdata[NID] order, hence the next hop's curr_seeds order
+        and the shared-rng floyd-draw sequence. Multi-hop sample_blocks output
+        is therefore a valid, deterministic, leak-free sample but is NOT
+        bit-identical to the pre-vectorization build in the mixed
+        take-all/subsample regime (safe: message passing is permutation-
+        invariant and every temporal-cutoff invariant still holds).
         """
         indptr, in_src, in_ts, in_leid, geid, composite, big = self._get_csc(g)
         seeds = curr_seeds.numpy().astype(np.int64)
