@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.6**
+**Version 2.2.7**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
