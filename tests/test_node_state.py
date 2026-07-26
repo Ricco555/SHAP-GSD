@@ -709,3 +709,86 @@ def test_batch_states_microbenchmark(capsys):
     np.testing.assert_allclose(
         new[:, _CLOSE_DIMS], old[:, _CLOSE_DIMS], atol=1e-5, rtol=0
     )
+
+
+# ===========================================================================
+# Spec 23 — code-review fix tests (Findings 1, 3, 5)
+# ===========================================================================
+
+
+def test_batch_states_negative_id_parity():
+    """Finding 1 — negative node_id parity with a non-degenerate is_internal."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    # Non-degenerate is_internal: last element (node 3) = 1.0 so is_internal[-1] != 0.
+    nsm.set_is_internal(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
+    nsm._flat_index = None            # force a rebuild with the new is_internal
+
+    # Valid internal node still parity-correct (dim 0 == 1.0 on both paths).
+    _assert_batch_parity(nsm, [3], 600.0)
+
+    # Negative id in [-len, -1]: WITHOUT the §2.2 guard the scalar oracle reads
+    # is_internal[-1] == 1.0 while the vectorized path gives 0.0 -> mismatch.
+    # WITH the guard both return the clean out-of-domain vector (dim 0 == 0).
+    _assert_batch_parity(nsm, [-1], 600.0)
+    assert nsm.get_batch_states(np.array([-1]), 600.0)[0, 0] == 0.0
+
+    # Large-negative id (< -len(is_internal)): WITHOUT the guard the scalar
+    # oracle raises IndexError; WITH it both return the clean vector.
+    _assert_batch_parity(nsm, [-100], 600.0)
+
+    # Mixed batch with a valid internal node, a negative id, and a duplicate.
+    _assert_batch_parity(nsm, [3, -1, 3, -100], 600.0)
+
+
+def test_batch_states_window_bounds_composite_equivalence():
+    """Finding 3 — composite-key window bounds equal the per-segment oracle."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    nsm.get_batch_states(np.array([0], dtype=np.int64), 0.0)   # trigger _ensure_flat_index
+    fi = nsm._flat_index
+    composite   = fi["composite"]
+    big         = fi["big"]
+    node_indptr = fi["node_indptr"]
+    flat_ts     = fi["flat_ts"]
+    num_nodes   = fi["num_nodes"]
+    W_ms        = nsm._W_ms
+    max_ts      = int(flat_ts.max())
+
+    def _ref_and_bat(v, t):
+        lo = int(t - W_ms); hi = int(t)
+        seg_lo, seg_hi = int(node_indptr[v]), int(node_indptr[v + 1])
+        seg_ts = flat_ts[seg_lo:seg_hi]
+        left  = int(np.searchsorted(seg_ts, lo, side="left"))
+        right = int(np.searchsorted(seg_ts, hi, side="right"))
+        win_lo_ref, win_len_ref = seg_lo + left, right - left
+        lo_c = min(max(lo, 0), big)
+        hi_c = min(max(hi, -1), big - 1)
+        win_lo_bat  = int(np.searchsorted(composite, lo_c + v * big, side="left"))
+        win_hi_bat  = int(np.searchsorted(composite, hi_c + v * big, side="right"))
+        return (win_lo_ref, win_len_ref), (win_lo_bat, win_hi_bat - win_lo_bat)
+
+    # Randomized sweep across all nodes and query times spanning below/in/after window.
+    rng = np.random.default_rng(0)
+    for _ in range(1000):
+        v = int(rng.integers(0, num_nodes))
+        t = float(rng.integers(-3000, 6000))
+        ref, bat = _ref_and_bat(v, t)
+        assert bat == ref, f"v={v} t={t}: ref={ref} bat={bat}"
+
+    # Explicit boundary sub-cases (the traps §3.3 calls out):
+    for v in range(num_nodes):
+        # hi == max_ts (tightest in-domain upper bound).
+        assert _ref_and_bat(v, float(max_ts))[0] == _ref_and_bat(v, float(max_ts))[1]
+        # lo > big on a segment containing ts == max_ts (the big-vs-big-1 trap):
+        # pick t so lo = int(t - W_ms) > big, i.e. t > big + W_ms.
+        t_hi = float(big + W_ms + 10_000)
+        assert _ref_and_bat(v, t_hi)[0] == _ref_and_bat(v, t_hi)[1]
+        # lo and hi both negative (fully-before-window).
+        assert _ref_and_bat(v, -5000.0)[0] == _ref_and_bat(v, -5000.0)[1]
+
+
+def test_node_state_uses_preprocessor_port_bin_constant():
+    """Finding 5 — the module uses the shared preprocessor port-bin constant."""
+    import src.model.node_state as ns
+    from src.data.preprocessor import N_DST_PORT_BINS as PP_BINS
+    assert ns.N_DST_PORT_BINS is PP_BINS       # module-level import, same object
+    assert ns.N_DST_PORT_BINS == 16
