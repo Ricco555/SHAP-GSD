@@ -677,8 +677,9 @@ class NodeStateManager:
             # (asserted at build), so these clamps preserve the per-segment counts
             # EXACTLY (see §3.3 correctness):
             #   lo -> [0, big]      (UPPER clamp is `big`, NOT big-1 — see the trap
-            #                        note in §3.3: big-1 undercounts when lo > max_ts
-            #                        and a segment holds ts == max_ts).
+            #                        note in §3.3: big-1 OVERcounts when lo > max_ts
+            #                        and a segment holds ts == max_ts, wrongly
+            #                        including that slot in the window).
             #   hi -> [-1, big-1]
             lo_c = min(max(lo, 0), big)
             hi_c = min(max(hi, -1), big - 1)
