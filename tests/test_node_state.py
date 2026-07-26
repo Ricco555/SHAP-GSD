@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scipy.stats import entropy as scipy_entropy
 from src.model.node_state import NodeStateManager
+from tests._paths import REPO_ROOT, resolve_cfg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -469,3 +470,242 @@ def test_query_results_identical_with_snapshots_on_or_off():
         edge_features={"peer_id": 2}, query_time_ms=600.0,
     )
     np.testing.assert_array_equal(rb_off, rb_on)
+
+
+# ===========================================================================
+# Vectorized get_batch_states — parity with the retained _compute_state oracle
+# (spec 21 §4). Parity split per spec 21 §3.9:
+#   bit-exact dims: 0,1,2,3,4,5,6,7,11,12
+#   allclose (atol 1e-5) dims: 8,9,10,13,14
+# ===========================================================================
+
+_EXACT_DIMS = [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]
+_CLOSE_DIMS = [8, 9, 10, 13, 14]
+
+
+def _assert_batch_parity(nsm: NodeStateManager, node_ids, t: float) -> None:
+    """Assert get_batch_states matches the stacked _compute_state oracle."""
+    node_ids = np.asarray(node_ids, dtype=np.int64)
+    oracle = np.stack([nsm._compute_state(int(v), t) for v in node_ids])
+    got = nsm.get_batch_states(node_ids, t)
+    assert got.shape == (len(node_ids), 15)
+    assert got.dtype == np.float32
+    np.testing.assert_array_equal(got[:, _EXACT_DIMS], oracle[:, _EXACT_DIMS])
+    np.testing.assert_allclose(
+        got[:, _CLOSE_DIMS], oracle[:, _CLOSE_DIMS], atol=1e-5, rtol=0
+    )
+
+
+_PARITY_EDGES = [
+    {"ts": 100, "src": 0, "dst": 1, "in_bytes": 0,   "out_bytes": 100, "dst_port": 80},
+    {"ts": 200, "src": 0, "dst": 2, "in_bytes": 0,   "out_bytes": 200, "dst_port": 443},
+    {"ts": 300, "src": 0, "dst": 1, "in_bytes": 0,   "out_bytes": 150, "dst_port": 80},
+    {"ts": 400, "src": 3, "dst": 0, "in_bytes": 500, "out_bytes": 0,   "dst_port": 9999},
+    {"ts": 500, "src": 0, "dst": 2, "in_bytes": 0,   "out_bytes": 300, "dst_port": 22},
+]
+
+
+# ---------------------------------------------------------------------------
+# Category 1 — oracle parity
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("t", [-500.0, 50.0, 350.0, 600.0, 5000.0])
+def test_batch_states_oracle_parity(t):
+    """Vectorized batch equals the stacked scalar oracle across query times."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    node_ids = np.array([0, 1, 2, 3], dtype=np.int64)
+    _assert_batch_parity(nsm, node_ids, t)
+
+
+# ---------------------------------------------------------------------------
+# Category 2 — edge cases (each asserted against the _compute_state oracle)
+# ---------------------------------------------------------------------------
+
+def test_batch_states_edge_cases():
+    """Every edge case in spec 20 §1.9 item 2, vs the oracle under §3.9 split."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    # Domain: nodes 0-3 have history; is_internal length = 4.
+
+    # Node absent from _histories but in domain: use an id with no edges by
+    # extending is_internal so num_nodes > max history id.
+    nsm2 = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    nsm2.set_is_internal(np.zeros(6, dtype=np.float32))  # domain now 0..5
+    # node 5 in domain, no history
+    _assert_batch_parity(nsm2, [5], 600.0)
+
+    # Node with history but empty window (query far after last edge).
+    _assert_batch_parity(nsm, [0], 100000.0)
+
+    # Exactly 1 in-window edge → dim 14 = 0. Node 3 has one edge at t=400.
+    _assert_batch_parity(nsm, [3], 600.0)
+
+    # All-outgoing node (node 0 mostly out) and all-incoming (node 1 receives).
+    _assert_batch_parity(nsm, [0, 1, 2, 3], 600.0)
+
+    # Boundary: first_seen == lo and first_seen == t, ts.max() == t.
+    _assert_batch_parity(nsm, [0], 100.0)     # t == first_seen edge
+    _assert_batch_parity(nsm, [0], 1100.0)    # w_start=100=first_seen boundary
+
+    # nid >= len(is_internal) but WITH history: shrink is_internal to len 1,
+    # node 0 keeps history, dim 0 must be 0 (independent guard).
+    nsm3 = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    nsm3.set_is_internal(np.array([1.0], dtype=np.float32))  # only node 0 covered
+    # node 2 has history but is beyond is_internal length -> dim0 = 0
+    _assert_batch_parity(nsm3, [0, 1, 2, 3], 600.0)
+
+    # nid >= num_nodes (fully out of domain).
+    _assert_batch_parity(nsm, [9999], 600.0)
+    _assert_batch_parity(nsm, [-1], 600.0)
+
+    # Hour-rollover t (hour_int wraps toward 0): t ~ 23:59 then 00:01.
+    t_2359 = (23 * 3600 + 59 * 60) * 1000.0
+    t_0001 = (24 * 3600 + 60) * 1000.0
+    _assert_batch_parity(nsm, [0, 1, 2, 3], t_2359)
+    _assert_batch_parity(nsm, [0, 1, 2, 3], t_0001)
+
+    # Duplicate node_ids → identical rows.
+    dup = np.array([0, 0, 2, 2], dtype=np.int64)
+    got = nsm.get_batch_states(dup, 600.0)
+    np.testing.assert_array_equal(got[0], got[1])
+    np.testing.assert_array_equal(got[2], got[3])
+    _assert_batch_parity(nsm, dup, 600.0)
+
+    # Unsorted node_ids → row order preserved.
+    _assert_batch_parity(nsm, [3, 1, 0, 2], 600.0)
+
+
+# ---------------------------------------------------------------------------
+# Category 4 — contract checks
+# ---------------------------------------------------------------------------
+
+def test_batch_states_contract():
+    """Shape/dtype/row-order/empty-batch contract."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+
+    got = nsm.get_batch_states(np.array([0, 2], dtype=np.int64), 600.0)
+    assert got.shape == (2, 15)
+    assert got.dtype == np.float32
+    # Row order matches node_ids.
+    o0 = nsm._compute_state(0, 600.0)
+    o2 = nsm._compute_state(2, 600.0)
+    np.testing.assert_array_equal(got[0][_EXACT_DIMS], o0[_EXACT_DIMS])
+    np.testing.assert_array_equal(got[1][_EXACT_DIMS], o2[_EXACT_DIMS])
+
+    # Empty batch.
+    empty = nsm.get_batch_states(np.empty(0, dtype=np.int64), 600.0)
+    assert empty.shape == (0, 15)
+    assert empty.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# Category 3 / 5 — real-data parity + micro-benchmark (artifact-gated)
+# ---------------------------------------------------------------------------
+
+def _artifacts_available() -> bool:
+    cfg = resolve_cfg()
+    gdir = REPO_ROOT / cfg["graph"]["dir"]
+    nsd = REPO_ROOT / cfg["graph"]["node_state_dir"]
+    return (gdir / "train.bin").exists() and (nsd / "histories.pkl").exists()
+
+
+def _real_input_batches(split: str, n_batches: int = 2, batch_size: int = 512):
+    """Load nsm and yield (input_nodes np.ndarray, batch_ts float) mini-batches.
+
+    Mirrors trainer.py:268-276 sampler-driven input_nodes reconstruction.
+    """
+    import dgl
+    import torch
+
+    from src.model.temporal_sampler import TemporalNeighborSampler
+
+    cfg = resolve_cfg()
+    nsm = NodeStateManager.load(REPO_ROOT / cfg["graph"]["node_state_dir"])
+
+    g_list, _ = dgl.load_graphs(str(REPO_ROOT / cfg["graph"]["dir"] / f"{split}.bin"))
+    g = g_list[0]
+
+    sampler = TemporalNeighborSampler(fanouts=cfg["model"]["fanouts"])
+
+    n_edges = g.num_edges()
+    batches = []
+    for b in range(n_batches):
+        lo = b * batch_size
+        if lo >= n_edges:
+            break
+        hi = min(lo + batch_size, n_edges)
+        batch_local = torch.arange(lo, hi, dtype=torch.long)
+        input_nodes, _seed_local, _blocks = sampler.sample_blocks(g, batch_local)
+        batch_ts = float(g.edata["timestamp"][batch_local].max().item())
+        batches.append((input_nodes.numpy(), batch_ts))
+    return nsm, batches
+
+
+@pytest.mark.parametrize("split", ["train", "val"])
+def test_batch_states_real_data_parity(split):
+    """Real-data parity: get_batch_states vs stacked _compute_state oracle."""
+    if not _artifacts_available():
+        pytest.skip(
+            "graphs/*.bin or node_state artifacts not found — run "
+            "scripts/02_build_graph.py / node-state build first"
+        )
+    nsm, batches = _real_input_batches(split, n_batches=2)
+    assert len(batches) > 0, "no mini-batches produced"
+
+    saw_nonempty = False
+    for input_nodes, batch_ts in batches:
+        if input_nodes.size > 0:
+            saw_nonempty = True
+        got = nsm.get_batch_states(input_nodes, batch_ts)
+        oracle = np.stack(
+            [nsm._compute_state(int(v), batch_ts) for v in input_nodes]
+        ) if input_nodes.size > 0 else np.zeros((0, 15), dtype=np.float32)
+        assert got.shape == (input_nodes.size, 15)
+        if input_nodes.size > 0:
+            np.testing.assert_array_equal(
+                got[:, _EXACT_DIMS], oracle[:, _EXACT_DIMS]
+            )
+            np.testing.assert_allclose(
+                got[:, _CLOSE_DIMS], oracle[:, _CLOSE_DIMS], atol=1e-5, rtol=0
+            )
+    assert saw_nonempty, "all real mini-batches had empty input_nodes"
+
+
+def test_batch_states_microbenchmark(capsys):
+    """Timed old-loop vs vectorized on real input_nodes; assert parity only."""
+    if not _artifacts_available():
+        pytest.skip(
+            "graphs/*.bin or node_state artifacts not found — run "
+            "scripts/02_build_graph.py / node-state build first"
+        )
+    import time as _time
+
+    # NF-UNSW-NB15-v3 is IP-level (~44 nodes), so input_nodes saturates near
+    # the full node set even for a modest batch — N is dataset-bounded here.
+    nsm, batches = _real_input_batches("train", n_batches=3, batch_size=4096)
+    input_nodes, batch_ts = max(batches, key=lambda b: b[0].size)
+    assert input_nodes.size > 0
+
+    # Warm the flat index so the build cost isn't charged to the timed call.
+    nsm.get_batch_states(input_nodes, batch_ts)
+
+    t0 = _time.perf_counter()
+    old = np.stack([nsm._compute_state(int(v), batch_ts) for v in input_nodes])
+    t_old = _time.perf_counter() - t0
+
+    t1 = _time.perf_counter()
+    new = nsm.get_batch_states(input_nodes, batch_ts)
+    t_new = _time.perf_counter() - t1
+
+    # Evidence only — no speedup threshold asserted.
+    with capsys.disabled():
+        speedup = (t_old / t_new) if t_new > 0 else float("inf")
+        print(
+            f"\n[microbenchmark] N={input_nodes.size} nodes | "
+            f"old loop={t_old * 1e3:.2f} ms | vectorized={t_new * 1e3:.2f} ms | "
+            f"speedup={speedup:.1f}x"
+        )
+
+    np.testing.assert_array_equal(new[:, _EXACT_DIMS], old[:, _EXACT_DIMS])
+    np.testing.assert_allclose(
+        new[:, _CLOSE_DIMS], old[:, _CLOSE_DIMS], atol=1e-5, rtol=0
+    )

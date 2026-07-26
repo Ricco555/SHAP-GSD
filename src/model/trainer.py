@@ -22,6 +22,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -240,6 +241,11 @@ class Trainer:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _cuda_sync(self) -> None:
+        """Synchronize CUDA before/after GPU timing; no-op on CPU devices."""
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+
     def _run_epoch(
         self,
         g: dgl.DGLGraph,
@@ -253,6 +259,11 @@ class Trainer:
         total_loss = 0.0
         n_batches  = 0
 
+        sampling_seconds:   float = 0.0
+        node_state_seconds: float = 0.0
+        gpu_step_seconds:   float = 0.0
+        total_batch_seconds: float = 0.0
+
         loader = DataLoader(
             TensorDataset(torch.from_numpy(local_eids)),
             batch_size=self.batch_size,
@@ -263,18 +274,23 @@ class Trainer:
         ctx = torch.enable_grad() if is_train else torch.no_grad()
         with ctx:
             for (batch_local_t,) in loader:
+                t_batch = perf_counter()
                 batch_local = batch_local_t.long()
 
+                t0 = perf_counter()
                 input_nodes, seed_local, blocks = self.sampler.sample_blocks(
                     g, batch_local
                 )
+                sampling_seconds += perf_counter() - t0
+
                 blocks = [b.to(self.device) for b in blocks]
 
                 # Node features from NodeStateManager (global node IDs)
                 batch_ts = float(g.edata["timestamp"][batch_local].max().item())
-                node_feats = torch.from_numpy(
-                    self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
-                ).float().to(self.device)
+                t0 = perf_counter()
+                batch_states = self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
+                node_state_seconds += perf_counter() - t0
+                node_feats = torch.from_numpy(batch_states).float().to(self.device)
 
                 # Edge features via GLOBAL EIDs (seed_local == seed_global for train)
                 global_eids = g.edata[dgl.EID][seed_local].numpy()
@@ -288,12 +304,14 @@ class Trainer:
                 src_pos = src_pos.to(self.device)
                 dst_pos = dst_pos.to(self.device)
 
-                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
-
                 labels = torch.from_numpy(
                     fs.get_labels_batch(global_eids)
                 ).long().to(self.device)
 
+                self._cuda_sync()
+                t0 = perf_counter()
+
+                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
                 loss = criterion(logits, labels)
 
                 if is_train:
@@ -301,8 +319,23 @@ class Trainer:
                     loss.backward()
                     self.optimizer.step()
 
+                self._cuda_sync()
+                gpu_step_seconds += perf_counter() - t0
+
                 total_loss += float(loss.item())
                 n_batches  += 1
+                total_batch_seconds += perf_counter() - t_batch
+
+        other_seconds = total_batch_seconds - (
+            sampling_seconds + node_state_seconds + gpu_step_seconds
+        )
+        logger.info(
+            "  %s timing: sampling=%.1fs  node_state=%.1fs  "
+            "gpu_step=%.1fs  other=%.1fs  (total=%.1fs, %d batches)",
+            "train" if is_train else "eval",
+            sampling_seconds, node_state_seconds, gpu_step_seconds,
+            other_seconds, total_batch_seconds, n_batches,
+        )
 
         return total_loss / max(n_batches, 1)
 
@@ -317,6 +350,11 @@ class Trainer:
         all_preds:  list[int] = []
         all_labels: list[int] = []
 
+        sampling_seconds:   float = 0.0
+        node_state_seconds: float = 0.0
+        gpu_step_seconds:   float = 0.0
+        total_batch_seconds: float = 0.0
+
         # Use LOCAL edge IDs for the val graph (0..n_val-1)
         local_val_eids = np.arange(self.g_val.num_edges(), dtype=np.int64)
 
@@ -329,19 +367,24 @@ class Trainer:
 
         with torch.no_grad():
             for (batch_local_t,) in loader:
+                t_batch = perf_counter()
                 batch_local = batch_local_t.long()
 
+                t0 = perf_counter()
                 input_nodes, seed_local, blocks = self.sampler.sample_blocks(
                     self.g_val, batch_local
                 )
+                sampling_seconds += perf_counter() - t0
+
                 blocks = [b.to(self.device) for b in blocks]
 
                 batch_ts = float(
                     self.g_val.edata["timestamp"][batch_local].max().item()
                 )
-                node_feats = torch.from_numpy(
-                    self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
-                ).float().to(self.device)
+                t0 = perf_counter()
+                batch_states = self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
+                node_state_seconds += perf_counter() - t0
+                node_feats = torch.from_numpy(batch_states).float().to(self.device)
 
                 global_eids = self.g_val.edata[dgl.EID][seed_local].numpy()
                 edge_feats = torch.from_numpy(
@@ -355,17 +398,34 @@ class Trainer:
                 src_pos = src_pos.to(self.device)
                 dst_pos = dst_pos.to(self.device)
 
-                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
-
                 labels_np = self.fs_val.get_labels_batch(global_eids)
                 labels = torch.from_numpy(labels_np).long().to(self.device)
 
+                self._cuda_sync()
+                t0 = perf_counter()
+
+                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
                 loss = criterion(logits, labels)
+
+                self._cuda_sync()
+                gpu_step_seconds += perf_counter() - t0
+
                 total_loss += float(loss.item())
                 n_batches  += 1
 
                 all_preds.extend(logits.argmax(dim=1).cpu().numpy().tolist())
                 all_labels.extend(labels_np.tolist())
+                total_batch_seconds += perf_counter() - t_batch
+
+        other_seconds = total_batch_seconds - (
+            sampling_seconds + node_state_seconds + gpu_step_seconds
+        )
+        logger.info(
+            "  val timing: sampling=%.1fs  node_state=%.1fs  "
+            "gpu_step=%.1fs  other=%.1fs  (total=%.1fs, %d batches)",
+            sampling_seconds, node_state_seconds, gpu_step_seconds,
+            other_seconds, total_batch_seconds, n_batches,
+        )
 
         val_loss   = total_loss / max(n_batches, 1)
         y_true     = np.array(all_labels)

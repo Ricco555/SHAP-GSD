@@ -234,6 +234,11 @@ class NodeStateManager:
         self._snap_times:  list[int]                      = []
         self._snap_states: list[dict[int, np.ndarray]]   = []
 
+        # Lazily-built flat CSR-style index for vectorized get_batch_states
+        # (built by _ensure_flat_index on first batch call). None until built.
+        # _histories is frozen post-build/load, so no invalidation is ever needed.
+        self._flat_index: Optional[dict] = None
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
@@ -468,9 +473,283 @@ class NodeStateManager:
 
         Returns:
             np.ndarray of shape (N, 15), dtype float32.
+
+        Implementation note: the body now builds (once, lazily) an instance-
+        cached flat CSR-style index of the already-sorted per-node histories
+        and computes all 15 dims via batched NumPy segment reductions
+        (``_batch_states_vectorized``). ``_compute_state`` remains the untouched
+        parity oracle — bit-exact on the integer/shared-scalar dims and
+        allclose (atol 1e-5) on the float64-accumulation dims.
         """
         t = float(time_ms)
-        return np.stack([self._compute_state(int(nid), t) for nid in node_ids])
+        ids = np.asarray(node_ids, dtype=np.int64).reshape(-1)
+        return self._batch_states_vectorized(ids, t)
+
+    def _ensure_flat_index(self) -> None:
+        """Build the flat CSR-style history index and dense per-node arrays once,
+        cached on the instance. Idempotent: returns immediately if already built.
+
+        ``_histories`` is frozen after build_snapshots()/load(), so no
+        invalidation is needed (unlike the sampler's per-graph ``_csc_cache``).
+        A single ``None``-sentinel handle suffices — no keying, no identity
+        re-check, no eviction.
+        """
+        if self._flat_index is not None:
+            return
+
+        # --- Node-domain sizing (covers all dense arrays) ---
+        n_hist  = (max(self._histories) + 1) if self._histories else 0
+        n_base  = (max(self._baselines) + 1) if self._baselines else 0
+        n_isint = len(self._is_internal) if self._is_internal is not None else 0
+        num_nodes = max(n_hist, n_base, n_isint)
+
+        # --- Flat concatenated history arrays (CSR values) + indptr ---
+        seg_len = np.zeros(num_nodes, dtype=np.int64)
+        ts_parts:   list[np.ndarray] = []
+        inc_parts:  list[np.ndarray] = []
+        byt_parts:  list[np.ndarray] = []
+        port_parts: list[np.ndarray] = []
+        peer_parts: list[np.ndarray] = []
+        first_seen_arr = np.full(num_nodes, -1, dtype=np.int64)
+
+        # Iterate nodes in ascending id so segments are contiguous.
+        for v in range(num_nodes):
+            h = self._histories.get(v)
+            if h is None:
+                continue
+            seg_len[v] = len(h.ts)
+            ts_parts.append(h.ts)
+            inc_parts.append(h.is_incoming)
+            byt_parts.append(h.raw_bytes)
+            port_parts.append(h.dst_port)
+            peer_parts.append(h.peer_id)
+            first_seen_arr[v] = h.first_seen_ms
+
+        if ts_parts:
+            flat_ts   = np.concatenate(ts_parts).astype(np.int64, copy=False)
+            flat_inc  = np.concatenate(inc_parts).astype(bool, copy=False)
+            flat_bytes = np.concatenate(byt_parts).astype(np.float32, copy=False)
+            flat_port = np.concatenate(port_parts).astype(np.int32, copy=False)
+            flat_peer = np.concatenate(peer_parts).astype(np.int64)
+        else:
+            flat_ts   = np.empty(0, dtype=np.int64)
+            flat_inc  = np.empty(0, dtype=bool)
+            flat_bytes = np.empty(0, dtype=np.float32)
+            flat_port = np.empty(0, dtype=np.int32)
+            flat_peer = np.empty(0, dtype=np.int64)
+
+        node_indptr = np.zeros(num_nodes + 1, dtype=np.int64)
+        np.cumsum(seg_len, out=node_indptr[1:])
+
+        # Production assert (CODING STANDARDS 7) — flat-length parity.
+        assert (
+            node_indptr[-1] == len(flat_ts) == len(flat_inc)
+            == len(flat_bytes) == len(flat_port) == len(flat_peer)
+        ), "flat CSR index length mismatch"
+
+        # --- Dense per-node arrays ---
+        is_internal_arr = np.zeros(num_nodes, dtype=np.float32)
+        if self._is_internal is not None:
+            is_internal_arr[: len(self._is_internal)] = self._is_internal
+
+        baseline_arr = np.full(
+            (num_nodes, 24), np.float32(self._global_baseline), dtype=np.float32
+        )
+        for node, hours in self._baselines.items():
+            if 0 <= node < num_nodes:
+                for hour, val in hours.items():
+                    baseline_arr[node, hour] = val
+
+        self._flat_index = {
+            "num_nodes":      num_nodes,
+            "node_indptr":    node_indptr,
+            "flat_ts":        flat_ts,
+            "flat_inc":       flat_inc,
+            "flat_bytes":     flat_bytes,
+            "flat_port":      flat_port,
+            "flat_peer":      flat_peer,
+            "first_seen_arr": first_seen_arr,
+            "is_internal_arr": is_internal_arr,
+            "baseline_arr":   baseline_arr,
+        }
+
+    def _batch_states_vectorized(
+        self,
+        node_ids: np.ndarray,   # int64, shape (N,), order-significant, dups allowed
+        t: float,
+    ) -> np.ndarray:            # (N, 15) float32
+        """Vectorized equivalent of stacking _compute_state over node_ids at t.
+
+        Builds (once, cached) the flat CSR-style index, then computes all 15
+        dims via batched NumPy segment reductions. Bit-parity with the scalar
+        oracle on the integer/exact dims; allclose (atol 1e-5) on the
+        float64-accumulation dims.
+        """
+        self._ensure_flat_index()
+        fi = self._flat_index
+
+        num_nodes       = fi["num_nodes"]
+        node_indptr     = fi["node_indptr"]
+        flat_ts         = fi["flat_ts"]
+        flat_inc        = fi["flat_inc"]
+        flat_bytes      = fi["flat_bytes"]
+        flat_port       = fi["flat_port"]
+        flat_peer       = fi["flat_peer"]
+        first_seen_arr  = fi["first_seen_arr"]
+        is_internal_arr = fi["is_internal_arr"]
+        baseline_arr    = fi["baseline_arr"]
+
+        N = int(node_ids.shape[0])
+        state = np.zeros((N, 15), dtype=np.float32)
+
+        # Defaults for reduction-fed dims (so empty batch / empty windows
+        # return the correct no-history vector without special-casing).
+        state[:, 2] = 1.0   # recency defaults to 1.0 (not seen in W)
+
+        # --- Setup: validity mask ---
+        valid = (node_ids >= 0) & (node_ids < num_nodes)
+        safe_ids = np.where(valid, node_ids, 0)   # clamp for safe gathers
+
+        # Dim 0 — is_internal (bit-exact); zero-padded array reproduces the
+        # scalar node_id < len(is_internal) guard.
+        if num_nodes > 0:
+            state[:, 0] = np.where(
+                valid, is_internal_arr[safe_ids], np.float32(0.0)
+            )
+
+        # Dim 1 — novelty (HIGHEST PARITY RISK). Float window start, NOT int(lo),
+        # AND the first_seen >= 0 sentinel exclusion AND valid.
+        w_start = t - self._W_ms
+        fs = (
+            first_seen_arr[safe_ids] if num_nodes > 0
+            else np.full(N, -1, dtype=np.int64)
+        )
+        state[:, 1] = (
+            (fs >= 0) & (w_start <= fs) & (fs <= t) & valid
+        ).astype(np.float32)
+
+        # Dims 11/12 — seasonal, shared scalar t (bit-exact).
+        hour_frac = (t / 3_600_000.0) % 24.0
+        state[:, 11] = np.float32(np.sin(2.0 * np.pi * hour_frac / 24.0))
+        state[:, 12] = np.float32(np.cos(2.0 * np.pi * hour_frac / 24.0))
+        hour_int = int(hour_frac)
+
+        # --- Window bounds (shared int-truncated scalar, per window_bounds) ---
+        lo = int(t - self._W_ms)
+        hi = int(t)
+        win_lo  = np.empty(N, dtype=np.int64)
+        win_len = np.empty(N, dtype=np.int64)
+        for i in range(N):
+            v = int(safe_ids[i])
+            seg_lo = int(node_indptr[v]); seg_hi = int(node_indptr[v + 1])
+            seg_ts = flat_ts[seg_lo:seg_hi]
+            left  = int(np.searchsorted(seg_ts, lo, side="left"))
+            right = int(np.searchsorted(seg_ts, hi, side="right"))
+            win_lo[i]  = seg_lo + left
+            win_len[i] = right - left
+        win_len[~valid] = 0   # invalid ids → empty window
+
+        # Dim 2 — recency (bit-exact): last element of each non-empty window.
+        nz = win_len > 0
+        if nz.any():
+            last_ts = flat_ts[win_lo[nz] + win_len[nz] - 1].astype(np.float64)
+            state[nz, 2] = np.minimum(
+                1.0, (t - last_ts) / self._W_ms
+            ).astype(np.float32)
+
+        # --- Loop-free ragged gather over in-window records ---
+        total = int(win_len.sum())
+        if total > 0:
+            seg_id = np.repeat(np.arange(N), win_len)          # (total,) batch row
+            ends = np.cumsum(win_len)
+            starts = ends - win_len
+            ramp = np.arange(total) - np.repeat(starts, win_len)
+            gather_idx = np.repeat(win_lo, win_len) + ramp     # abs flat offset
+
+            g_ts   = flat_ts[gather_idx]
+            g_inc  = flat_inc[gather_idx]
+            g_byt  = flat_bytes[gather_idx]
+            g_port = flat_port[gather_idx]
+            g_peer = flat_peer[gather_idx]
+
+            out_m = ~g_inc
+            in_m  = g_inc
+
+            # Dims 3, 4 — in/out degree (bit-exact).
+            state[:, 3] = np.bincount(seg_id[in_m],  minlength=N).astype(np.float32)
+            state[:, 4] = np.bincount(seg_id[out_m], minlength=N).astype(np.float32)
+
+            # Dims 5, 6 — unique dst/src IP count (composite-key unique).
+            max_peer = int(flat_peer.max()) if flat_peer.size else 0
+            K = max_peer + 1
+            assert (N - 1) * K + max_peer < 2**63, (
+                "composite src/dst-unique key overflow"
+            )
+            if out_m.any():
+                comp = seg_id[out_m].astype(np.int64) * K + g_peer[out_m]
+                uc = np.unique(comp)
+                state[:, 5] = np.bincount(
+                    (uc // K).astype(np.int64), minlength=N
+                ).astype(np.float32)
+            if in_m.any():
+                comp = seg_id[in_m].astype(np.int64) * K + g_peer[in_m]
+                uc = np.unique(comp)
+                state[:, 6] = np.bincount(
+                    (uc // K).astype(np.int64), minlength=N
+                ).astype(np.float32)
+
+            # Dims 7, 8 — unique dst-port count & dst-port entropy (out-edges).
+            N_DST_PORT_BINS = 16
+            port_hist = np.zeros((N, N_DST_PORT_BINS), dtype=np.int64)
+            if out_m.any():
+                key = (
+                    seg_id[out_m].astype(np.int64) * N_DST_PORT_BINS
+                    + g_port[out_m].astype(np.int64)
+                )
+                port_hist = np.bincount(
+                    key, minlength=N * N_DST_PORT_BINS
+                ).reshape(N, N_DST_PORT_BINS)
+            state[:, 7] = (port_hist > 0).sum(axis=1).astype(np.float32)
+            nz8 = port_hist.sum(axis=1) > 0
+            if nz8.any():
+                state[nz8, 8] = scipy_entropy(
+                    port_hist[nz8], axis=1
+                ).astype(np.float32)
+
+            # Dims 9, 10 — rolling in/out bytes (float64 accum → allclose).
+            in_sum  = np.bincount(seg_id[in_m],  weights=g_byt[in_m],  minlength=N)
+            out_sum = np.bincount(seg_id[out_m], weights=g_byt[out_m], minlength=N)
+            state[:, 9]  = np.log1p(in_sum).astype(np.float32)
+            state[:, 10] = np.log1p(out_sum).astype(np.float32)
+
+            # Dim 14 — IAT regularity (CV), direction-agnostic full window slice.
+            if total >= 2:
+                d = np.diff(g_ts.astype(np.float64))
+                same = seg_id[1:] == seg_id[:-1]
+                d_seg = seg_id[1:][same]
+                dv = d[same]
+                cnt  = np.bincount(d_seg, minlength=N).astype(np.float64)
+                ssum = np.bincount(d_seg, weights=dv,      minlength=N)
+                sq   = np.bincount(d_seg, weights=dv * dv, minlength=N)
+                ok = cnt > 0
+                mean = np.zeros(N); mean[ok] = ssum[ok] / cnt[ok]
+                var  = np.zeros(N); var[ok]  = sq[ok] / cnt[ok] - mean[ok] ** 2
+                var  = np.maximum(var, 0.0)
+                std  = np.sqrt(var)
+                good = ok & (mean != 0.0)
+                cv = np.zeros(N); cv[good] = std[good] / mean[good]
+                state[:, 14] = cv.astype(np.float32)
+
+        # Dim 13 — volume deviation: (dim9 + dim10) - baseline[node, hour].
+        rolling_bytes = state[:, 9] + state[:, 10]
+        if num_nodes > 0:
+            base = baseline_arr[safe_ids, hour_int]
+            base = np.where(valid, base, np.float32(self._global_baseline))
+        else:
+            base = np.full(N, np.float32(self._global_baseline))
+        state[:, 13] = (rolling_bytes - base).astype(np.float32)
+
+        return state
 
     def rollback_edge(
         self,
