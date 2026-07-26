@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.4**
+**Version 2.2.5**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -36,7 +36,7 @@ results). To reproduce the paper exactly, check out that tag:
 git checkout v2.1.0
 ```
 
-The current `main` branch (version `2.2.4` and counting) contains, on top of that
+The current `main` branch (version `2.2.5` and counting) contains, on top of that
 submitted state, **infrastructure fixes**: an out-of-memory bug at larger
 dataset scale (fixed by disabling an unused node-state cache; verified to
 produce identical results with it enabled or disabled), hardcoded
