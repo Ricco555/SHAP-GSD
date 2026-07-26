@@ -41,9 +41,7 @@ submitted state, **infrastructure fixes**: an out-of-memory bug at larger
 dataset scale (fixed by disabling an unused node-state cache; verified to
 produce identical results with it enabled or disabled), hardcoded
 developer-machine paths removed from three baseline-explainer wrappers, and an
-internal lookup optimization (O(n) → O(log n), same data). **None of these
-change any number reported in the paper** — verified by diffing `v2.1.0..main`
-for the reported metric strings (they are unchanged).
+internal lookup optimization (O(n) → O(log n), same data).
 
 ---
 
