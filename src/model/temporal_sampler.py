@@ -282,18 +282,38 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
 
     def _get_csc(
         self, g: dgl.DGLGraph
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return (indptr, in_src, in_ts, in_leid, geid) for g, cached per graph.
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        int,
+    ]:
+        """Return (indptr, in_src, in_ts, in_leid, geid, composite, big) for g,
+        cached per graph.
 
         Precomputes a per-node timestamp-sorted in-adjacency (CSC-style):
         for destination node v, the in-edges with local EIDs
         in_leid[indptr[v]:indptr[v+1]] are sorted by timestamp ascending,
         with sources in_src[...] and timestamps in_ts[...] aligned.
 
+        The last two returned members support the vectorized segmented
+        searchsorted in `_sample_frontier` (spec 22 / spec 20 §2.3):
+          composite[i] = in_ts[i] + dst_of_slot[i] * big
+        with ``big = int(in_ts.max()) + 1``. Because CSC slots are grouped
+        ascending by dst and ts-ascending within each segment, and every
+        in_ts < big, ``composite`` is GLOBALLY non-decreasing — so a single
+        np.searchsorted over all seeds reproduces the per-seed eligible count
+        exactly. For an empty graph, ``big = 1`` and ``composite`` is empty.
+
         Cache is keyed by id(g) but stores (g, csc) and verifies `stored_g is
         g` on hit — a bare id(g)-keyed cache can otherwise return stale
         arrays if a graph object is garbage-collected and a new object
         reuses the same id() (CPython does reuse ids of freed objects).
+        composite/big are graph-static, so they live in the same cached tuple
+        and are built once per graph object.
         """
         key = id(g)
         cached = self._csc_cache.get(key)
@@ -336,7 +356,38 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
             else in_leid.copy()
         )
 
-        csc = (indptr, in_src, in_ts, in_leid, geid)
+        # Composite key for segmented searchsorted (spec 22 / spec 20 §2.3).
+        # CSC slots are grouped ascending-dst, ts-ascending within each segment, so
+        #   composite[i] = in_ts[i] + dst_of_slot[i] * big
+        # is GLOBALLY non-decreasing (across segments dst*big dominates because
+        # every in_ts < big; within a segment in_ts is already non-decreasing). This
+        # lets one np.searchsorted over ALL seeds reproduce the per-seed eligible
+        # count exactly (spec 22 §2.3).
+        if in_ts.size:
+            # Precondition asserts (CODING STANDARDS 7) — load-bearing, not
+            # decorative; without them the identity can silently break (spec 20 §2.8).
+            assert int(in_ts.min()) >= 0, (
+                "in_ts has negative timestamps; composite key would let a low-dst "
+                "segment's slot collide into the previous segment's key range."
+            )
+            big = int(in_ts.max()) + 1  # tight, not arbitrary (spec 20 §2.3)
+            assert (n - 1) * big + int(in_ts.max()) < 2**63, (
+                "composite key overflow: (num_nodes-1)*big + max_ts must stay in "
+                "int64 — fail loudly rather than silently wrap on a larger graph."
+            )
+            dst_of_slot = dst[order].astype(np.int64)          # dst aligned to CSC slots
+            composite = in_ts + dst_of_slot * big
+            # Belt-and-braces: the searchsorted precondition itself.
+            if composite.size > 1:
+                assert bool(np.all(np.diff(composite) >= 0)), (
+                    "composite key not globally non-decreasing; segmented "
+                    "searchsorted identity would be invalid."
+                )
+        else:
+            big = 1
+            composite = np.empty(0, dtype=np.int64)
+
+        csc = (indptr, in_src, in_ts, in_leid, geid, composite, big)
         self._csc_cache[key] = (g, csc)
         return csc
 
@@ -344,7 +395,8 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         self, g: dgl.DGLGraph, node: int, cutoff: int
     ) -> np.ndarray:
         """Local EIDs of node's in-edges with ts <= cutoff, in timestamp order."""
-        indptr, _, in_ts, in_leid, _ = self._get_csc(g)
+        csc = self._get_csc(g)
+        indptr, in_ts, in_leid = csc[0], csc[2], csc[3]
         lo, hi = int(indptr[node]), int(indptr[node + 1])
         p = int(np.searchsorted(in_ts[lo:hi], cutoff, side="right"))
         return in_leid[lo:lo + p]
@@ -370,36 +422,86 @@ class TemporalNeighborSampler(dgl.dataloading.BlockSampler):
         (g-local edge position — required by sample_blocks' EID-restoration
         line) and edata['_geid'] (global EID — carried for round-trip
         convenience, recoverable as g.edata[dgl.EID][block.edata[dgl.EID]]).
+
+        The per-seed Python loop is now vectorized (spec 22): a single
+        segmented composite-key np.searchsorted computes every seed's eligible
+        count p; take-all seeds (p <= fanout) are built with one repeat/cumsum
+        multi-range idiom; only the p>fanout hub seeds keep a Python
+        floyd_sample loop, iterated in seeds-array order so output is
+        bit-identical (same edges, same draws) to the pre-vectorization
+        per-seed loop.
         """
-        indptr, in_src, in_ts, in_leid, geid = self._get_csc(g)
+        indptr, in_src, in_ts, in_leid, geid, composite, big = self._get_csc(g)
         seeds = curr_seeds.numpy().astype(np.int64)
-        cut = cutoffs.numpy()
+        cut = cutoffs.numpy().astype(np.int64)
 
-        src_parts, dst_parts, pos_parts = [], [], []
-        for v in seeds:
-            lo, hi = int(indptr[v]), int(indptr[v + 1])
-            if hi == lo:
-                continue
-            c = int(cut[v])
-            p = int(np.searchsorted(in_ts[lo:hi], c, side="right"))
-            if p == 0:
-                continue
-            if p <= fanout:
-                chosen = np.arange(lo, lo + p, dtype=np.int64)
-            else:
-                chosen = lo + floyd_sample(rng, p, fanout)
-            pos_parts.append(chosen)
-            src_parts.append(in_src[chosen])
-            dst_parts.append(np.full(len(chosen), v, dtype=np.int64))
+        # Cutoff-domain precondition (spec 22 §2.4) — the composite identity
+        # requires every cutoff c < big (equivalently c <= in_ts.max()); a
+        # cutoff above in_ts.max() could over-count into higher-dst segments,
+        # a temporal-leakage-critical failure. Guarded for the empty-seed /
+        # empty-graph case. Boundary c == in_ts.max() passes (big = max+1).
+        if seeds.size and in_ts.size:
+            assert int(cut[seeds].max()) < big, (
+                "a cutoff exceeds max timestamp; the composite key would over-count "
+                "into higher-dst segments (temporal-leakage-critical — fail loud)."
+            )
 
-        if pos_parts:
-            pos = np.concatenate(pos_parts)
-            fsrc = np.concatenate(src_parts)
-            fdst = np.concatenate(dst_parts)
+        # p[i] = eligible in-edge count of seed[i] via one segmented searchsorted
+        # over the cached composite key (spec 22 §2.3). p = pos_global - lo.
+        if seeds.size and in_ts.size:
+            lo = indptr[seeds]                               # (S,)
+            keys = cut[seeds] + seeds * big                  # int64 (§2.4 bounds it)
+            pos_global = np.searchsorted(composite, keys, side="right")
+            p = pos_global - lo                              # (S,) >= 0
         else:
-            pos = np.empty(0, dtype=np.int64)
-            fsrc = np.empty(0, dtype=np.int64)
-            fdst = np.empty(0, dtype=np.int64)
+            lo = indptr[seeds] if seeds.size else np.empty(0, dtype=np.int64)
+            p = np.zeros(seeds.shape[0], dtype=np.int64)
+
+        nz = p > 0
+        sub_mask = nz & (p > fanout)
+
+        # Take-all branch (0 < p <= fanout): vectorized repeat/cumsum multi-range
+        # idiom (spec 22 §3). Each seed's block is [lo, lo+1, ..., lo+p-1],
+        # identical to the per-seed np.arange(lo, lo+p). No RNG consumed.
+        take_mask = nz & (p <= fanout)
+        lo_take = lo[take_mask]
+        p_take = p[take_mask]
+        seeds_take = seeds[take_mask]
+        total_take = int(p_take.sum())
+        if total_take:
+            ends = np.cumsum(p_take)
+            starts = ends - p_take
+            ramp = np.arange(total_take) - np.repeat(starts, p_take)
+            pos_take = np.repeat(lo_take, p_take) + ramp
+            dst_take = np.repeat(seeds_take, p_take)
+        else:
+            pos_take = np.empty(0, dtype=np.int64)
+            dst_take = np.empty(0, dtype=np.int64)
+
+        # Subsample branch (p > fanout): a Python loop over ONLY the hub seeds,
+        # in ascending seeds-array order, issuing floyd_sample(rng, p, fanout)
+        # in the exact same relative order as the pre-vectorization per-seed
+        # loop — bit-identical RNG provenance (spec 22 §4).
+        sub_idx = np.nonzero(sub_mask)[0]        # ascending == seeds-array order
+        pos_sub_parts, dst_sub_parts = [], []
+        for i in sub_idx:
+            v = int(seeds[i]); lv = int(lo[i]); pv = int(p[i])
+            chosen = lv + floyd_sample(rng, pv, fanout)      # SAME call, SAME order
+            pos_sub_parts.append(chosen)
+            dst_sub_parts.append(np.full(fanout, v, dtype=np.int64))
+        if pos_sub_parts:
+            pos_sub = np.concatenate(pos_sub_parts)
+            dst_sub = np.concatenate(dst_sub_parts)
+        else:
+            pos_sub = np.empty(0, dtype=np.int64)
+            dst_sub = np.empty(0, dtype=np.int64)
+
+        # Frontier assembly from one combined pos array (spec 22 §5) — all of
+        # timestamp/_leid/_geid/fsrc indexed by the same pos, preserving the
+        # block-EID contract by construction.
+        pos = np.concatenate([pos_take, pos_sub])
+        fdst = np.concatenate([dst_take, dst_sub])
+        fsrc = in_src[pos]
 
         frontier = dgl.graph(
             (torch.from_numpy(fsrc), torch.from_numpy(fdst)),
