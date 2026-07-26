@@ -21,8 +21,10 @@ Local vs global EID note:
 import json
 import logging
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
+from typing import Callable, Iterator
 
 import numpy as np
 import torch
@@ -38,6 +40,101 @@ from src.model.sage_model import EdgeAwareGraphSAGE, build_src_dst_pos
 from src.model.temporal_sampler import TemporalNeighborSampler
 
 logger = logging.getLogger(__name__)
+
+# Fixed set of per-batch timing buckets. Using an explicit keyset (rather than
+# arbitrary attribute names) means a typo'd bucket name raises KeyError loudly
+# instead of silently accumulating into a dead attribute.
+_TIMING_BUCKETS = ("sampling", "node_state", "gpu_step")
+
+
+class _BatchTimer:
+    """Opt-in per-batch wall-clock timer for the training/eval loop.
+
+    Instrumentation required by ``specs/20_vectorized_optimization.md`` §5 to
+    quantify how much each vectorization optimization recovers, split into
+    three per-batch buckets (sampling, node_state, gpu_step) plus an ``other``
+    remainder.  §5 frames this as a one-time BEFORE/AFTER measurement tool, not
+    an always-on cost — so it is gated behind an ``enabled`` flag.
+
+    When ``enabled`` is ``False`` every method is a near-zero-cost no-op: no
+    ``perf_counter`` calls, no ``cuda.synchronize`` calls, and no summary log
+    line.  This matters because timing the GPU step requires bracketing it with
+    two ``cuda.synchronize()`` calls, each of which blocks the CPU on every
+    batch — a real per-batch latency tax that routine (non-profiling) runs must
+    not pay.  Skipping the syncs cannot change any computed value: sync only
+    blocks the host thread, and ``loss.item()`` forces the needed sync anyway.
+
+    When ``enabled`` is ``True`` it reproduces the exact §5 behavior: all three
+    timers, both GPU-step syncs, and the per-epoch summary line.
+    """
+
+    def __init__(self, enabled: bool, cuda_sync: Callable[[], None]) -> None:
+        """
+        Args:
+            enabled:   if False, all timing/sync/logging is skipped entirely.
+            cuda_sync: callable that synchronizes CUDA (no-op on CPU); invoked
+                       only around the GPU step and only when ``enabled``.
+        """
+        self.enabled = enabled
+        self._cuda_sync = cuda_sync
+        self.buckets: dict[str, float] = {name: 0.0 for name in _TIMING_BUCKETS}
+        self.total_batch: float = 0.0
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Time a full batch (accumulates into ``total_batch``)."""
+        if not self.enabled:
+            yield
+            return
+        t0 = perf_counter()
+        try:
+            yield
+        finally:
+            self.total_batch += perf_counter() - t0
+
+    @contextmanager
+    def section(self, name: str) -> Iterator[None]:
+        """Time a CPU section, accumulating into bucket ``name``."""
+        if not self.enabled:
+            yield
+            return
+        t0 = perf_counter()
+        try:
+            yield
+        finally:
+            self.buckets[name] += perf_counter() - t0
+
+    @contextmanager
+    def gpu_section(self) -> Iterator[None]:
+        """Time the GPU step, bracketed by CUDA syncs (accumulates ``gpu_step``)."""
+        if not self.enabled:
+            yield
+            return
+        self._cuda_sync()
+        t0 = perf_counter()
+        try:
+            yield
+        finally:
+            self._cuda_sync()
+            self.buckets["gpu_step"] += perf_counter() - t0
+
+    def log_summary(self, label: str, n_batches: int) -> None:
+        """Emit the per-epoch timing summary (no-op when disabled)."""
+        if not self.enabled:
+            return
+        bucketed = sum(self.buckets.values())
+        other = self.total_batch - bucketed
+        logger.info(
+            "  %s timing: sampling=%.1fs  node_state=%.1fs  "
+            "gpu_step=%.1fs  other=%.1fs  (total=%.1fs, %d batches)",
+            label,
+            self.buckets["sampling"],
+            self.buckets["node_state"],
+            self.buckets["gpu_step"],
+            other,
+            self.total_batch,
+            n_batches,
+        )
 
 
 class Trainer:
@@ -79,6 +176,14 @@ class Trainer:
         self.max_epochs  = m["max_epochs"]
         self.patience    = m["patience"]
         self.fanouts     = m["fanouts"]
+
+        # Opt-in per-batch timing instrumentation (spec 20 §5). This is a
+        # debug/profiling switch with a safe default-off, NOT a tunable
+        # hyperparameter — the same justification spec 19 gave for
+        # TemporalNeighborSampler's `deterministic` flag. Default-off so
+        # absent-key configs need no edit and routine runs pay zero
+        # cuda.synchronize() latency; flip to True in config to profile.
+        self.profile_timing = bool(m.get("profile_timing", False))
 
         self.optimizer = torch.optim.Adam(
             model.parameters(),
@@ -259,10 +364,7 @@ class Trainer:
         total_loss = 0.0
         n_batches  = 0
 
-        sampling_seconds:   float = 0.0
-        node_state_seconds: float = 0.0
-        gpu_step_seconds:   float = 0.0
-        total_batch_seconds: float = 0.0
+        timer = _BatchTimer(self.profile_timing, self._cuda_sync)
 
         loader = DataLoader(
             TensorDataset(torch.from_numpy(local_eids)),
@@ -274,68 +376,55 @@ class Trainer:
         ctx = torch.enable_grad() if is_train else torch.no_grad()
         with ctx:
             for (batch_local_t,) in loader:
-                t_batch = perf_counter()
-                batch_local = batch_local_t.long()
+                with timer.batch():
+                    batch_local = batch_local_t.long()
 
-                t0 = perf_counter()
-                input_nodes, seed_local, blocks = self.sampler.sample_blocks(
-                    g, batch_local
-                )
-                sampling_seconds += perf_counter() - t0
+                    with timer.section("sampling"):
+                        input_nodes, seed_local, blocks = self.sampler.sample_blocks(
+                            g, batch_local
+                        )
 
-                blocks = [b.to(self.device) for b in blocks]
+                    blocks = [b.to(self.device) for b in blocks]
 
-                # Node features from NodeStateManager (global node IDs)
-                batch_ts = float(g.edata["timestamp"][batch_local].max().item())
-                t0 = perf_counter()
-                batch_states = self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
-                node_state_seconds += perf_counter() - t0
-                node_feats = torch.from_numpy(batch_states).float().to(self.device)
+                    # Node features from NodeStateManager (global node IDs)
+                    batch_ts = float(g.edata["timestamp"][batch_local].max().item())
+                    with timer.section("node_state"):
+                        batch_states = self.nsm.get_batch_states(
+                            input_nodes.numpy(), batch_ts
+                        )
+                    node_feats = torch.from_numpy(batch_states).float().to(self.device)
 
-                # Edge features via GLOBAL EIDs (seed_local == seed_global for train)
-                global_eids = g.edata[dgl.EID][seed_local].numpy()
-                edge_feats = torch.from_numpy(
-                    fs.get_batch(global_eids)
-                ).float().to(self.device)
+                    # Edge features via GLOBAL EIDs (seed_local == seed_global for train)
+                    global_eids = g.edata[dgl.EID][seed_local].numpy()
+                    edge_feats = torch.from_numpy(
+                        fs.get_batch(global_eids)
+                    ).float().to(self.device)
 
-                # Positions in last-block output for edge classification
-                seed_nodes = blocks[-1].dstdata[dgl.NID]
-                src_pos, dst_pos = build_src_dst_pos(g, seed_local, seed_nodes)
-                src_pos = src_pos.to(self.device)
-                dst_pos = dst_pos.to(self.device)
+                    # Positions in last-block output for edge classification
+                    seed_nodes = blocks[-1].dstdata[dgl.NID]
+                    src_pos, dst_pos = build_src_dst_pos(g, seed_local, seed_nodes)
+                    src_pos = src_pos.to(self.device)
+                    dst_pos = dst_pos.to(self.device)
 
-                labels = torch.from_numpy(
-                    fs.get_labels_batch(global_eids)
-                ).long().to(self.device)
+                    labels = torch.from_numpy(
+                        fs.get_labels_batch(global_eids)
+                    ).long().to(self.device)
 
-                self._cuda_sync()
-                t0 = perf_counter()
+                    with timer.gpu_section():
+                        logits = self.model(
+                            blocks, node_feats, edge_feats, src_pos, dst_pos
+                        )
+                        loss = criterion(logits, labels)
 
-                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
-                loss = criterion(logits, labels)
+                        if is_train:
+                            self.optimizer.zero_grad()
+                            loss.backward()
+                            self.optimizer.step()
 
-                if is_train:
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
+                    total_loss += float(loss.item())
+                    n_batches  += 1
 
-                self._cuda_sync()
-                gpu_step_seconds += perf_counter() - t0
-
-                total_loss += float(loss.item())
-                n_batches  += 1
-                total_batch_seconds += perf_counter() - t_batch
-
-        other_seconds = total_batch_seconds - (
-            sampling_seconds + node_state_seconds + gpu_step_seconds
-        )
-        logger.info(
-            "  %s timing: sampling=%.1fs  node_state=%.1fs  "
-            "gpu_step=%.1fs  other=%.1fs  (total=%.1fs, %d batches)",
-            "train" if is_train else "eval",
-            sampling_seconds, node_state_seconds, gpu_step_seconds,
-            other_seconds, total_batch_seconds, n_batches,
-        )
+        timer.log_summary("train" if is_train else "eval", n_batches)
 
         return total_loss / max(n_batches, 1)
 
@@ -350,10 +439,7 @@ class Trainer:
         all_preds:  list[int] = []
         all_labels: list[int] = []
 
-        sampling_seconds:   float = 0.0
-        node_state_seconds: float = 0.0
-        gpu_step_seconds:   float = 0.0
-        total_batch_seconds: float = 0.0
+        timer = _BatchTimer(self.profile_timing, self._cuda_sync)
 
         # Use LOCAL edge IDs for the val graph (0..n_val-1)
         local_val_eids = np.arange(self.g_val.num_edges(), dtype=np.int64)
@@ -367,65 +453,53 @@ class Trainer:
 
         with torch.no_grad():
             for (batch_local_t,) in loader:
-                t_batch = perf_counter()
-                batch_local = batch_local_t.long()
+                with timer.batch():
+                    batch_local = batch_local_t.long()
 
-                t0 = perf_counter()
-                input_nodes, seed_local, blocks = self.sampler.sample_blocks(
-                    self.g_val, batch_local
-                )
-                sampling_seconds += perf_counter() - t0
+                    with timer.section("sampling"):
+                        input_nodes, seed_local, blocks = self.sampler.sample_blocks(
+                            self.g_val, batch_local
+                        )
 
-                blocks = [b.to(self.device) for b in blocks]
+                    blocks = [b.to(self.device) for b in blocks]
 
-                batch_ts = float(
-                    self.g_val.edata["timestamp"][batch_local].max().item()
-                )
-                t0 = perf_counter()
-                batch_states = self.nsm.get_batch_states(input_nodes.numpy(), batch_ts)
-                node_state_seconds += perf_counter() - t0
-                node_feats = torch.from_numpy(batch_states).float().to(self.device)
+                    batch_ts = float(
+                        self.g_val.edata["timestamp"][batch_local].max().item()
+                    )
+                    with timer.section("node_state"):
+                        batch_states = self.nsm.get_batch_states(
+                            input_nodes.numpy(), batch_ts
+                        )
+                    node_feats = torch.from_numpy(batch_states).float().to(self.device)
 
-                global_eids = self.g_val.edata[dgl.EID][seed_local].numpy()
-                edge_feats = torch.from_numpy(
-                    self.fs_val.get_batch(global_eids)
-                ).float().to(self.device)
+                    global_eids = self.g_val.edata[dgl.EID][seed_local].numpy()
+                    edge_feats = torch.from_numpy(
+                        self.fs_val.get_batch(global_eids)
+                    ).float().to(self.device)
 
-                seed_nodes = blocks[-1].dstdata[dgl.NID]
-                src_pos, dst_pos = build_src_dst_pos(
-                    self.g_val, seed_local, seed_nodes
-                )
-                src_pos = src_pos.to(self.device)
-                dst_pos = dst_pos.to(self.device)
+                    seed_nodes = blocks[-1].dstdata[dgl.NID]
+                    src_pos, dst_pos = build_src_dst_pos(
+                        self.g_val, seed_local, seed_nodes
+                    )
+                    src_pos = src_pos.to(self.device)
+                    dst_pos = dst_pos.to(self.device)
 
-                labels_np = self.fs_val.get_labels_batch(global_eids)
-                labels = torch.from_numpy(labels_np).long().to(self.device)
+                    labels_np = self.fs_val.get_labels_batch(global_eids)
+                    labels = torch.from_numpy(labels_np).long().to(self.device)
 
-                self._cuda_sync()
-                t0 = perf_counter()
+                    with timer.gpu_section():
+                        logits = self.model(
+                            blocks, node_feats, edge_feats, src_pos, dst_pos
+                        )
+                        loss = criterion(logits, labels)
 
-                logits = self.model(blocks, node_feats, edge_feats, src_pos, dst_pos)
-                loss = criterion(logits, labels)
+                    total_loss += float(loss.item())
+                    n_batches  += 1
 
-                self._cuda_sync()
-                gpu_step_seconds += perf_counter() - t0
+                    all_preds.extend(logits.argmax(dim=1).cpu().numpy().tolist())
+                    all_labels.extend(labels_np.tolist())
 
-                total_loss += float(loss.item())
-                n_batches  += 1
-
-                all_preds.extend(logits.argmax(dim=1).cpu().numpy().tolist())
-                all_labels.extend(labels_np.tolist())
-                total_batch_seconds += perf_counter() - t_batch
-
-        other_seconds = total_batch_seconds - (
-            sampling_seconds + node_state_seconds + gpu_step_seconds
-        )
-        logger.info(
-            "  val timing: sampling=%.1fs  node_state=%.1fs  "
-            "gpu_step=%.1fs  other=%.1fs  (total=%.1fs, %d batches)",
-            sampling_seconds, node_state_seconds, gpu_step_seconds,
-            other_seconds, total_batch_seconds, n_batches,
-        )
+        timer.log_summary("val", n_batches)
 
         val_loss   = total_loss / max(n_batches, 1)
         y_true     = np.array(all_labels)

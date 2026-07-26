@@ -85,7 +85,7 @@ from typing import Optional
 import numpy as np
 from scipy.stats import entropy as scipy_entropy
 
-from src.data.preprocessor import port_to_bin_indices
+from src.data.preprocessor import N_DST_PORT_BINS, port_to_bin_indices
 from src.utils.memory import _maxrss_mb
 
 logger = logging.getLogger(__name__)
@@ -547,6 +547,37 @@ class NodeStateManager:
             == len(flat_bytes) == len(flat_port) == len(flat_peer)
         ), "flat CSR index length mismatch"
 
+        # --- Composite key for the window-bounds global searchsorted (Finding 3,
+        #     spec 23 §3; mirrors temporal_sampler Optimization B / spec 22 §2.2). ---
+        if flat_ts.size:
+            # Precondition asserts (CODING STANDARDS 7) — load-bearing, fail loud.
+            assert int(flat_ts.min()) >= 0, (
+                "flat_ts has negative timestamps; the composite window-bounds key "
+                "would let a low-node segment's slot collide into another node's "
+                "key range (FLOW_START_MILLISECONDS is epoch-ms, always >= 0)."
+            )
+            max_ts = int(flat_ts.max())
+            big = max_ts + 1                       # tight, not arbitrary
+            # Overflow bound: the LEFT key reaches lo_c + (num_nodes-1)*big with the
+            # upper lo-clamp lo_c == big (§3.2), i.e. num_nodes*big. Guard THAT max
+            # key (NOT Opt-B's (n-1)*big+max_ts form, which is one below it and would
+            # permit num_nodes*big == 2**63 → silent int64 wrap).
+            assert num_nodes * big < 2**63, (
+                "composite window-bounds key overflow: num_nodes*big must stay in "
+                "int64 — fail loudly rather than silently wrap on a larger graph."
+            )
+            node_of_slot = np.repeat(np.arange(num_nodes, dtype=np.int64), seg_len)
+            composite = flat_ts.astype(np.int64) + node_of_slot * big
+            # Belt-and-braces: the searchsorted precondition itself.
+            if composite.size > 1:
+                assert bool(np.all(np.diff(composite) >= 0)), (
+                    "composite window-bounds key not globally non-decreasing; the "
+                    "segmented searchsorted identity would be invalid."
+                )
+        else:
+            big = 1
+            composite = np.empty(0, dtype=np.int64)
+
         # --- Dense per-node arrays ---
         is_internal_arr = np.zeros(num_nodes, dtype=np.float32)
         if self._is_internal is not None:
@@ -571,6 +602,8 @@ class NodeStateManager:
             "first_seen_arr": first_seen_arr,
             "is_internal_arr": is_internal_arr,
             "baseline_arr":   baseline_arr,
+            "composite":      composite,
+            "big":            big,
         }
 
     def _batch_states_vectorized(
@@ -598,6 +631,8 @@ class NodeStateManager:
         first_seen_arr  = fi["first_seen_arr"]
         is_internal_arr = fi["is_internal_arr"]
         baseline_arr    = fi["baseline_arr"]
+        composite       = fi["composite"]
+        big             = fi["big"]
 
         N = int(node_ids.shape[0])
         state = np.zeros((N, 15), dtype=np.float32)
@@ -635,19 +670,26 @@ class NodeStateManager:
         hour_int = int(hour_frac)
 
         # --- Window bounds (shared int-truncated scalar, per window_bounds) ---
-        lo = int(t - self._W_ms)
-        hi = int(t)
-        win_lo  = np.empty(N, dtype=np.int64)
-        win_len = np.empty(N, dtype=np.int64)
-        for i in range(N):
-            v = int(safe_ids[i])
-            seg_lo = int(node_indptr[v]); seg_hi = int(node_indptr[v + 1])
-            seg_ts = flat_ts[seg_lo:seg_hi]
-            left  = int(np.searchsorted(seg_ts, lo, side="left"))
-            right = int(np.searchsorted(seg_ts, hi, side="right"))
-            win_lo[i]  = seg_lo + left
-            win_len[i] = right - left
-        win_len[~valid] = 0   # invalid ids → empty window
+        lo = int(t - self._W_ms)        # int-truncated, matches _NodeHistory.window_bounds
+        hi = int(t)                     # int-truncated, matches _NodeHistory.window_bounds
+        if flat_ts.size:
+            # Clamp query bounds into the composite-key's valid domain. flat_ts >= 0
+            # (asserted at build), so these clamps preserve the per-segment counts
+            # EXACTLY (see §3.3 correctness):
+            #   lo -> [0, big]      (UPPER clamp is `big`, NOT big-1 — see the trap
+            #                        note in §3.3: big-1 OVERcounts when lo > max_ts
+            #                        and a segment holds ts == max_ts, wrongly
+            #                        including that slot in the window).
+            #   hi -> [-1, big-1]
+            lo_c = min(max(lo, 0), big)
+            hi_c = min(max(hi, -1), big - 1)
+            win_lo = np.searchsorted(composite, lo_c + safe_ids * big, side="left")
+            win_hi = np.searchsorted(composite, hi_c + safe_ids * big, side="right")
+            win_len = win_hi - win_lo
+        else:
+            win_lo  = np.zeros(N, dtype=np.int64)
+            win_len = np.zeros(N, dtype=np.int64)
+        win_len[~valid] = 0             # invalid ids -> empty window (unchanged intent)
 
         # Dim 2 — recency (bit-exact): last element of each non-empty window.
         nz = win_len > 0
@@ -699,7 +741,6 @@ class NodeStateManager:
                 ).astype(np.float32)
 
             # Dims 7, 8 — unique dst-port count & dst-port entropy (out-edges).
-            N_DST_PORT_BINS = 16
             port_hist = np.zeros((N, N_DST_PORT_BINS), dtype=np.int64)
             if out_m.any():
                 key = (
@@ -903,7 +944,7 @@ class NodeStateManager:
         state = np.zeros(self.NODE_STATE_DIM, dtype=np.float32)
 
         # [0] is_internal — static, does not change with time
-        if self._is_internal is not None and node_id < len(self._is_internal):
+        if self._is_internal is not None and 0 <= node_id < len(self._is_internal):
             state[0] = self._is_internal[node_id]
 
         hist = self._histories.get(node_id)
