@@ -3,18 +3,21 @@ arg8_temporal_faithfulness.py — Argument 8: "Temporal Faithfulness Loop"
 =========================================================================
 What it shows:
   Claim: SHAP-GSD enforces strict causal temporal ordering — every neighbor
-  used in a SHAP coalition has timestamp ≤ target flow timestamp. This is
-  verified empirically: 0 violations in 405 neighbor assignments. Without the
-  causal filter, 99.2% of in-window edges would be from the future.
+  used in a SHAP coalition has timestamp ≤ target flow timestamp. Verified
+  empirically against this run's explanation JSONs; the actual violation
+  count and neighbor-assignment total are computed and reported in the
+  generated .txt file, not hardcoded here (this script is reused across
+  datasets).
 
 Panels:
   Left  (ax1) — Histogram of temporal offsets (target_ts − neighbor_ts) in
-                seconds for all 405 SHAP-GSD neighbor edges. All offsets ∈
-                (0, 60s] — zero violations. Annotated with violation count.
+                seconds for all SHAP-GSD neighbor edges used in this run.
+                All offsets should fall in (0, W_S] — zero violations.
+                Annotated with the actual violation count.
   Right (ax2) — Per-class log-scale grouped bars: causal neighbors used
-                (teal) vs future edges excluded by the causal filter (coral).
-                Demonstrates that without filtering, ≥99% of in-window edges
-                would be future (information leakage).
+                (teal) vs future edges excluded by the causal filter (coral),
+                illustrating the leakage rate that would result without
+                causal filtering (computed value, reported in the .txt).
 
 Files read:
   outputs/explanations/<class>/*.json  — neighbor_timestamps, edge_id
@@ -226,12 +229,11 @@ def main() -> None:
         "The temporal faithfulness property is a correctness requirement, not an",
         "optimisation: a SHAP explanation that uses future neighbors assigns attribution",
         "to information that was causally unavailable at prediction time, producing",
-        "explanations that cannot be replicated in deployment. UNSW-NB15's test split",
-        "has a high forward edge density (~2,300 edges in the next 60s per sampled flow)",
-        "but low backward density (~6–25 edges in the previous 60s), meaning that",
-        "without explicit causal filtering, ~99% of sampled temporal neighbors would",
-        f"be from the future. SHAP-GSD's TemporalNeighborSampler enforces timestamp ≤",
-        f"target_ts, verified here as {violations} violations over {total_causal} assignments.",
+        "explanations that cannot be replicated in deployment. On this dataset's test",
+        f"split, without explicit causal filtering, {leakage_rate:.1f}% of sampled temporal",
+        "neighbors would be from the future (computed above). SHAP-GSD's",
+        "TemporalNeighborSampler enforces timestamp <= target_ts, verified here as",
+        f"{violations} violations over {total_causal} assignments.",
         "Paper 1 (E-GraphSAGE-XAI) did not implement within-split causal ordering for",
         "the SHAP coalition background — this is one of the key methodology gaps",
         "addressed by SHAP-GSD.",
@@ -246,33 +248,24 @@ def main() -> None:
         f"vs mean future edges excluded by the causal filter (coral); without filtering,",
         f"{leakage_rate:.1f}% of in-window edges would leak future information into the explanation.",
         "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "Temporal neighbors are a minor component of SHAP-GSD (φ_T < 0.1% on UNSW-NB15).",
-        "The causal ordering constraint has negligible practical effect on the results.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "The practical effect on φ_T is small on UNSW-NB15 precisely BECAUSE the causal",
-        "filter leaves almost no valid temporal neighbors (median IAT = 5168s >> W=60s).",
-        "If the filter were absent and future edges included, φ_T would be artificially",
-        "inflated — the temporal component would appear meaningful on UNSW-NB15 even",
-        "though it is not. More critically, this is a correctness argument, not a",
-        "performance one: any SHAP explanation using future neighbors cannot be deployed",
-        "in a real IDS where future flows are unknown. The 99.2% leakage rate shows that",
-        "the dataset's temporal structure makes unconstrained sampling almost entirely",
-        "future-contaminated. SHAP-GSD's correctness guarantee is what enables the",
-        "W-sensitivity analysis (Arg9) to be interpreted as a genuine null result rather",
-        "than a methodological artefact. On IoT datasets with dense sub-second traffic,",
-        "where φ_T is expected to be large, the faithfulness guarantee becomes critical.",
+        "GENERATOR NOTE",
+        "---------------",
+        "This script is reused across datasets. The causal-ordering correctness",
+        "argument above is dataset-independent (any explanation using future neighbors",
+        "cannot be deployed in a real IDS, regardless of how large or small phi_T's",
+        "magnitude turns out to be). A reviewer-challenge/counter-argument section that",
+        "assumes a specific phi_T magnitude (e.g. 'phi_T is negligible so this doesn't",
+        "matter') should only be added by hand, checked against the actual computed",
+        "phi_T value for this specific dataset run (see attribution_decomp.py's output).",
         "",
         "PAPER SECTION PLACEMENT",
         "-----------------------",
         "Methods §3.3 — Temporal Faithfulness Constraint. Provides empirical verification",
         "that SHAP-GSD's TemporalNeighborSampler enforces the causal ordering invariant",
         "with zero violations, and quantifies the magnitude of leakage that would result",
-        "from omitting this constraint (99.2% of in-window edges are future-dated).",
-        "Directly addresses Paper 1's temporal leakage limitation.",
+        f"from omitting this constraint ({leakage_rate:.1f}% of in-window edges are",
+        "future-dated on this dataset). Directly addresses Paper 1's temporal leakage",
+        "limitation.",
     ]
 
     txt_path = OUT_DIR / f"{STEM}.txt"
