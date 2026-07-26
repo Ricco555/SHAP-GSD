@@ -318,6 +318,63 @@ def _canon(block):
     return sorted(zip(s.tolist(), d.tolist(), t.tolist()))
 
 
+def _reference_sample_frontier(sampler, g, curr_seeds, cutoffs, fanout, rng):
+    """Reference oracle: the pre-vectorization per-seed _sample_frontier loop,
+    copied verbatim from src/model/temporal_sampler.py:_sample_frontier
+    (pre spec-22 build). Kept here only as the differential-test oracle
+    (spec 22 §6.1), analogous to spec 19's _legacy_sample_blocks. Consumes
+    RNG only in the p>fanout branch, in seeds-array order — identical
+    provenance to the new vectorized path, so freshly-seeded generators from
+    the same seed line up exactly."""
+    # _get_csc now returns a 7-tuple; the pre-swap body used the first five.
+    csc = sampler._get_csc(g)
+    indptr, in_src, in_ts, in_leid, geid = csc[0], csc[1], csc[2], csc[3], csc[4]
+    seeds = curr_seeds.numpy().astype(np.int64)
+    cut = cutoffs.numpy()
+
+    src_parts, dst_parts, pos_parts = [], [], []
+    for v in seeds:
+        lo, hi = int(indptr[v]), int(indptr[v + 1])
+        if hi == lo:
+            continue
+        c = int(cut[v])
+        p = int(np.searchsorted(in_ts[lo:hi], c, side="right"))
+        if p == 0:
+            continue
+        if p <= fanout:
+            chosen = np.arange(lo, lo + p, dtype=np.int64)
+        else:
+            chosen = lo + floyd_sample(rng, p, fanout)
+        pos_parts.append(chosen)
+        src_parts.append(in_src[chosen])
+        dst_parts.append(np.full(len(chosen), v, dtype=np.int64))
+
+    if pos_parts:
+        pos = np.concatenate(pos_parts)
+        fsrc = np.concatenate(src_parts)
+        fdst = np.concatenate(dst_parts)
+    else:
+        pos = np.empty(0, dtype=np.int64)
+        fsrc = np.empty(0, dtype=np.int64)
+        fdst = np.empty(0, dtype=np.int64)
+
+    frontier = dgl.graph(
+        (torch.from_numpy(fsrc), torch.from_numpy(fdst)),
+        num_nodes=g.num_nodes(),
+    )
+    frontier.edata[sampler.timestamp_key] = torch.from_numpy(in_ts[pos])
+    frontier.edata["_leid"] = torch.from_numpy(in_leid[pos])
+    frontier.edata["_geid"] = torch.from_numpy(geid[pos])
+    return frontier
+
+
+def _sorted_dst_leid(frontier):
+    """Sorted (dst, _leid) pairs of a frontier — order-independent identity."""
+    _, fdst = frontier.edges()
+    leid = frontier.edata["_leid"].numpy()
+    return sorted(zip(fdst.numpy().tolist(), leid.tolist()))
+
+
 def _resolve_paths() -> tuple[Path, Path]:
     """Return (graph_dir, feature_store_root) from the active config.
 
@@ -726,3 +783,165 @@ def test_block_eid_value_contract_real_split(split: str):
             # the record must be an edge the sampler ACTUALLY drew
             assert r.local_eid in drawn
     assert n_rec >= 0  # some singleton seeds may have empty windows; no crash required
+
+
+# ---------------------------------------------------------------------------
+# Spec 22 §6.1-§6.4: new tests for the vectorized _sample_frontier.
+# ---------------------------------------------------------------------------
+
+# (graph_factory, factory_kwargs, fanout, seed, expect_subsample)
+_HEADLINE_CASES = [
+    (_make_synthetic_graph, {}, BIG, 0, False),                       # take-all, plain
+    (_make_synthetic_graph, {"seed": 2}, BIG, 1, False),             # take-all, plain
+    (_make_hub_graph, {"n_nodes": 40, "n_edges": 5_000}, BIG, 0, False),  # take-all, hub
+    (_make_hub_graph, {}, 5, 0, True),                               # subsample, hub
+    (_make_hub_graph, {}, 10, 1, True),                             # subsample, hub
+]
+
+
+@pytest.mark.parametrize(
+    "graph_factory, factory_kwargs, fanout, seed, expect_subsample", _HEADLINE_CASES
+)
+def test_batched_frontier_identical_to_reference_loop(
+    graph_factory, factory_kwargs, fanout, seed, expect_subsample
+):
+    """Headline differential test (spec 22 §6.1): the vectorized
+    _sample_frontier must produce a frontier bit-identical (exact sorted
+    (dst, _leid) pairs, identical edge count) to the pre-vectorization
+    per-seed reference oracle, over both take-all (fanout=BIG) and
+    subsample (small fanout on hubs) regimes, on both graph factories,
+    when driven by same-seed RNGs."""
+    g = graph_factory(**factory_kwargs)
+    sampler = TemporalNeighborSampler(fanouts=[fanout, fanout])
+
+    n_e = g.num_edges()
+    seed_eids = torch.arange(n_e - 64, n_e, dtype=torch.long)
+    ts = g.edata["timestamp"][seed_eids]
+    cutoffs = sampler._build_cutoffs(g, seed_eids, ts)
+    src_s, dst_s = g.find_edges(seed_eids)
+    seeds = torch.unique(torch.cat([src_s, dst_s]))
+
+    rng_new = np.random.default_rng(seed)
+    rng_ref = np.random.default_rng(seed)  # SAME seed → RNG streams line up
+    f_new = sampler._sample_frontier(g, seeds, cutoffs, fanout, rng_new)
+    f_ref = _reference_sample_frontier(sampler, g, seeds, cutoffs, fanout, rng_ref)
+
+    assert f_new.num_edges() == f_ref.num_edges()
+    assert _sorted_dst_leid(f_new) == _sorted_dst_leid(f_ref)  # EXACT equality
+
+    # Non-vacuity: verify the intended regime is actually exercised.
+    n_sub = 0
+    for v in seeds.numpy():
+        p = len(sampler.eligible_local_eids(g, int(v), int(cutoffs[v])))
+        if p > fanout:
+            n_sub += 1
+    if expect_subsample:
+        assert n_sub > 0, "subsample regime not reached — test would be vacuous"
+    else:
+        assert n_sub == 0, "unexpected subsampling in a take-all case"
+
+
+@pytest.mark.parametrize("graph_factory", [_make_synthetic_graph, _make_hub_graph])
+def test_batched_eligible_count_equivalence(graph_factory):
+    """Composite-key equivalence (spec 22 §6.2): the segmented searchsorted
+    over the cached composite key must reproduce the per-seed
+    searchsorted(in_ts[lo:hi], c) count exactly, for random (node, cutoff)
+    pairs drawn from the valid cutoff domain [0, in_ts.max()], including the
+    tight boundary c == in_ts.max()."""
+    g = graph_factory()
+    sampler = TemporalNeighborSampler(fanouts=[10, 10])
+    csc = sampler._get_csc(g)
+    indptr, in_ts, big, composite = csc[0], csc[2], csc[6], csc[5]
+
+    rng = np.random.default_rng(0)
+    ts_max = int(in_ts.max())
+    checked = 0
+    for _ in range(2000):
+        v = int(rng.integers(0, g.num_nodes()))
+        lo = int(indptr[v])
+        hi = int(indptr[v + 1])
+        c = int(rng.integers(0, ts_max + 1))  # valid domain [0, in_ts.max()] (§2.4)
+        p_ref = int(np.searchsorted(in_ts[lo:hi], c, side="right"))
+        p_bat = int(np.searchsorted(composite, c + v * big, side="right")) - lo
+        assert p_bat == p_ref, f"node {v} cutoff {c}: {p_bat} != {p_ref}"
+        checked += 1
+    assert checked > 0
+
+    # Boundary sub-case: c == in_ts.max() (the tightest valid cutoff, §2.4).
+    c = ts_max
+    for v in range(g.num_nodes()):
+        lo = int(indptr[v])
+        hi = int(indptr[v + 1])
+        p_ref = int(np.searchsorted(in_ts[lo:hi], c, side="right"))
+        p_bat = int(np.searchsorted(composite, c + v * big, side="right")) - lo
+        assert p_bat == p_ref, f"boundary node {v}: {p_bat} != {p_ref}"
+
+
+def test_empty_and_zero_prefix_seeds():
+    """Empty / zero-prefix seeds (spec 22 §6.3): nodes with no in-edges and
+    nodes whose in-edges are all after the cutoff must contribute zero
+    frontier edges, with no exception, exercising the empty-pos assembly."""
+    # Edge order is chronological (globally non-decreasing ts) as required.
+    src = torch.tensor([0, 0, 5, 5], dtype=torch.long)
+    dst = torch.tensor([1, 1, 2, 2], dtype=torch.long)
+    ts = torch.tensor([100, 200, 300, 400], dtype=torch.int64)
+    g = dgl.graph((src, dst), num_nodes=6)
+    g.edata["timestamp"] = ts
+    sampler = TemporalNeighborSampler(fanouts=[10])
+    rng = np.random.default_rng(0)
+
+    # (a) entirely empty-contribution seed set → zero-edge frontier.
+    #   node 2: in-edges at 300/400, cutoff 50 → zero prefix.
+    #   nodes 3, 4: no in-edges at all.
+    cutoffs = torch.full((6,), 50, dtype=torch.int64)
+    seeds = torch.tensor([2, 3, 4], dtype=torch.long)
+    f = sampler._sample_frontier(g, seeds, cutoffs, 10, rng)
+    assert f.num_edges() == 0
+
+    # (b) mixed: node 1 contributes its two eligible in-edges; node 3 (no
+    #   in-edges) contributes none.
+    cutoffs2 = torch.full((6,), 400, dtype=torch.int64)  # < big = 401
+    seeds2 = torch.tensor([1, 3], dtype=torch.long)
+    f2 = sampler._sample_frontier(g, seeds2, cutoffs2, 10, rng)
+    _, fdst2 = f2.edges()
+    fdst2 = fdst2.numpy()
+    assert int((fdst2 == 3).sum()) == 0
+    assert int((fdst2 == 1).sum()) == 2
+
+
+def test_composite_preconditions_assert():
+    """All three composite-key preconditions (spec 22 §6.4) must fire loudly:
+    negative timestamp, composite overflow (both in _get_csc), and the
+    cutoff-domain violation (in _sample_frontier — the one spec 20 missed)."""
+    # 1. Negative timestamp: non-decreasing in edge index (pre-existing assert
+    #    passes) but in_ts.min() < 0, so the new non-negative assert fires.
+    src = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    dst = torch.tensor([1, 2, 3, 0], dtype=torch.long)
+    ts = torch.tensor([-5, -3, 0, 2], dtype=torch.int64)  # non-decreasing, min < 0
+    g_neg = dgl.graph((src, dst), num_nodes=4)
+    g_neg.edata["timestamp"] = ts
+    sampler_neg = TemporalNeighborSampler(fanouts=[10])
+    with pytest.raises(AssertionError):
+        sampler_neg._get_csc(g_neg)
+
+    # 2. Composite overflow: n_nodes=3, max ts near 2**62 so
+    #    (n-1)*big + max_ts exceeds 2**63 (Python-int arithmetic detects it).
+    big_ts = 4_700_000_000_000_000_000
+    src_o = torch.tensor([0, 1, 2], dtype=torch.long)
+    dst_o = torch.tensor([1, 2, 0], dtype=torch.long)
+    ts_o = torch.tensor([1, 2, big_ts], dtype=torch.int64)  # non-decreasing, >= 0
+    g_ovf = dgl.graph((src_o, dst_o), num_nodes=3)
+    g_ovf.edata["timestamp"] = ts_o
+    sampler_ovf = TemporalNeighborSampler(fanouts=[10])
+    with pytest.raises(AssertionError):
+        sampler_ovf._get_csc(g_ovf)
+
+    # 3. Cutoff out of domain: valid graph, a cutoff above max timestamp.
+    g_ok = _make_synthetic_graph(n_nodes=30, n_edges=500, seed=0)
+    sampler_ok = TemporalNeighborSampler(fanouts=[10])
+    ts_max = int(g_ok.edata["timestamp"].max())
+    cutoffs = torch.full((g_ok.num_nodes(),), ts_max + 1000, dtype=torch.int64)
+    seeds = torch.tensor([0, 1, 2], dtype=torch.long)
+    rng = np.random.default_rng(0)
+    with pytest.raises(AssertionError):
+        sampler_ok._sample_frontier(g_ok, seeds, cutoffs, 10, rng)
