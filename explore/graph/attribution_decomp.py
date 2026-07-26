@@ -4,7 +4,12 @@ attribution_decomp.py — Figure 4(c)
 What it shows:
   Left panel:  Stacked horizontal bars — per-class fraction of total |φ| split into
                φ_F (feature groups), φ_T (temporal neighbors), φ_N (node novelty/structure).
-  Right panel: Violin of absolute φ_T per class — shows zero-heavy distribution.
+  Right panel: Violin of absolute φ_T per class.
+
+This script is reused across datasets, so the figure annotations and the
+.txt reasoning deliberately report computed values only; they do not
+assert an interpretation (e.g. "null result", "dataset property"), since
+the actual φ_T magnitude is expected to vary per dataset.
 
 Panels:
   fig, (ax1, ax2)  — 1 row × 2 columns, figsize=(13, 5.5)
@@ -107,9 +112,9 @@ def main() -> None:
     ax1.barh(y, frac_t, left=frac_f, color=_PHI_T, label=r"$\varphi_T$ (temporal)")
     ax1.barh(y, frac_n, left=frac_f + frac_t, color=_PHI_N, label=r"$\varphi_N$ (node/structure)")
 
-    # Per-class absolute-value annotations (φ_T omitted — near-zero across all classes)
+    # Per-class absolute-value annotations
     for i, (cls, ff, ft, fn, _) in enumerate(rows):
-        label = f"φ_F={ff:.2f}  φ_N={fn:.2f}"
+        label = f"φ_F={ff:.2f}  φ_T={ft:.3f}  φ_N={fn:.2f}"
         ax1.text(1.02, y[i], label, va="center", fontsize=9,
                  color=_GRAY, transform=ax1.get_yaxis_transform())
 
@@ -121,9 +126,10 @@ def main() -> None:
     ax1.legend(fontsize=LABEL_FS - 1, loc="lower right")
     ax1.set_title("Attribution decomposition by granularity", fontsize=LABEL_FS + 1)
 
-    # Textbox: temporal null result
+    # Textbox: computed mean φ_T fraction (no interpretation asserted)
+    overall_ft_pct = frac_t.mean() * 100
     ax1.text(0.02, 0.02,
-             r"$\varphi_T$ < 0.1% across all classes" + "\n(temporal null — dataset property,\nnot model failure)",
+             rf"mean $\varphi_T$ fraction across classes: {overall_ft_pct:.3f}%",
              transform=ax1.transAxes, fontsize=7.5, va="bottom",
              bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_GRAY, alpha=0.85))
 
@@ -153,8 +159,10 @@ def main() -> None:
     ax2.set_title(r"Per-class $\varphi_T$ distribution", fontsize=LABEL_FS + 1)
     ax2.legend(fontsize=LABEL_FS - 1, loc="lower right")
 
+    all_phi_t = np.concatenate(phi_t_per_class)
+    pct_zero = 100.0 * float((all_phi_t == 0).mean())
     ax2.text(0.97, 0.97,
-             r"Most flows: $\varphi_T = 0$" + "\n(no in-window neighbors\nat W = 60s)",
+             rf"{pct_zero:.1f}% of flows: $\varphi_T = 0$" + "\n(no in-window neighbors)",
              transform=ax2.transAxes, fontsize=7.5, ha="right", va="top",
              bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_GRAY, alpha=0.85))
 
@@ -176,39 +184,36 @@ def main() -> None:
 
     overall_ft = frac_t.mean()
     overall_fn = frac_n.mean()
+    pct_zero = 100.0 * float((np.concatenate(phi_t_per_class) == 0).mean())
     lines += [
         "",
-        f"phi_T genuine null result: mean across classes = {overall_ft*100:.4f}% < 0.1%.",
-        f"phi_N NOT near-zero: mean across classes = {overall_fn*100:.1f}% (range {frac_n.min()*100:.0f}–{frac_n.max()*100:.0f}%).",
+        f"phi_T: mean fraction across classes = {overall_ft*100:.4f}% (range {frac_t.min()*100:.3f}-{frac_t.max()*100:.3f}%).",
+        f"phi_N: mean fraction across classes = {overall_fn*100:.1f}% (range {frac_n.min()*100:.0f}-{frac_n.max()*100:.0f}%).",
+        f"phi_T == 0 for {pct_zero:.1f}% of all explained flows (no in-window temporal neighbors).",
         "phi_N measures GNN computation subgraph node contribution (masking computation",
-        "nodes from the coalition alters the predicted logit non-trivially on UNSW-NB15).",
+        "nodes from the coalition alters the predicted logit).",
         "",
         "WHAT THE FIGURE SHOWS",
         "----------------------",
         "Left panel: stacked horizontal bars show the per-class mean fraction of total |φ|",
         "attributed to the three SHAP-GSD granularities (feature groups φ_F, temporal",
         "neighbors φ_T, node state/structure φ_N). Right panel: violin plot of absolute",
-        "φ_T per flow per class; the zero-heavy distributions confirm the temporal null result.",
+        "φ_T per flow per class.",
         "",
-        "PAPER FRAMING",
-        "-------------",
-        "The temporal component φ_T is < 0.1% across all attack classes on UNSW-NB15 — a",
-        "dataset property rather than a model failure. The median inter-arrival time (5168s)",
-        "vastly exceeds the temporal window (W = 60s), so almost no flows have in-window",
-        "neighbors. In contrast, the node-structural component φ_N is 28–59% of total |φ|,",
-        "confirming that GNN computation-subgraph context is meaningful even on this dataset.",
-        "On IoT datasets (NF-ToN-IoT, NF-BoT-IoT) where flows burst at sub-second intervals,",
-        "φ_T is expected to dominate.",
+        "GENERATOR NOTE",
+        "---------------",
+        "The numbers above are computed directly from this run's explanation JSONs and are",
+        "reported without an asserted interpretation (e.g. whether phi_T's magnitude",
+        "constitutes a null result or a meaningful signal, or whether that is a property of",
+        "this dataset vs. an artifact) — this script is reused across datasets, and the",
+        "correct framing depends on the actual numbers for each specific run.",
         "",
         "SUGGESTED FIGURE CAPTION",
         "-------------------------",
         "Attribution decomposition across SHAP-GSD granularities for all attack classes.",
         "Left: mean fraction of total |φ| assigned to feature-group φ_F (teal), temporal",
         "φ_T (amber), and node-structural φ_N (coral) components per class. Annotations",
-        "show absolute mean values. Right: distribution of absolute φ_T per flow; zero-heavy",
-        "violin plots confirm that temporal neighbors are absent for almost all UNSW-NB15 flows",
-        "(median IAT = 5168 s >> W = 60 s). The node-structural component φ_N accounts for",
-        "28–59% of total |φ|, capturing GNN computation-subgraph context.",
+        "show absolute mean values. Right: distribution of absolute φ_T per flow.",
     ]
 
     txt_path = OUT_DIR / f"{STEM}.txt"

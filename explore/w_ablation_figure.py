@@ -1,12 +1,15 @@
 """
-W-ablation visualization — SHAP-GSD temporal null result.
+W-ablation visualization — temporal-window sensitivity.
 
 Two-panel figure:
   Left  — % flows with ≥1 in-window neighbor vs W (log-x)
   Right — mean and max top temporal SHAP vs W (log-x)
 
-Illustrates the temporal null result: even at W=3600s, only ~40% of flows
-have in-window neighbors and temporal SHAP values remain near-zero.
+Shows how in-window neighbor coverage and temporal SHAP magnitude scale
+with the temporal window W. This script is reused across datasets, so the
+generated .txt reasoning file deliberately reports computed values only —
+it does not assert an interpretation, since the shape of the result (null,
+partial, or dominant temporal signal) is expected to vary per dataset.
 
 Outputs:
   outputs/figures/explore/w_ablation.{pdf,png}
@@ -144,22 +147,7 @@ Mean top temporal Shapley value at W=60s:   {shap_means[0]:.6f}
 Mean top temporal Shapley value at W=3600s: {shap_means[-1]:.6f}
 Max  top temporal Shapley value at W=3600s: {shap_maxs[-1]:.6f}
 
-These values are near-zero relative to feature-group SHAP (typical
-top-feature φ ≈ 0.1–0.5). Expanding W does not rescue the temporal
-signal because the dataset's flow timing structure means predictive
-context comes from edges orders of magnitude outside any practical
-lookback window.
-
-PAPER INTERPRETATION
----------------------
-This is a correct null result, not an explainer failure. The temporal
-GNN sampler faithfully enforces the cutoff — there simply are no
-temporally-proximate neighbors on NF-UNSW-NB15-v3 at deployment timescales.
-
-This motivates Paper 3: IoT datasets (NF-ToN-IoT-v3, NF-BoT-IoT-v3) have
-denser temporal clustering and are expected to show non-trivial temporal
-SHAP values, providing the contrast case that validates the temporal
-granularity as a dataset-dependent rather than explainer-specific signal.
+For reference, typical top-feature-group φ magnitude is O(0.1-0.5).
 
 SUGGESTED PAPER PLACEMENT
 --------------------------
@@ -167,14 +155,17 @@ Place immediately after the temporal SHAP case-study panel (d).
 
 SUGGESTED FIGURE CAPTION
 -------------------------
-Temporal null result: NF-UNSW-NB15-v3 (median flow gap = {median_gap:.0f} s). Left:
+Temporal-window sensitivity on this dataset (median flow gap = {median_gap:.0f} s). Left:
 percentage of flows with at least one in-window neighbour and percentage of
 neighbour edges inside the window, for W ∈ {{60, 300, 1800, 3600}} s (log
 scale). Right: mean and maximum top temporal Shapley value (|φ_T|) for the
-same W range. The median inter-flow gap (dotted vertical line) exceeds all
-tested W values, leaving temporal context structurally absent at deployment
-timescales. φ_T values remain near-zero across all W, confirming the null
-result is a dataset property rather than an explainer artifact.
+same W range.
+
+GENERATOR NOTE: this script reports computed values only — it does not
+assert whether the observed coverage/magnitude constitutes a "null result,"
+a partial signal, or a dominant one, since that depends on the actual
+numbers above for this specific dataset and is expected to differ between
+datasets.
 """
 
 txt_path = OUT_DIR / "w_ablation.txt"

@@ -284,7 +284,7 @@ def _step2_temporal_shap(
             p_full = float(torch.softmax(logits, dim=1).cpu().numpy()[0, true_label])
 
         # Temporal SHAP with overridden W
-        temp_results = temp_shap.explain(
+        temp_results, _f_baseline_temp, _f_logit_temp = temp_shap.explain(
             target_local_eid=local_eid,
             true_class=true_label,
             model=model,

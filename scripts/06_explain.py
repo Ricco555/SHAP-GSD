@@ -190,6 +190,12 @@ def main() -> None:
         del g_train  # free memory
 
     # --- Load model and feature groups ---
+    # Derive num_classes from label_map.json (produced by 01_preprocess.py).
+    with open(artifacts_dir / "label_map.json") as f:
+        _label_map = json.load(f)
+    cfg["model"]["num_classes"] = len(_label_map)
+    logger.info(f"num_classes={cfg['model']['num_classes']} (from {artifacts_dir / 'label_map.json'})")
+
     logger.info("Loading model …")
     model = _load_model(cfg, device)
 
