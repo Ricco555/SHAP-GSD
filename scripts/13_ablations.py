@@ -175,7 +175,7 @@ def _run_ablation(
         aggregator   = m["aggregator"],
     ).to(device)
 
-    abl_dir = ROOT / "artifacts" / "ablations" / name
+    abl_dir = Path(cfg["output"]["artifacts_dir"]) / "ablations" / name
     abl_dir.mkdir(parents=True, exist_ok=True)
 
     trainer = Trainer(
@@ -347,10 +347,10 @@ def main() -> None:
         return
 
     # ── Comparison table ──────────────────────────────────────────────────────
-    locked_metrics_path = ROOT / "artifacts" / "evaluation" / "metrics.json"
+    locked_metrics_path = Path(cfg["output"]["artifacts_dir"]) / "evaluation" / "metrics.json"
     locked = json.loads(locked_metrics_path.read_text()) if locked_metrics_path.exists() else {}
 
-    abl_dir = ROOT / "artifacts" / "ablations"
+    abl_dir = Path(cfg["output"]["artifacts_dir"]) / "ablations"
     abl_dir.mkdir(parents=True, exist_ok=True)
 
     lines = [
