@@ -130,9 +130,21 @@ obvious from a glance at the figure:
    auto-written prose text needs a human rewrite.
 4. **Re-verify case-study selection** in `explore/case_studies.py` against the new
    per-flow neighbor counts if the paper cites specific example flows by class.
-5. Table 2 / macro-F1 / weighted-F1 / Fidelity+/−/Stability are **unaffected** —
-   confirmed these metrics never read `block.edata[dgl.EID]` or the temporal SHAP
-   output. No change needed there.
+5. Table 2 / macro-F1 / weighted-F1 / Fidelity+/−/Stability computation is
+   **unaffected by the EID bug** — confirmed these metrics never read
+   `block.edata[dgl.EID]` or the temporal SHAP output. **However** (found
+   2026-07-28, unrelated bug): `scripts/08_metrics.py`'s `compute_stability()`
+   had its own, separate bug (a tuple-unpacking mismatch against
+   `FeatureGroupSHAP.explain()`'s return signature) that has silently prevented
+   Phase 8 from completing since **2026-05-11** — before the `v2.1.0` paper tag.
+   The on-disk `outputs/metrics/{stability.csv,summary.json,table2.txt}` are
+   dated 2026-05-11 01:13-01:14, ~22h *before* the breaking commit landed that
+   same day, so the **currently-reported Table 2 numbers were computed by
+   working code and are not corrupted** — but Phase 8 needs a fresh run (now
+   fixed) to produce numbers consistent with everything else regenerated on
+   2026-07-26 (new explanations, EID fix, Optimization A/B), since it hasn't
+   successfully run since May. Re-run `scripts/08_metrics.py` before finalizing
+   Table 2 for submission.
 
 ---
 
