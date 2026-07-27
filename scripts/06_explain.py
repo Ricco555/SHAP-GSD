@@ -305,6 +305,7 @@ def main() -> None:
             "total_end_to_end": _stats(rt_total),
         }
         rt_path = Path(cfg["output"]["outputs_dir"]) / "metrics" / "runtime_by_layer.json"
+        rt_path.parent.mkdir(parents=True, exist_ok=True)
         with open(rt_path, "w") as f:
             json.dump(runtime_summary, f, indent=2)
         logger.info(f"Runtime-by-layer summary → {rt_path}")
