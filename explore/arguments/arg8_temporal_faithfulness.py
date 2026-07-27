@@ -56,7 +56,7 @@ W_S      = 60   # SHAP-GSD temporal window (seconds)
 
 
 def load_eid_to_ts() -> dict:
-    graph_path = ROOT / "graphs" / "test.bin"
+    graph_path = _P["graphs"] / "test.bin"
     import dgl
     gs, _ = dgl.load_graphs(str(graph_path))
     g = gs[0]

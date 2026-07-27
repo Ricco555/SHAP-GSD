@@ -187,15 +187,19 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/experiment_unsw.yaml")
     parser.add_argument(
         "--label-map",
-        default="artifacts/label_map.json",
+        default=None,
         help=(
             "Path to label_map.json (Attack string → int). "
             "If the file does not exist, the map is derived from the CSV "
             "Attack column and written to this path. "
-            "Default: artifacts/label_map.json"
+            "Default: <cfg.output.artifacts_dir>/label_map.json for the "
+            "given --config (respects run.dir per-dataset isolation)."
         ),
     )
     args = parser.parse_args()
     cfg = load_config(REPO_ROOT / args.config)
-    lmap = REPO_ROOT / args.label_map
+    if args.label_map is not None:
+        lmap = REPO_ROOT / args.label_map
+    else:
+        lmap = REPO_ROOT / cfg["output"]["artifacts_dir"] / "label_map.json"
     main(cfg, lmap)

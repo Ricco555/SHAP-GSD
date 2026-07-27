@@ -60,7 +60,7 @@ CLASS_COLORS = {
 
 def load_eid_to_hour() -> dict:
     """Return {edge_id: hour_utc} from DGL test graph timestamps."""
-    graph_path = ROOT / "graphs" / "test.bin"
+    graph_path = _P["graphs"] / "test.bin"
     if not graph_path.exists():
         return {}
     try:
