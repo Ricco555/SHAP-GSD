@@ -14,6 +14,10 @@ Usage:
                                 [--checkpoint artifacts/best_model.pt]
                                 [--label-map  artifacts/label_map.json]
 
+The class names used for per-class metrics come from ``label_map.json`` in the
+run's own artifacts directory unless ``--label-map`` overrides it, so per-class
+scores are never labelled with a hardcoded class list.
+
 Outputs (in artifacts/evaluation/):
   metrics.json
   confusion_matrix.png
@@ -33,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.feature_store import FeatureStore
-from src.model.evaluator import DEFAULT_CLASS_NAMES, Evaluator
+from src.model.evaluator import Evaluator
 from src.model.node_state import NodeStateManager
 from src.model.sage_model import EdgeAwareGraphSAGE
 from src.utils.config import load_config
@@ -44,6 +48,28 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def resolve_label_map_path(cfg: dict, explicit: Path | None = None) -> Path:
+    """Resolve the ``label_map.json`` to use for this evaluation run.
+
+    An explicitly supplied ``--label-map`` wins; otherwise the run's own
+    artifacts directory is used (``cfg["output"]["artifacts_dir"]``, which
+    ``load_config`` already re-roots under ``run.dir`` for orchestrated runs).
+    This mirrors how phases 03, 04, 11 and 13 locate the same file, so the
+    per-class names in ``evaluation/metrics.json`` always come from the
+    dataset's own dynamically derived class map — never from a hardcoded list.
+
+    Args:
+        cfg: loaded configuration dict.
+        explicit: value of ``--label-map`` if the caller passed one.
+
+    Returns:
+        Absolute path to the label map JSON (existence is not checked here).
+    """
+    if explicit is not None:
+        return explicit if explicit.is_absolute() else REPO_ROOT / explicit
+    return REPO_ROOT / cfg["output"]["artifacts_dir"] / "label_map.json"
 
 
 def main(
@@ -97,15 +123,11 @@ def main(
 
     # ── 6. Build model and load checkpoint ────────────────────────────────────
     # Derive num_classes from label_map.json (produced by 01_preprocess.py).
-    _lmap_for_model = (
-        label_map_path
-        if label_map_path is not None
-        else repo_root / cfg["output"]["artifacts_dir"] / "label_map.json"
-    )
-    with open(_lmap_for_model) as f:
+    label_map_path = resolve_label_map_path(cfg, label_map_path)
+    with open(label_map_path) as f:
         _label_map = json.load(f)
     cfg["model"]["num_classes"] = len(_label_map)
-    logger.info(f"num_classes={cfg['model']['num_classes']} (from {_lmap_for_model})")
+    logger.info(f"num_classes={cfg['model']['num_classes']} (from {label_map_path})")
 
     m = cfg["model"]
     model = EdgeAwareGraphSAGE(
@@ -157,7 +179,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default=None,
                         help="Path to model checkpoint (default: artifacts/best_model.pt)")
     parser.add_argument("--label-map",  default=None,
-                        help="Path to label_map.json  (default: use built-in class names)")
+                        help="Path to label_map.json "
+                             "(default: <artifacts_dir>/label_map.json for this run)")
     args = parser.parse_args()
 
     cfg  = load_config(REPO_ROOT / args.config)

@@ -156,8 +156,7 @@ class GraphBuilder:
             arr[idx] = float(_is_internal_ip(ip))
         n_internal = int(arr.sum())
         logger.info(
-            f"is_internal: {n_internal}/{n} nodes are RFC1918 "
-            f"(expected 0 for UNSW-NB15 dataset)"
+            f"is_internal: {n_internal}/{n} nodes are RFC1918"
         )
         return arr
 

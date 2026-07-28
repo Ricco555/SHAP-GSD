@@ -68,6 +68,40 @@ DEFAULT_CLASS_NAMES: list[str] = [
 ]
 
 
+def resolve_class_names(
+    class_names: list[str] | None,
+    label_map_path: Path | str | None,
+) -> list[str]:
+    """Resolve the ordered class-name list used to label per-class metrics.
+
+    Precedence: an existing ``label_map.json`` (the dataset's own dynamically
+    derived class map) > an explicit ``class_names`` list > DEFAULT_CLASS_NAMES.
+    The final fallback is UNSW-NB15-specific and only correct for that label
+    ordering — callers should always supply a label map.
+
+    Args:
+        class_names: explicit ordered class names (index = label int), or None.
+        label_map_path: path to ``label_map.json`` ({"ClassName": int}), or None.
+
+    Returns:
+        Ordered class names where ``names[i]`` is the name of integer label ``i``.
+    """
+    if label_map_path and Path(label_map_path).exists():
+        with open(label_map_path) as f:
+            raw: dict[str, int] = json.load(f)
+        names = [""] * (max(raw.values()) + 1)
+        for name, idx in raw.items():
+            names[idx] = name
+        return names
+    if class_names is not None:
+        return class_names
+    logger.warning(
+        "No label_map.json available — falling back to DEFAULT_CLASS_NAMES "
+        "(NF-UNSW-NB15-v3 ordering). Per-class names may not match this dataset."
+    )
+    return DEFAULT_CLASS_NAMES
+
+
 class Evaluator:
     """Evaluate a trained EdgeAwareGraphSAGE on the test split."""
 
@@ -106,9 +140,11 @@ class Evaluator:
         Args:
             output_dir:      directory for metrics.json and PNG outputs.
             class_names:     ordered class name strings (index = label int).
-                             Falls back to DEFAULT_CLASS_NAMES if None.
-            label_map_path:  optional path to label_map.json
-                             {"ClassName": int_label, ...}.
+                             Used only when no readable ``label_map_path`` is
+                             given; falls back to DEFAULT_CLASS_NAMES if both
+                             are absent (see ``resolve_class_names``).
+            label_map_path:  path to label_map.json {"ClassName": int_label,
+                             ...}; takes precedence over ``class_names``.
 
         Returns:
             metrics dict (also written to metrics.json).
@@ -116,15 +152,7 @@ class Evaluator:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if label_map_path and Path(label_map_path).exists():
-            with open(label_map_path) as f:
-                raw = json.load(f)
-            n = max(raw.values()) + 1
-            class_names = [""] * n
-            for name, idx in raw.items():
-                class_names[idx] = name
-        elif class_names is None:
-            class_names = DEFAULT_CLASS_NAMES
+        class_names = resolve_class_names(class_names, label_map_path)
 
         logger.info("Running inference on test split ...")
         y_true, y_pred, y_prob = self._run_inference()
