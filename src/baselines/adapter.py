@@ -14,6 +14,9 @@ Provides:
                        used by GNNShap and GraphSVX
   dgl_subgraph_to_pyg
                      — extracts a PyG Data object from DGL blocks
+  build_h_full       — the (N_local, hidden) surrogate node-embedding matrix
+                       shared by PGExplainer/GNNShap/GraphSVX/EdgeSHAPer;
+                       every subgraph node gets a real model-derived embedding
   scores_to_group_importances
                      — aggregates 218-dim raw masks to 48 semantic groups
   fidelity_from_group_importances
@@ -302,6 +305,124 @@ def dgl_subgraph_to_pyg(
     return Data(x=x_t, edge_index=edge_index), gnid_to_local
 
 
+# ── Surrogate node-embedding matrix (h_full) ──────────────────────────────────
+
+def build_h_full(
+    ctx: "FlowContext",
+    model: "EdgeAwareGraphSAGE",
+    gnid_to_local: dict[int, int],
+    edge_index: torch.Tensor,
+) -> torch.Tensor:
+    """Build the (N_local, hidden) node-embedding matrix used by all baselines.
+
+    Every node of the local subgraph receives a genuine, model-derived
+    embedding: the model's own GNN stack (``model.convs`` / ``model.bns`` /
+    ReLU, ``num_layers`` deep) is run over the local subgraph as ordinary
+    full-graph message passing, rooted simultaneously at every node.
+
+    Why this is equivalent to per-node re-encoding: in ``model.eval()`` mode
+    BatchNorm is a fixed per-row affine map and SAGEConv is a per-destination
+    aggregation, so a node's layer-k output depends only on its own in-edge
+    subtree.  Re-rooting the sampled subgraph on each node in turn and calling
+    ``model.encode()`` N_local times therefore computes exactly the same
+    function as this single pass, at N_local times the cost.
+
+    The two seed rows (the target edge's endpoints) are afterwards overwritten
+    with ``ctx.h_fixed`` — the authoritative embedding the model actually
+    produced from the sampled computation blocks — so the surrogate's readout
+    reproduces the real model prediction rather than an approximation of it.
+    Non-seed rows differ from the seed rows only in provenance (local subgraph
+    vs. sampled blocks), not in the function applied.
+
+    Note that this changes NO coalition-masking mechanism: it only replaces the
+    previous zero-fill of every non-seed row, which made those nodes
+    informationally inert under any coalition.
+
+    Temporal safety: every edge in ``edge_index`` comes from the temporally
+    filtered blocks (all timestamps <= the target edge's), and every node
+    feature in ``ctx.base_node_feats`` is the node state at the target
+    timestamp, so no future information enters (CRITICAL INVARIANT 2/3).
+
+    Args:
+        ctx:           FlowContext for the target flow.
+        model:         the trained EdgeAwareGraphSAGE (must be in eval mode).
+        gnid_to_local: global node ID → local index, from dgl_subgraph_to_pyg.
+        edge_index:    (2, E) local-space subgraph edges, used verbatim so that
+                       h_full and the coalition graph describe the same object.
+                       Parallel edges are NOT deduplicated — NetFlow is a
+                       multigraph and each parallel edge is a distinct flow.
+
+    Returns:
+        (N_local, hidden) float32 CPU tensor.  All baseline wrappers run on CPU.
+    """
+    import dgl as _dgl
+
+    assert not model.training, (
+        "build_h_full requires model.eval(): train-mode BatchNorm would compute "
+        "batch statistics over a handful of subgraph nodes and dropout would "
+        "randomise the surrogate's embeddings."
+    )
+
+    n_local = len(gnid_to_local)
+    hidden_size = int(ctx.h_fixed.size(1))
+
+    # Local node features, ordered by local index.  dgl_subgraph_to_pyg's local
+    # ordering derives from blocks[0].srcdata[NID] (= input_node_ids), so every
+    # local node must have a row in base_node_feats — assert, do not assume.
+    input_gnids = ctx.blocks[0].srcdata[_dgl.NID].cpu().tolist()
+    input_pos = {g: i for i, g in enumerate(input_gnids)}
+    rows: list[int] = []
+    for gnid, local_idx in sorted(gnid_to_local.items(), key=lambda kv: kv[1]):
+        assert gnid in input_pos, (
+            f"local node {gnid} has no row in base_node_feats; the local "
+            "subgraph is not a subset of the block input nodes."
+        )
+        rows.append(input_pos[gnid])
+    x_local = torch.tensor(
+        ctx.base_node_feats[rows], dtype=torch.float32
+    )
+
+    # Homogeneous local graph carrying every subgraph edge verbatim.
+    if edge_index.numel() == 0:
+        src_t = torch.empty(0, dtype=torch.int64)
+        dst_t = torch.empty(0, dtype=torch.int64)
+    else:
+        src_t = edge_index[0].cpu().long()
+        dst_t = edge_index[1].cpu().long()
+    g_local = _dgl.graph((src_t, dst_t), num_nodes=n_local)
+
+    convs = list(model.convs)
+    bns = list(model.bns)
+    with torch.no_grad():
+        h = x_local
+        for conv, bn in zip(convs, bns):
+            h = conv(g_local, h)
+            h = bn(h)
+            h = torch.relu(h)          # no dropout: eval-mode inference only
+        h_full = h.detach().cpu().float()
+
+    assert h_full.shape == (n_local, hidden_size), (
+        f"h_full shape {tuple(h_full.shape)} != ({n_local}, {hidden_size})"
+    )
+
+    # Overwrite the seed rows with the model's authoritative block-computed
+    # embeddings so the surrogate's readout equals the real model prediction.
+    seed_gnids = ctx.blocks[-1].dstdata[_dgl.NID].cpu().tolist()
+    h_fixed_cpu = ctx.h_fixed.detach().cpu().float()
+    for i, gnid in enumerate(seed_gnids):
+        local_idx = gnid_to_local.get(gnid)
+        if local_idx is not None:
+            h_full[local_idx] = h_fixed_cpu[i]
+
+    for nid in (ctx.target_src_nid, ctx.target_dst_nid):
+        assert nid in gnid_to_local, (
+            f"target endpoint {nid} missing from the local subgraph; the "
+            "wrappers' readout index would silently fall back to node 0."
+        )
+
+    return h_full
+
+
 # ── Feature score aggregation ──────────────────────────────────────────────────
 
 def scores_to_group_importances(
@@ -440,3 +561,111 @@ def fidelity_from_node_mask(
     p_masked = _fwd(mask_top_k=True)
     p_kept   = _fwd(mask_top_k=False)
     return (ctx.p_full - p_masked, ctx.p_full - p_kept)
+
+
+# ── Degeneracy diagnostics (instrumentation only — no effect on attributions) ──
+
+#: Magnitude below which an attribution vector is treated as numerically
+#: uninformative ("saturated") even though it is not exactly zero.  Used only
+#: for the diagnostic ``fallback_reason`` field, never for any computation.
+SATURATION_EPS: float = 1e-12
+
+
+def surrogate_diagnostics(
+    h_full: torch.Tensor,
+    edge_index: torch.Tensor,
+    src_local: int,
+    dst_local: int,
+) -> dict:
+    """Structural diagnostics for a baseline surrogate's coalition subgraph.
+
+    Purely observational: records how many nodes in the local subgraph carry a
+    non-zero embedding in ``h_full`` and how many subgraph edges can actually
+    carry a non-zero message into the readout positions — only edges whose
+    *source* is a non-zero row can change the surrogate's output under an
+    edge/node coalition.
+
+    Historical note: the superseded zero-fill ``_build_h_full`` populated only
+    the seed nodes (``blocks[-1].dstdata``) and left every other row at zero,
+    which is what these counters were added to expose.  With ``build_h_full``
+    every row is model-derived, so ``n_h_full_nonzero == n_local`` and
+    ``n_live_edges_into_readout`` degenerates to a plain in-edge count for
+    almost every flow.  These fields are therefore now a *regression guard*
+    (a zero row reappearing would be a bug), not evidence of sensitivity —
+    for that, use ``surrogate_delta``.
+
+    Args:
+        h_full:     (N_local, hidden) surrogate node-embedding matrix.
+        edge_index: (2, E) local-space subgraph edges.
+        src_local:  local index of the target edge's source node (readout).
+        dst_local:  local index of the target edge's destination node (readout).
+
+    Returns:
+        dict with keys ``n_local``, ``n_h_full_nonzero``, ``n_subgraph_edges``,
+        ``n_live_edges_into_readout``, ``n_live_edges_into_src``.
+    """
+    n_local = int(h_full.size(0))
+    nonzero_rows = (h_full.abs().sum(dim=1) > 0)
+    n_nonzero = int(nonzero_rows.sum().item())
+
+    n_edges = int(edge_index.size(1))
+    if n_edges == 0:
+        return {
+            "n_local":                    n_local,
+            "n_h_full_nonzero":           n_nonzero,
+            "n_subgraph_edges":           0,
+            "n_live_edges_into_readout":  0,
+            "n_live_edges_into_src":      0,
+        }
+
+    src_rows, dst_rows = edge_index[0], edge_index[1]
+    live_src = nonzero_rows[src_rows]
+    into_readout = (dst_rows == src_local) | (dst_rows == dst_local)
+    into_src = (dst_rows == src_local)
+
+    return {
+        "n_local":                    n_local,
+        "n_h_full_nonzero":           n_nonzero,
+        "n_subgraph_edges":           n_edges,
+        "n_live_edges_into_readout":  int((live_src & into_readout).sum().item()),
+        "n_live_edges_into_src":      int((live_src & into_src).sum().item()),
+    }
+
+
+def surrogate_delta(predict, edge_index: torch.Tensor) -> float:
+    """Max output change between the full-coalition and empty-coalition surrogate.
+
+    A value of exactly 0.0 means the surrogate's value function is constant over
+    every coalition, so *any* Shapley estimator must return all-zero
+    attributions regardless of the estimator's own behaviour.
+
+    Args:
+        predict:    callable taking a (2, E) edge_index and returning a 1-D
+                    tensor of class scores.
+        edge_index: (2, E) local-space subgraph edges.
+
+    Returns:
+        max |predict(full) - predict(empty)|, or 0.0 if it cannot be computed.
+    """
+    try:
+        empty = edge_index.new_zeros((2, 0))
+        with torch.no_grad():
+            out_full = predict(edge_index).reshape(-1)
+            out_empty = predict(empty).reshape(-1)
+        return float((out_full - out_empty).abs().max().item())
+    except Exception as exc:                                  # diagnostics only
+        # WARNING, not DEBUG: a NaN in this column with no log line would be a
+        # silent failure of the very instrumentation added to expose one.
+        logger.warning(f"surrogate_delta unavailable: {type(exc).__name__}: {exc}")
+        return float("nan")
+
+
+def empty_diagnostics() -> dict:
+    """Neutral diagnostic block for flows where no subgraph could be built."""
+    return {
+        "n_local":                    0,
+        "n_h_full_nonzero":           0,
+        "n_subgraph_edges":           0,
+        "n_live_edges_into_readout":  0,
+        "n_live_edges_into_src":      0,
+    }

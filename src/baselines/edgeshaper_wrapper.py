@@ -99,22 +99,6 @@ class EdgeSHAPModelWrapper(nn.Module):
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _build_h_full(
-    h_fixed: torch.Tensor,
-    blocks: list,
-    gnid_to_local: dict,
-) -> torch.Tensor:
-    import dgl as _dgl
-    hidden_size = h_fixed.size(1)
-    N_local = len(gnid_to_local)
-    h_full = torch.zeros(N_local, hidden_size, dtype=torch.float32)
-    seed_gnids = blocks[-1].dstdata[_dgl.NID].cpu().tolist()
-    for i, gnid in enumerate(seed_gnids):
-        local_idx = gnid_to_local.get(gnid)
-        if local_idx is not None:
-            h_full[local_idx] = h_fixed[i].detach().cpu()
-    return h_full
-
 
 def _edge_shap_to_node_scores(
     phi_edges: list,
@@ -184,8 +168,12 @@ def run_edgeshaper_with_model(
                    fidelity_minus, runtime_s.
     """
     from src.baselines.adapter import (
+        build_h_full,
         dgl_subgraph_to_pyg,
         fidelity_from_node_mask,
+        surrogate_diagnostics,
+        surrogate_delta,
+        SATURATION_EPS,
     )
 
     t0 = time.time()
@@ -195,12 +183,20 @@ def run_edgeshaper_with_model(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = _build_h_full(ctx.h_fixed, ctx.blocks, gnid_to_local)
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    # Diagnostics (instrumentation only).  Timed separately and excluded from
+    # runtime_s so the reported runtime keeps its original meaning.
+    _t_diag = time.time()
+    diag = surrogate_diagnostics(
+        h_full, pyg_data.edge_index, src_local, dst_local
+    )
+    t0 += time.time() - _t_diag
 
     # Isolated flow fallback
     if pyg_data.edge_index.size(1) == 0:
@@ -209,11 +205,18 @@ def run_edgeshaper_with_model(
             node_scores_input, ctx, bg_node, model, top_k=top_k
         )
         return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0)
+                            time.time() - t0,
+                            fallback_reason="empty_subgraph", diag=diag)
 
     wrapper = EdgeSHAPModelWrapper(
         edge_mlp_cpu, x_e_t_cpu, src_local, dst_local
     ).eval()
+
+    _t_diag = time.time()
+    diag["surrogate_delta"] = surrogate_delta(
+        lambda ei: wrapper(h_full, ei)[0], pyg_data.edge_index
+    )
+    t0 += time.time() - _t_diag
 
     # Import EdgeSHAPer (just a single source file — add its dir to sys.path)
     if EDGESHAPER_SRC not in sys.path:
@@ -248,6 +251,17 @@ def run_edgeshaper_with_model(
     )
     node_scores_input = _map_local_to_input(local_scores, ctx.blocks, gnid_to_local)
 
+    # No fallback branch exists on EdgeSHAPer's inference path; a degenerate row
+    # here means the Monte-Carlo marginal contributions themselves came out
+    # all-zero or numerically saturated (< SATURATION_EPS).
+    fallback_reason: str | None = None
+    if node_scores_input.size:
+        peak = float(np.max(np.abs(node_scores_input)))
+        if peak == 0.0:
+            fallback_reason = "estimator_all_zero"
+        elif peak < SATURATION_EPS:
+            fallback_reason = "estimator_saturated"
+
     # Fidelity computed against actual DGL model
     fid_plus, fid_minus = fidelity_from_node_mask(
         node_scores_input, ctx, bg_node, model, top_k=top_k
@@ -258,7 +272,8 @@ def run_edgeshaper_with_model(
         f"EdgeSHAPer EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s)
+    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+                        fallback_reason=fallback_reason, diag=diag)
 
 
 def _pack_result(
@@ -267,7 +282,21 @@ def _pack_result(
     fid_plus: float,
     fid_minus: float,
     runtime_s: float,
+    fallback_reason: str | None = None,
+    diag: dict | None = None,
 ) -> dict:
+    """Pack one flow's result.
+
+    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
+    (new CSV columns); they never affect the attribution or fidelity numbers.
+    """
+    from src.baselines.adapter import empty_diagnostics
+
+    d = dict(empty_diagnostics())
+    d["surrogate_delta"] = float("nan")
+    if diag:
+        d.update(diag)
+
     return {
         "edge_id":         ctx.global_eid,
         "true_label":      ctx.true_label,
@@ -277,4 +306,6 @@ def _pack_result(
         "fidelity_plus":   round(fid_plus, 6),
         "fidelity_minus":  round(fid_minus, 6),
         "runtime_s":       round(runtime_s, 3),
+        "fallback_reason": fallback_reason,
+        **d,
     }

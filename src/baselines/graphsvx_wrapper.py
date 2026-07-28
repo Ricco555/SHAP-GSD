@@ -101,22 +101,6 @@ class GraphSVXNodeWrapper(nn.Module):
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _build_h_full(
-    h_fixed: torch.Tensor,
-    blocks: list,
-    gnid_to_local: dict,
-) -> torch.Tensor:
-    import dgl as _dgl
-    hidden_size = h_fixed.size(1)
-    N_local = len(gnid_to_local)
-    h_full = torch.zeros(N_local, hidden_size, dtype=torch.float32)
-    seed_gnids = blocks[-1].dstdata[_dgl.NID].cpu().tolist()
-    for i, gnid in enumerate(seed_gnids):
-        local_idx = gnid_to_local.get(gnid)
-        if local_idx is not None:
-            h_full[local_idx] = h_fixed[i].detach().cpu()
-    return h_full
-
 
 def _map_local_to_input(
     local_scores: np.ndarray,
@@ -168,8 +152,11 @@ def run_graphsvx_with_model(
     """
     from torch_geometric.data import Data
     from src.baselines.adapter import (
+        build_h_full,
         dgl_subgraph_to_pyg,
         fidelity_from_node_mask,
+        surrogate_diagnostics,
+        surrogate_delta,
     )
 
     t0 = time.time()
@@ -179,12 +166,20 @@ def run_graphsvx_with_model(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = _build_h_full(ctx.h_fixed, ctx.blocks, gnid_to_local)
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    # Diagnostics (instrumentation only).  Timed separately and excluded from
+    # runtime_s so the reported runtime keeps its original meaning.
+    _t_diag = time.time()
+    diag = surrogate_diagnostics(
+        h_full, pyg_data.edge_index, src_local, dst_local
+    )
+    t0 += time.time() - _t_diag
 
     # Isolated flow fallback
     if pyg_data.edge_index.size(1) == 0:
@@ -193,11 +188,18 @@ def run_graphsvx_with_model(
             node_scores_input, ctx, bg_node, model, top_k=top_k
         )
         return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0)
+                            time.time() - t0,
+                            fallback_reason="empty_subgraph", diag=diag)
 
     wrapper = GraphSVXNodeWrapper(
         edge_mlp_cpu, x_e_t_cpu, src_local, dst_local, N_local
     ).eval()
+
+    _t_diag = time.time()
+    diag["surrogate_delta"] = surrogate_delta(
+        lambda ei: wrapper(h_full, ei)[0], pyg_data.edge_index
+    )
+    t0 += time.time() - _t_diag
 
     # Build PyG Data for GraphSVX (x = h_full; edge_index = subgraph edges)
     data = Data(
@@ -223,6 +225,7 @@ def run_graphsvx_with_model(
 
     phi_list = None
     svx = None
+    fallback_reason: str | None = None
     try:
         os.chdir(GRAPHSVX_DIR)
         sys.path.insert(0, GRAPHSVX_DIR)
@@ -247,6 +250,15 @@ def run_graphsvx_with_model(
     except Exception as exc:
         # NetworkXNoPath (disconnected directed subgraph) or any other internal
         # GraphSVX failure → fall back to zero attribution for this flow.
+        #
+        # NOTE (diagnostics): GraphSVX's indirect-effect branch calls
+        # nx.all_shortest_paths(G, source=node_index, target=incl_nei) on a
+        # DiGraph (custom_to_networkx defaults to to_undirected=False), while
+        # DGL block edges point neighbour → target.  There is therefore usually
+        # no outgoing path from the target node, and NetworkXNoPath is raised.
+        # fallback_reason records the concrete exception class so the branch is
+        # observable per flow instead of only at DEBUG level.
+        fallback_reason = f"internal_exception:{type(exc).__name__}"
         logger.debug(f"GraphSVX internal error EID={ctx.global_eid}: {exc}")
     finally:
         os.chdir(_orig_dir)
@@ -264,7 +276,9 @@ def run_graphsvx_with_model(
             node_scores_input, ctx, bg_node, model, top_k=top_k
         )
         return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0)
+                            time.time() - t0,
+                            fallback_reason=fallback_reason
+                            or "graphsvx_returned_none", diag=diag)
 
     phi = phi_list[0]                  # numpy array, shape (D,)
     neighbours = svx.neighbours        # tensor of local node indices, length D
@@ -274,6 +288,10 @@ def run_graphsvx_with_model(
         for i, n in enumerate(neighbours.tolist()):
             if i < len(phi) and 0 <= n < N_local:
                 node_scores_local[n] = abs(float(phi[i]))
+    else:
+        # GraphSVX ran without raising, but produced no players (D == 0) or an
+        # empty phi — silently zero before this instrumentation existed.
+        fallback_reason = "empty_phi_or_neighbours"
 
     node_scores_input = _map_local_to_input(
         node_scores_local, ctx.blocks, gnid_to_local
@@ -289,7 +307,8 @@ def run_graphsvx_with_model(
         f"GraphSVX EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s)
+    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+                        fallback_reason=fallback_reason, diag=diag)
 
 
 def _pack_result(
@@ -298,7 +317,21 @@ def _pack_result(
     fid_plus: float,
     fid_minus: float,
     runtime_s: float,
+    fallback_reason: str | None = None,
+    diag: dict | None = None,
 ) -> dict:
+    """Pack one flow's result.
+
+    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
+    (new CSV columns); they never affect the attribution or fidelity numbers.
+    """
+    from src.baselines.adapter import empty_diagnostics
+
+    d = dict(empty_diagnostics())
+    d["surrogate_delta"] = float("nan")
+    if diag:
+        d.update(diag)
+
     return {
         "edge_id":         ctx.global_eid,
         "true_label":      ctx.true_label,
@@ -308,4 +341,6 @@ def _pack_result(
         "fidelity_plus":   round(fid_plus, 6),
         "fidelity_minus":  round(fid_minus, 6),
         "runtime_s":       round(runtime_s, 3),
+        "fallback_reason": fallback_reason,
+        **d,
     }

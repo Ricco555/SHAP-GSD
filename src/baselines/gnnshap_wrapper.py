@@ -131,22 +131,6 @@ def _make_forward_fn(edge_mlp_cpu: nn.Module, x_e_t_cpu: torch.Tensor,
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _build_h_full(
-    h_fixed: torch.Tensor,
-    blocks: list,
-    gnid_to_local: dict,
-) -> torch.Tensor:
-    import dgl as _dgl
-    hidden_size = h_fixed.size(1)
-    N_local = len(gnid_to_local)
-    h_full = torch.zeros(N_local, hidden_size, dtype=torch.float32)
-    seed_gnids = blocks[-1].dstdata[_dgl.NID].cpu().tolist()
-    for i, gnid in enumerate(seed_gnids):
-        local_idx = gnid_to_local.get(gnid)
-        if local_idx is not None:
-            h_full[local_idx] = h_fixed[i].detach().cpu()
-    return h_full
-
 
 def _compute_relabeled_positions(
     src_local_idx: int,
@@ -244,8 +228,12 @@ def run_gnnshap_with_model(
     """
     from torch_geometric.data import Data
     from src.baselines.adapter import (
+        build_h_full,
         dgl_subgraph_to_pyg,
         fidelity_from_node_mask,
+        surrogate_diagnostics,
+        surrogate_delta,
+        SATURATION_EPS,
     )
 
     t0 = time.time()
@@ -255,27 +243,36 @@ def run_gnnshap_with_model(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = _build_h_full(ctx.h_fixed, ctx.blocks, gnid_to_local)
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
 
-    def _zero_fallback():
+    # Diagnostics (instrumentation only).  Timed separately and excluded from
+    # runtime_s so the reported runtime keeps its original meaning.
+    _t_diag = time.time()
+    diag = surrogate_diagnostics(
+        h_full, pyg_data.edge_index, src_local, dst_local
+    )
+    t0 += time.time() - _t_diag
+
+    def _zero_fallback(reason: str):
         scores = np.zeros(len(ctx.input_node_ids))
         fp, fm = fidelity_from_node_mask(scores, ctx, bg_node, model, top_k=top_k)
-        return _pack_result(ctx, scores, fp, fm, time.time() - t0)
+        return _pack_result(ctx, scores, fp, fm, time.time() - t0,
+                            fallback_reason=reason, diag=diag)
 
     # Isolated flow or too few players for coalition sampling
     if pyg_data.edge_index.size(1) == 0:
-        return _zero_fallback()
+        return _zero_fallback("empty_subgraph")
     if N_local < 3:
         logger.debug(
             f"GNNShap EID={ctx.global_eid}: N_local={N_local} < 3, "
             "insufficient players for coalition sampling — zero fallback"
         )
-        return _zero_fallback()
+        return _zero_fallback("insufficient_players")
 
     # Pre-compute relabeled positions for forward_fn
     src_relabeled, dst_relabeled = _compute_relabeled_positions(
@@ -290,6 +287,23 @@ def run_gnnshap_with_model(
         edge_mlp_cpu, x_e_t_cpu, src_relabeled, dst_relabeled
     )
 
+    # surrogate_delta must be measured on the SAME graph GNNShap plays on:
+    # the pruned, relabeled k-hop comp graph around src_local, with
+    # node_features = h_full[subset] and readout index = src_relabeled.
+    # Measuring it on the full unrelabeled subgraph would overstate the
+    # surrogate's sensitivity to GNNShap's actual player set.
+    _t_diag = time.time()
+    from torch_geometric.utils import k_hop_subgraph as _khs
+    _subset, _sub_ei, _, _ = _khs(
+        node_idx=src_local, num_hops=nhops, edge_index=pyg_data.edge_index,
+        relabel_nodes=True, num_nodes=N_local,
+    )
+    _h_sub = h_full[_subset]
+    diag["surrogate_delta"] = surrogate_delta(
+        lambda ei: forward_fn(wrapper, _h_sub, ei, src_relabeled), _sub_ei
+    )
+    t0 += time.time() - _t_diag
+
     # Build PyG Data object for GNNShap
     data = Data(
         x=h_full,
@@ -301,6 +315,7 @@ def run_gnnshap_with_model(
     _orig_dir = os.getcwd()
     _orig_path = sys.path[:]
     explanation = None
+    fallback_reason: str | None = None
     try:
         os.chdir(GNNSHAP_DIR)
         if GNNSHAP_DIR not in sys.path:
@@ -326,6 +341,7 @@ def run_gnnshap_with_model(
             solver_name="WLSSolver",
         )
     except Exception as exc:
+        fallback_reason = f"internal_exception:{type(exc).__name__}"
         logger.debug(
             f"GNNShap EID={ctx.global_eid} N_local={N_local}: {exc} — zero fallback"
         )
@@ -334,7 +350,7 @@ def run_gnnshap_with_model(
         sys.path = _orig_path
 
     if explanation is None:
-        return _zero_fallback()
+        return _zero_fallback(fallback_reason or "explainer_returned_none")
 
     # GNNShapExplanation stores shap_values (np.array) and sub_edge_index (already numpy)
     shap_vals = np.array(explanation.shap_values)
@@ -342,6 +358,14 @@ def run_gnnshap_with_model(
 
     local_scores = _edge_shap_to_node_scores(shap_vals, sub_edge_index, N_local)
     node_scores_input = _map_local_to_input(local_scores, ctx.blocks, gnid_to_local)
+
+    # No branch fired, but the estimator itself may still have returned an
+    # all-zero / numerically saturated attribution vector.  Recorded so a
+    # degenerate row can be told apart from a fallback row.
+    if node_scores_input.size and np.max(np.abs(node_scores_input)) == 0.0:
+        fallback_reason = "estimator_all_zero"
+    elif node_scores_input.size and np.max(np.abs(node_scores_input)) < SATURATION_EPS:
+        fallback_reason = "estimator_saturated"
 
     # Fidelity computed against actual DGL model
     fid_plus, fid_minus = fidelity_from_node_mask(
@@ -353,7 +377,8 @@ def run_gnnshap_with_model(
         f"GNNShap EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s)
+    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+                        fallback_reason=fallback_reason, diag=diag)
 
 
 def _pack_result(
@@ -362,7 +387,21 @@ def _pack_result(
     fid_plus: float,
     fid_minus: float,
     runtime_s: float,
+    fallback_reason: str | None = None,
+    diag: dict | None = None,
 ) -> dict:
+    """Pack one flow's result.
+
+    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
+    (new CSV columns); they never affect the attribution or fidelity numbers.
+    """
+    from src.baselines.adapter import empty_diagnostics
+
+    d = dict(empty_diagnostics())
+    d["surrogate_delta"] = float("nan")
+    if diag:
+        d.update(diag)
+
     return {
         "edge_id":         ctx.global_eid,
         "true_label":      ctx.true_label,
@@ -372,4 +411,6 @@ def _pack_result(
         "fidelity_plus":   round(fid_plus, 6),
         "fidelity_minus":  round(fid_minus, 6),
         "runtime_s":       round(runtime_s, 3),
+        "fallback_reason": fallback_reason,
+        **d,
     }
