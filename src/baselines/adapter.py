@@ -793,7 +793,7 @@ def surrogate_diagnostics(
     ``n_live_edges_into_readout`` degenerates to a plain in-edge count for
     almost every flow.  These fields are therefore now a *regression guard*
     (a zero row reappearing would be a bug), not evidence of sensitivity —
-    for that, use ``surrogate_delta``.
+    for that, use ``surrogate_delta`` (packed as ``surrogate_delta_logit``).
 
     Args:
         h_full:     (N_local, hidden) surrogate node-embedding matrix.

@@ -577,8 +577,14 @@ def test_build_h_full_follows_the_model_device(monkeypatch, infra, flows):
     is NOT a counterfactual catch of Bug 1: pre-fix there was no device
     resolution to monkeypatch, and pre-fix code would simply have SUCCEEDED
     here, building everything on the CPU.  The only test that would have caught
-    Bug 1 as it was written is an end-to-end GPU run, which cannot execute in
-    this environment (no CUDA device).
+    Bug 1 as it was written is an end-to-end GPU run — not part of this
+    automated suite (it needs real CUDA hardware, which this machine happens
+    to have but a fresh clone's CI/dev environment may not).  A manual
+    end-to-end GPU run of build_h_full was performed once, out-of-band, on
+    this repo's development machine and succeeded on 12/12 real sampled flows
+    (see specs/27 §8 R1 addendum); that check is not reproduced here because
+    it depends on real trained artifacts and a CUDA device, neither of which
+    this suite's other tests require.
     """
     import src.baselines.adapter as adapter
 

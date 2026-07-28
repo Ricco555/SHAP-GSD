@@ -47,6 +47,17 @@ granularities and an unfiltered stratified case-study sampling mode (see
 Phase 8 and Exploration figures below) — **recommended for any new run**, but
 not part of the numbers already reported in the submitted paper.
 
+As of `v2.2.9`, `main` additionally contains **results-changing correctness
+fixes** to the four baseline-explainer wrappers (GraphSVX, GNNShap,
+PGExplainer, EdgeSHAPer) used for Table 2's baseline comparison: a shared
+embedding-construction defect meant these baselines could not assign
+importance to any neighbourhood node (only the two target-edge endpoints had
+real embeddings), so their reported attribution and fidelity numbers on
+`main` will differ from the submitted `v2.1.0` snapshot. SHAP-GSD's own
+model training/evaluation is unaffected. Table 2's baseline columns should
+be regenerated from current `main` before being cited as reproducing the
+paper, and should not be assumed identical to the `v2.1.0` numbers.
+
 ---
 
 ## Requirements
