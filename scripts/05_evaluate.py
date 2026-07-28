@@ -2,9 +2,10 @@
 Phase 5: Evaluate trained model on the test split.
 
 Produces per-class F1/precision/recall, confusion matrix, and ROC curves.
-TE-G-SAGE minority-class baselines (Backdoor F1=0.071, DoS F1=0.26) are
-printed for direct comparison — if either is not improved, revisit the
-oversampling ratio or class weights before treating results as final.
+This phase is dataset-agnostic — it reports only metrics derived from this
+run's own predictions and label map.  The UNSW-NB15-specific TE-G-SAGE
+minority-class F1 comparison is no longer part of the pipeline; run the
+one-off ``explore/teg_sage_comparison.py`` script for that.
 
 Prerequisites:
   - Phase 4 complete: artifacts/best_model.pt exists
@@ -152,20 +153,10 @@ def main(
         nsm=nsm, cfg=cfg, device=device,
     )
 
-    metrics = evaluator.evaluate(
+    evaluator.evaluate(
         output_dir=output_dir,
         label_map_path=label_map_path,
     )
-
-    # ── 8. Warn if TE-G-SAGE targets not met ──────────────────────────────────
-    comparison = metrics.get("teg_sage_comparison", {})
-    not_improved = [k for k, v in comparison.items() if not v["improved"]]
-    if not_improved:
-        logger.warning(
-            f"TE-G-SAGE F1 target NOT met for: {not_improved}. "
-            "Consider adjusting min_class_ratio or max_majority_ratio in balancer "
-            "config before treating full training as final."
-        )
 
     logger.info(
         f"Evaluation artefacts written to {output_dir}/\n"

@@ -6,10 +6,11 @@ Produces:
   confusion_matrix.png  row-normalised heatmap
   roc_curves.png        one-vs-rest ROC per class
 
-TE-G-SAGE minority-class baselines to beat:
-  Backdoor F1 = 0.071
-  DoS      F1 = 0.26
-These are printed alongside the new results for direct comparison.
+This module is dataset-agnostic: every metric it produces is derived from the
+run's own label map and predictions.  Dataset-specific literature comparisons
+(e.g. the TE-G-SAGE UNSW-NB15 minority-class F1 baselines) live in the one-off
+script ``explore/teg_sage_comparison.py`` instead, so that runs on other
+NetFlow datasets never carry a UNSW-specific verdict in their metrics.json.
 """
 
 import json
@@ -36,20 +37,6 @@ from src.model.temporal_sampler import TemporalNeighborSampler
 from src.visualization.metrics_plots import plot_confusion_matrix, plot_roc_curves
 
 logger = logging.getLogger(__name__)
-
-# TE-G-SAGE per-class F1 baselines for NF-UNSW-NB15-v3.
-# These are UNSW-specific and are only printed when the class names match
-# this dataset (see Evaluator._compare_to_baselines).
-TEG_SAGE_F1_BASELINES: dict[str, float] = {
-    "Backdoor": 0.071,
-    "DoS":      0.26,
-}
-
-# Class names that identify NF-UNSW-NB15-v3 — used to gate baseline comparison.
-_UNSW_CLASS_NAMES: frozenset[str] = frozenset(TEG_SAGE_F1_BASELINES.keys()) | {
-    "Benign", "Generic", "Exploits", "Fuzzers", "Recon",
-    "Analysis", "Shellcode", "Worms",
-}
 
 # Default class names for NF-UNSW-NB15-v3 (Label 0-9).
 # This is a FALLBACK for when no label_map.json is provided.
@@ -179,16 +166,12 @@ class Evaluator:
             if name in report
         }
 
-        # ── TE-G-SAGE comparison ──────────────────────────────────────────────
-        teg_sage_comparison = self._teg_sage_comparison(per_class)
-
         metrics = {
             "accuracy":      accuracy,
             "macro_f1":      macro_f1,
             "weighted_f1":   weighted_f1,
             "n_test_edges":  len(y_true),
             "per_class":     per_class,
-            "teg_sage_comparison": teg_sage_comparison,
         }
 
         with open(output_dir / "metrics.json", "w") as f:
@@ -206,7 +189,7 @@ class Evaluator:
         )
 
         # ── Console summary ───────────────────────────────────────────────────
-        self._print_summary(metrics, teg_sage_comparison, class_names)
+        self._print_summary(metrics, class_names)
 
         return metrics
 
@@ -275,45 +258,16 @@ class Evaluator:
         )
 
     @staticmethod
-    def _teg_sage_comparison(
-        per_class: dict[str, dict],
-    ) -> dict[str, dict]:
-        """Build TE-G-SAGE vs SHAP-GSD delta table for NF-UNSW-NB15-v3 minority classes.
-
-        Returns an empty dict when the class names do not match the UNSW dataset
-        (i.e. when running on a different NetFlow dataset), so that no misleading
-        comparison is printed.
-        """
-        # Only produce baseline comparison if this looks like the UNSW dataset.
-        # We check that all baseline class names are present in per_class.
-        if not all(cls in per_class for cls in TEG_SAGE_F1_BASELINES):
-            logger.debug(
-                "Skipping TE-G-SAGE baseline comparison: "
-                "class names do not match NF-UNSW-NB15-v3 — "
-                "expected %s, got %s",
-                sorted(TEG_SAGE_F1_BASELINES.keys()),
-                sorted(per_class.keys()),
-            )
-            return {}
-
-        comparison: dict[str, dict] = {}
-        for cls_name, baseline_f1 in TEG_SAGE_F1_BASELINES.items():
-            shap_gsd_f1 = per_class.get(cls_name, {}).get("f1", None)
-            if shap_gsd_f1 is not None:
-                comparison[cls_name] = {
-                    "teg_sage_f1": baseline_f1,
-                    "shap_gsd_f1": shap_gsd_f1,
-                    "delta":       round(shap_gsd_f1 - baseline_f1, 4),
-                    "improved":    shap_gsd_f1 > baseline_f1,
-                }
-        return comparison
-
-    @staticmethod
     def _print_summary(
         metrics: dict,
-        teg_sage_comparison: dict,
         class_names: list[str],
     ) -> None:
+        """Log a human-readable summary of the test-split evaluation.
+
+        Args:
+            metrics: the metrics dict produced by ``evaluate``.
+            class_names: ordered class names (index = integer label).
+        """
         logger.info("=" * 65)
         logger.info("TEST EVALUATION SUMMARY")
         logger.info(f"  Accuracy:     {metrics['accuracy']:.4f}")
@@ -326,24 +280,9 @@ class Evaluator:
             pc = metrics["per_class"].get(name)
             if pc is None:
                 continue
-            marker = ""
-            if name in teg_sage_comparison:
-                p1 = teg_sage_comparison[name]["teg_sage_f1"]
-                delta = teg_sage_comparison[name]["delta"]
-                sign  = "+" if delta >= 0 else ""
-                marker = f"  [TE-G-SAGE={p1:.3f}, Δ={sign}{delta:.3f}{'  ✓' if delta > 0 else '  ✗'}]"
             logger.info(
                 f"  {name:<14s}  F1={pc['f1']:.4f}  "
                 f"P={pc['precision']:.4f}  R={pc['recall']:.4f}  "
-                f"n={pc['support']:,}{marker}"
+                f"n={pc['support']:,}"
             )
-        if teg_sage_comparison:
-            logger.info("")
-            logger.info("TE-G-SAGE minority-class targets:")
-            for name, row in teg_sage_comparison.items():
-                status = "IMPROVED" if row["improved"] else "NOT MET"
-                logger.info(
-                    f"  {name}: TE-G-SAGE={row['teg_sage_f1']:.3f}  "
-                    f"SHAP-GSD={row['shap_gsd_f1']:.4f}  [{status}]"
-                )
         logger.info("=" * 65)

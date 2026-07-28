@@ -91,6 +91,7 @@ _GRAY     = "#888888"   # reference lines, annotations
 | `shap_scatter.py` | Dataset-agnostic |
 | `node_shap_convergence.py` | Dataset-agnostic |
 | `case_studies.py` | UNSW-specific — hardcoded exemplar EIDs |
+| `teg_sage_comparison.py` | UNSW-specific — hardcoded TE-G-SAGE published F1 baselines |
 
 See [`arguments/README.md`](arguments/README.md) and [`graph/README.md`](graph/README.md)
 for subfolder scripts.
@@ -104,4 +105,5 @@ for subfolder scripts.
 | `w_ablation_figure.py` | `w_ablation.{pdf,png,txt}` |
 | `fidelity_distributions.py` | `fidelity_violins.{pdf,png}`, `fidelity_pa_bars.{pdf,png}` |
 | `method_comparison_figure.py` | `method_comparison_fg.{pdf,png,txt}` |
+| `teg_sage_comparison.py` | `teg_sage_comparison.{pdf,png,txt}` |
 | `shap_scatter.py` | `shap_beeswarm_<class>.{pdf,png}`, `shap_absence_drivers.{pdf,png}`, `shap_beeswarm_grid.{pdf,png}`, `shap_scatter.txt` |
