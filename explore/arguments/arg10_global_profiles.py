@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
@@ -277,31 +278,10 @@ def main() -> None:
         "Right: per-class Spearman ρ between SHAP-GSD rank and independent literature",
         "rank; green = strong agreement (ρ ≥ 0.7), amber = moderate, coral = weak.",
         f"Mean ρ = {mean_rho:.2f}; {len(strong)} of {len(classes)} classes show strong cross-source alignment.",
-        "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "This is circular validation — you are using SHAP to validate SHAP. The",
-        "literature profiles are based on the same dataset, so the comparison is",
-        "self-referential and cannot demonstrate explainability quality.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "The literature profiles (Moustafa & Slay 2015) are derived from the dataset",
-        "paper's attack taxonomy and manual feature analysis — they are not computed",
-        "from any SHAP output. The comparison is cross-source: our model-driven SHAP",
-        "rankings are compared against independent human expert characterisations.",
-        "This is analogous to comparing a classifier's confusion matrix against a",
-        "known attack taxonomy: the taxonomy is not derived from the classifier, so",
-        "agreement constitutes external validation. The comparison would fail if SHAP",
-        "were producing random attributions, providing a meaningful quality bound.",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Evaluation §5.3 — Global Profile Coherence. Provides external validation",
-        "of SHAP-GSD's global explanations against independent literature profiles.",
-        "Counter-argument against reviewers who question whether SHAP-GSD explanations",
-        "align with domain knowledge.",
     ]
+    notes = load_paper_notes(STEM)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))

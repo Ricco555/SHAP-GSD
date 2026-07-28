@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
@@ -247,26 +248,10 @@ def main() -> None:
         f"Right: per-class log-scale comparison of mean causal neighbors used (teal)",
         f"vs mean future edges excluded by the causal filter (coral); without filtering,",
         f"{leakage_rate:.1f}% of in-window edges would leak future information into the explanation.",
-        "",
-        "GENERATOR NOTE",
-        "---------------",
-        "This script is reused across datasets. The causal-ordering correctness",
-        "argument above is dataset-independent (any explanation using future neighbors",
-        "cannot be deployed in a real IDS, regardless of how large or small phi_T's",
-        "magnitude turns out to be). A reviewer-challenge/counter-argument section that",
-        "assumes a specific phi_T magnitude (e.g. 'phi_T is negligible so this doesn't",
-        "matter') should only be added by hand, checked against the actual computed",
-        "phi_T value for this specific dataset run (see attribution_decomp.py's output).",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Methods §3.3 — Temporal Faithfulness Constraint. Provides empirical verification",
-        "that SHAP-GSD's TemporalNeighborSampler enforces the causal ordering invariant",
-        "with zero violations, and quantifies the magnitude of leakage that would result",
-        f"from omitting this constraint ({leakage_rate:.1f}% of in-window edges are",
-        "future-dated on this dataset). Directly addresses Paper 1's temporal leakage",
-        "limitation.",
     ]
+    notes = load_paper_notes(STEM, leakage_rate=leakage_rate)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))

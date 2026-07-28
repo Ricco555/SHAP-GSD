@@ -60,8 +60,13 @@ SUGGESTED FIGURE CAPTION
 <Caption text as it will appear in the paper.>
 ```
 
-For `explore/arguments/` scripts, also include:
-`REVIEWER CHALLENGE / COUNTER-ARGUMENT / PAPER SECTION PLACEMENT`
+`explore/arguments/` scripts additionally *may* append a
+`REVIEWER CHALLENGE / COUNTER-ARGUMENT / PAPER SECTION PLACEMENT` section, but
+its content is not part of this tracked codebase — it's internal paper-writing
+strategy loaded at runtime from a git-ignored `local/paper_arguments/<STEM>.txt`
+file via `explore/arguments/_paper_notes.py::load_paper_notes()`. On a fresh
+clone (no `local/` directory), scripts simply omit that section and still
+produce a fully valid, reproducible figure and caption.
 
 ## Style constants
 

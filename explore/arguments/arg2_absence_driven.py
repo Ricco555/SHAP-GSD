@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -181,31 +182,10 @@ def main() -> None:
         "annotations show the percentage of flows with Fidelity+ ≤ 0. Right: 100%",
         "stacked bar showing per-class proportion of absence-driven flows; ★ marks",
         f"the {len(absence_dominant)} classes where >50% of flows have negative Fidelity+.",
-        "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "Negative Fidelity+ indicates a wrong or inverted explanation — the explainer",
-        "is attributing importance to features that hurt the prediction.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "Fidelity+ = p_full − p_masked measures how much the prediction probability",
-        "*drops* when top-k attributed groups are masked. A negative value means masking",
-        "those groups *increases* confidence — which is the correct behaviour when the",
-        "groups represent absent benign norms. For Recon, MIN_TTL and MAX_TTL are absent",
-        "(Recon probes set fixed TTL = 128); masking these zero-valued features removes",
-        "a constraint that suppresses the attack score. The model is not wrong — it has",
-        "learned that normal TTL variation is evidence against an attack, and its absence",
-        "is evidence for one. SHAP-GSD correctly captures this negative attribution.",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Results §4.3 — Absence-driven Attribution. Supports the claim that SHAP-GSD",
-        "explanations are semantically valid for classes whose decision boundary rests",
-        "on the absence of normal traffic signatures rather than the presence of attack",
-        "indicators. Counter-argument against reviewers who treat negative Fidelity+ as",
-        "a quality failure.",
     ]
+    notes = load_paper_notes(STEM)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))
