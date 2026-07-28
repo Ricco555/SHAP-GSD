@@ -424,77 +424,6 @@ def _round6(x: float | None) -> float | None:
     return None if x is None else round(x, 6)
 
 
-def _flow_context_temporal(
-    global_eid: int,
-    true_label: int,
-    model: EdgeAwareGraphSAGE,
-    g_test: dgl.DGLGraph,
-    nsm: NodeStateManager,
-    fs: FeatureStore,
-    sampler: TemporalNeighborSampler,
-    device: torch.device,
-) -> tuple[int, float, list, np.ndarray, np.ndarray, torch.Tensor,
-           torch.Tensor, torch.Tensor, float]:
-    """Sample blocks and precompute everything the φ_T fidelity pass needs.
-
-    Mirrors _flow_forward, but additionally returns the local EID, target
-    timestamp, input node IDs and base node states that the φ_T masking needs,
-    and computes p_full with the FULL model.forward() rather than
-    encode()+classify(). The two are numerically identical, but the φ_T pass
-    cannot reuse a cached embedding (rollback changes node states), so no
-    h_fixed is produced here.
-
-    Args:
-        global_eid: global EID of the target flow.
-        true_label: integer class label of the target flow.
-        model:      trained EdgeAwareGraphSAGE (eval mode expected).
-        g_test:     test split DGL graph.
-        nsm:        NodeStateManager for node-state queries.
-        fs:         FeatureStore for the target edge features.
-        sampler:    deterministic TemporalNeighborSampler.
-        device:     torch device.
-
-    Returns:
-        (local_eid, target_ts_ms, blocks, input_node_ids, base_node_feats,
-         x_e_t, src_pos, dst_pos, p_full)
-    """
-    # Local EID lookup
-    global_eids_t = g_test.edata[dgl.EID]
-    local_eid = int((global_eids_t == global_eid).nonzero(as_tuple=True)[0][0].item())
-
-    seed_t = torch.tensor([local_eid], dtype=torch.long)
-    input_nodes, seed_eids, blocks = sampler.sample_blocks(g_test, seed_t)
-    blocks = [b.to(device) for b in blocks]
-    input_nodes = input_nodes.to(device)
-
-    target_ts = float(g_test.edata["timestamp"][local_eid].item())
-    input_node_ids = input_nodes.cpu().numpy()
-    base_node_feats = np.stack([
-        nsm.get_state_at_time(int(nid), target_ts) for nid in input_node_ids
-    ])
-    node_feats_t = torch.tensor(base_node_feats, dtype=torch.float32, device=device)
-
-    x_e = fs[global_eid].copy()
-    x_e_t = torch.tensor(x_e, dtype=torch.float32, device=device).unsqueeze(0)
-
-    seed_nodes_final = blocks[-1].dstdata[dgl.NID]
-    src_pos, dst_pos = build_src_dst_pos(g_test, seed_t, seed_nodes_final)
-    src_pos = src_pos.to(device)
-    dst_pos = dst_pos.to(device)
-
-    with torch.no_grad():
-        logits = model(blocks, node_feats_t, x_e_t, src_pos, dst_pos)
-        proba = torch.softmax(logits, dim=1).cpu().numpy()[0]
-    p_full = float(proba[true_label])
-
-    assert base_node_feats.shape[0] == len(input_node_ids), (
-        f"row misalignment: base_node_feats has {base_node_feats.shape[0]} rows "
-        f"but input_node_ids has {len(input_node_ids)}"
-    )
-    return (local_eid, target_ts, blocks, input_node_ids, base_node_feats,
-            x_e_t, src_pos, dst_pos, p_full)
-
-
 def compute_fidelity_temporal(
     records: list[dict],
     model: EdgeAwareGraphSAGE,
@@ -545,9 +474,13 @@ def compute_fidelity_temporal(
         stored_eids = rec["neighbor_edge_ids"]
         stored_phi = rec["neighbor_shap"]
 
+        # The shared helper also asserts that both target endpoints are among
+        # the block's input nodes — an invariant φ_T does not itself rely on.
+        # φ_T keeps a single broad `except`, so were it ever to fire here it
+        # would be counted under n_sample_fail; the accounting invariant below
+        # still holds.
         try:
-            (local_eid, target_ts, blocks, input_node_ids, base_node_feats,
-             x_e_t, src_pos, dst_pos, p_full) = _flow_context_temporal(
+            ctx = _flow_context(
                 global_eid, true_label, model, g_test, nsm, fs, sampler, device
             )
         except Exception:
@@ -556,7 +489,7 @@ def compute_fidelity_temporal(
             continue
 
         neighbor_records = temp_shap.extract_neighbor_edges(
-            blocks, local_eid, target_ts
+            ctx.blocks, ctx.local_eid, ctx.target_ts_ms
         )
         phi = align_phi_to_records(neighbor_records, stored_eids, stored_phi)
         if phi is None:
@@ -566,17 +499,17 @@ def compute_fidelity_temporal(
         res = temporal_fidelity_for_flow(
             model=model,
             temp_shap=temp_shap,
-            blocks=blocks,
+            blocks=ctx.blocks,
             neighbor_records=neighbor_records,
             phi_temporal=phi,
-            base_node_feats=base_node_feats,
-            input_node_ids=input_node_ids,
-            target_ts_ms=target_ts,
-            x_e_t=x_e_t,
-            src_pos=src_pos,
-            dst_pos=dst_pos,
+            base_node_feats=ctx.base_node_feats,
+            input_node_ids=ctx.input_node_ids,
+            target_ts_ms=ctx.target_ts_ms,
+            x_e_t=ctx.x_e_t,
+            src_pos=ctx.src_pos,
+            dst_pos=ctx.dst_pos,
             true_label=true_label,
-            p_full=p_full,
+            p_full=ctx.p_full,
             top_k=top_k,
             device=device,
         )
