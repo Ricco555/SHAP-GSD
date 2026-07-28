@@ -31,7 +31,9 @@ Usage:
   # Single baseline:
   python scripts/10_baselines.py --config configs/experiment_unsw.yaml --baselines gnnexplainer
 
-  # Skip PGExplainer training (use cached):
+  # Skip PGExplainer training (reuse the cached checkpoint when it is not stale;
+  # a checkpoint trained against a different build_h_full version or a different
+  # best_model.pt is detected and retrained automatically — see specs/28):
   python scripts/10_baselines.py --config configs/experiment_unsw.yaml --skip-pg-train
 """
 
@@ -168,18 +170,48 @@ def _train_or_load_pgexplainer(
 ):
     """Train PGExplainer or load a saved checkpoint if available and skip_training set."""
     from src.baselines.pgexplainer_wrapper import train_pgexplainer
+    from src.baselines import _ckpt_meta
 
     ckpt_path = artifacts_dir / "pgexplainer_algorithm.pt"
+    best_model_path = artifacts_dir / "best_model.pt"
 
-    if skip_training and ckpt_path.exists():
-        logger.info(f"Loading cached PGExplainer from {ckpt_path}")
-        from torch_geometric.explain.algorithm import PGExplainer
-        algorithm = PGExplainer(epochs=pg_epochs, lr=pg_lr)
-        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        algorithm.mlp = state["mlp"]
-        algorithm.optimizer = None  # not needed for inference
-        algorithm._curr_epoch = pg_epochs - 1  # mark training as complete
-        return algorithm
+    if skip_training:
+        status = _ckpt_meta.check_checkpoint(ckpt_path, best_model_path)
+
+        if status.is_stale:
+            moved = _ckpt_meta.move_aside(ckpt_path)
+            logger.warning(
+                "Cached PGExplainer checkpoint at %s is STALE (%s): %s. "
+                "It was fit on embeddings this pipeline no longer produces, so "
+                "reusing it would put silently wrong numbers in Table 2. "
+                "Moved aside to %s; retraining now "
+                "(%d flows x %d epochs, this will take a while).",
+                ckpt_path, status.reason, status.detail,
+                ", ".join(str(p) for p in moved) or "(nothing to move)",
+                n_train, pg_epochs,
+            )
+        elif status.status == _ckpt_meta.STATUS_UNCACHED:
+            # Orphan sidecar with no checkpoint: tidy it away without alarming
+            # the user — this is a normal first run, not a staleness event.
+            orphan = _ckpt_meta.sidecar_path_for(ckpt_path)
+            if orphan.exists():
+                logger.debug("Moving aside orphan PGExplainer sidecar %s", orphan)
+                _ckpt_meta.move_aside(ckpt_path)
+        else:
+            logger.info(
+                "Loading cached PGExplainer from %s "
+                "(h_full schema v%d, model %s)",
+                ckpt_path,
+                _ckpt_meta.live_h_full_schema_version(),
+                (_ckpt_meta.file_sha256(best_model_path) or "?")[:12],
+            )
+            from torch_geometric.explain.algorithm import PGExplainer
+            algorithm = PGExplainer(epochs=pg_epochs, lr=pg_lr)
+            state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            algorithm.mlp = state["mlp"]
+            algorithm.optimizer = None  # not needed for inference
+            algorithm._curr_epoch = pg_epochs - 1  # mark training as complete
+            return algorithm
 
     logger.info(
         f"Training PGExplainer on {n_train} training flows "
@@ -203,10 +235,22 @@ def _train_or_load_pgexplainer(
     )
     del g_train
 
-    # Cache the MLP weights
+    # Cache the MLP weights + the provenance sidecar that makes them safe to
+    # reuse. Both writes live in this one guard so no code path can produce a
+    # checkpoint without attempting its sidecar (specs/28 §2.4).
     if algorithm.mlp is not None:
         torch.save({"mlp": algorithm.mlp}, ckpt_path)
-        logger.info(f"PGExplainer saved → {ckpt_path}")
+        sidecar = _ckpt_meta.write_sidecar(
+            ckpt_path,
+            _ckpt_meta.build_sidecar_payload(
+                best_model_path,
+                pg_epochs=pg_epochs,
+                pg_lr=pg_lr,
+                n_train=n_train,
+                seed=cfg.get("seed", 42),
+            ),
+        )
+        logger.info("PGExplainer saved → %s (provenance → %s)", ckpt_path, sidecar)
 
     return algorithm
 
@@ -525,7 +569,10 @@ def main():
     parser.add_argument("--pg-lr",       type=float, default=0.003)
     parser.add_argument(
         "--skip-pg-train", action="store_true",
-        help="Use cached PGExplainer checkpoint if available.",
+        help=("Use the cached PGExplainer checkpoint if available and not "
+              "stale. A checkpoint whose provenance sidecar does not match the "
+              "current H_FULL_SCHEMA_VERSION and best_model.pt is moved aside "
+              "and retrained automatically."),
     )
     parser.add_argument("--gnn-epochs",   type=int,   default=200,  help="GNNExplainer epochs.")
     parser.add_argument("--gnn-lr",       type=float, default=0.01, help="GNNExplainer LR.")
