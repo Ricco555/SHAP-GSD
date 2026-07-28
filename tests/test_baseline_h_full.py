@@ -654,9 +654,12 @@ def test_rejects_train_mode_model(infra, flows):
         model.eval()
 
 
-@requires_artifacts
 def test_wrappers_share_one_implementation():
-    """All four wrappers must call the shared helper, not a local copy."""
+    """All four wrappers must call the shared helper, not a local copy.
+
+    Not gated behind ``@requires_artifacts``: it only reads wrapper source
+    files and ``inspect.signature``, so it must run on a fresh clone too.
+    """
     import inspect
     import src.baselines.adapter as adapter
 
@@ -682,3 +685,565 @@ def test_wrappers_share_one_implementation():
     assert inspect.signature(adapter.build_h_full).parameters.keys() >= {
         "ctx", "model", "gnid_to_local", "edge_index"
     }
+
+
+# ── shared node-baseline helpers (Unit A) ─────────────────────────────────────
+
+#: The four wrappers whose result rows live in node-coalition space and which
+#: must therefore share one packer, one degeneracy classifier and one timing
+#: convention.  ``gnnexplainer_wrapper`` is deliberately absent: its rows are in
+#: feature-group space with a different schema.
+NODE_COALITION_WRAPPERS = [
+    "graphsvx_wrapper", "gnnshap_wrapper",
+    "pgexplainer_wrapper", "edgeshaper_wrapper",
+]
+
+#: Exact CSV field set every node-coalition baseline row must carry.  Frozen
+#: here so extracting the packer cannot silently add, drop or rename a column.
+EXPECTED_ROW_KEYS = {
+    "edge_id", "true_label", "predicted_label", "p_full", "node_scores",
+    "fidelity_plus", "fidelity_minus", "runtime_s", "fallback_reason",
+    "n_local", "n_h_full_nonzero", "n_subgraph_edges",
+    "n_live_edges_into_readout", "n_live_edges_into_src", "surrogate_delta_logit",
+}
+
+
+class _StubCtx:
+    """Minimal stand-in for FlowContext — the packer reads only these four."""
+
+    def __init__(self) -> None:
+        self.global_eid = 7
+        self.true_label = 1
+        self.predicted_label = 1
+        self.p_full = 0.9876543
+
+
+def test_pack_node_baseline_result_row_contract():
+    """The shared packer must emit exactly the historical row schema.
+
+    No artifacts needed: the packer reads four scalars off ctx and merges a
+    diagnostic block, so a stub ctx exercises the whole contract.
+    """
+    from src.baselines.adapter import (
+        empty_diagnostics, pack_node_baseline_result,
+    )
+
+    row = pack_node_baseline_result(
+        _StubCtx(), np.array([0.5, 0.25]), 0.1, 0.2, 1.23456,
+    )
+    assert set(row) == EXPECTED_ROW_KEYS
+    assert row["edge_id"] == 7
+    assert row["node_scores"] == [0.5, 0.25]
+    assert row["p_full"] == 0.987654          # rounded to 6dp
+    assert row["runtime_s"] == 1.235          # rounded to 3dp
+    assert row["fallback_reason"] is None
+    # No diag supplied → neutral block, surrogate_delta_logit NaN (not 0.0, which
+    # would read as "measured and constant").
+    assert np.isnan(row["surrogate_delta_logit"])
+    for k, v in empty_diagnostics().items():
+        assert row[k] == v
+
+    # A supplied diag block overrides the neutral defaults, including a real
+    # surrogate_delta_logit measurement.
+    diag = dict(empty_diagnostics(n_local=4, n_subgraph_edges=9))
+    diag["surrogate_delta_logit"] = 0.25
+    row2 = pack_node_baseline_result(
+        _StubCtx(), np.zeros(3), 0.0, 0.0, 0.0,
+        fallback_reason="empty_subgraph", diag=diag,
+    )
+    assert set(row2) == EXPECTED_ROW_KEYS
+    assert row2["fallback_reason"] == "empty_subgraph"
+    assert row2["n_local"] == 4
+    assert row2["n_subgraph_edges"] == 9
+    assert row2["surrogate_delta_logit"] == 0.25
+
+
+def test_classify_degenerate_attribution():
+    """All-zero, saturated, informative and empty must be told apart."""
+    from src.baselines.adapter import (
+        SATURATION_EPS, classify_degenerate_attribution,
+    )
+
+    assert classify_degenerate_attribution(np.zeros(5)) == "estimator_all_zero"
+    assert classify_degenerate_attribution(
+        np.full(5, SATURATION_EPS / 10.0)
+    ) == "estimator_saturated"
+    # Sign must not matter — the classifier reads magnitudes.
+    assert classify_degenerate_attribution(
+        np.array([0.0, -SATURATION_EPS / 2.0])
+    ) == "estimator_saturated"
+    # Exactly at the threshold is NOT saturated (strict <).
+    assert classify_degenerate_attribution(
+        np.array([SATURATION_EPS])
+    ) is None
+    assert classify_degenerate_attribution(np.array([0.0, 0.3, -1.0])) is None
+    assert classify_degenerate_attribution(np.array([])) is None
+
+
+def test_empty_diagnostics_reports_known_structure_only():
+    """Cheap structural counters are real; h_full-derived ones are unmeasured."""
+    from src.baselines.adapter import empty_diagnostics, surrogate_diagnostics
+
+    d = empty_diagnostics(n_local=6, n_subgraph_edges=11)
+    assert d["n_local"] == 6
+    assert d["n_subgraph_edges"] == 11
+    for k in ("n_h_full_nonzero", "n_live_edges_into_readout",
+              "n_live_edges_into_src"):
+        assert d[k] == 0
+    # Same key set as a real measurement, so pack_node_baseline_result can
+    # merge either one interchangeably.
+    real = surrogate_diagnostics(
+        torch.ones(3, 4), torch.tensor([[0, 1], [1, 2]]), 1, 2
+    )
+    assert set(d) == set(real)
+    # The docstring must state the UNMEASURED semantics — the only thing
+    # stopping a reader from mistaking a fallback row for a dead-row bug.
+    assert "UNMEASURED" in empty_diagnostics.__doc__
+
+
+def test_wrappers_share_the_node_baseline_packer():
+    """No wrapper may keep a private _pack_result copy.
+
+    Source-text only (no artifacts, no vendored explainer libraries), matching
+    ``test_wrappers_share_one_implementation``'s idiom.
+    """
+    import src.baselines.adapter as adapter
+
+    assert callable(adapter.pack_node_baseline_result)
+    for name in NODE_COALITION_WRAPPERS:
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        assert "def _pack_result" not in src_text, (
+            f"{name} still defines its own _pack_result copy"
+        )
+        assert "pack_node_baseline_result(" in src_text, (
+            f"{name} does not call the shared packer"
+        )
+    # gnnexplainer_wrapper is in feature-group space — it must NOT be folded in.
+    gnnexp = REPO_ROOT / "src" / "baselines" / "gnnexplainer_wrapper.py"
+    if gnnexp.exists():
+        assert "pack_node_baseline_result" not in gnnexp.read_text(), (
+            "gnnexplainer_wrapper has a different row schema and must not use "
+            "the node-coalition packer"
+        )
+
+
+def test_wrappers_share_the_degeneracy_classifier():
+    """All four wrappers — GraphSVX included — must classify degenerate rows.
+
+    GraphSVX previously had NO all-zero/saturation check at all, so it
+    under-reported its own degenerate rows relative to the other three.  An
+    end-to-end saturated-phi test would require the vendored GraphSVX library,
+    which this module deliberately does not depend on; the classifier's own
+    unit test plus this source assertion is the coverage that is actually
+    available on a fresh clone.
+    """
+    for name in NODE_COALITION_WRAPPERS:
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        assert "classify_degenerate_attribution(" in src_text, (
+            f"{name} does not use the shared degeneracy classifier"
+        )
+        assert 'fallback_reason = "estimator_all_zero"' not in src_text, (
+            f"{name} still assigns the degeneracy string inline"
+        )
+        assert 'fallback_reason = "estimator_saturated"' not in src_text, (
+            f"{name} still assigns the degeneracy string inline"
+        )
+    # GraphSVX must not let the new check clobber its pre-existing reason.
+    gsvx = (REPO_ROOT / "src" / "baselines" / "graphsvx_wrapper.py").read_text()
+    assert "fallback_reason or classify_degenerate_attribution(" in gsvx, (
+        "GraphSVX must preserve an already-set fallback_reason "
+        "(e.g. empty_phi_or_neighbours)"
+    )
+
+
+def test_wrappers_exclude_diagnostic_time_without_mutating_t0():
+    """Diagnostic time must be accumulated, not folded back into t0.
+
+    ``t0 += ...`` silently redefined what t0 meant partway through each
+    function; the ``diag_s`` accumulator keeps t0 meaning "start" at every exit.
+    """
+    for name in NODE_COALITION_WRAPPERS:
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        assert "t0 +=" not in src_text, (
+            f"{name} still mutates t0 to exclude diagnostic time"
+        )
+        assert "diag_s = 0.0" in src_text, f"{name} has no diag_s accumulator"
+        # Every runtime computation must subtract the accumulator.
+        assert src_text.count("time.time() - t0") == \
+            src_text.count("time.time() - t0 - diag_s"), (
+            f"{name} computes a runtime that does not exclude diag_s"
+        )
+
+
+def test_build_h_full_runs_after_the_early_return_checks():
+    """build_h_full must not run for flows that immediately fall back.
+
+    Pinning this needs no artifacts: the textual order of the isolated-flow
+    guard and the build_h_full call in each wrapper's inference function is the
+    property.
+    """
+    for name in NODE_COALITION_WRAPPERS:
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        # PGExplainer also builds h_full inside train_pgexplainer(), which sits
+        # ABOVE the inference function; scope the check to the inference half.
+        if name == "pgexplainer_wrapper":
+            src_text = src_text[src_text.index("def run_pgexplainer_with_model"):]
+        # Qualified form: the bare "edge_index.size(1) == 0" also occurs in
+        # module-level helpers ABOVE the inference function (e.g. EdgeSHAPer's
+        # _edge_shap_to_node_scores), which would make this assertion vacuous.
+        i_guard = src_text.index("pyg_data.edge_index.size(1) == 0")
+        i_build = src_text.index("build_h_full(ctx")
+        assert i_guard < i_build, (
+            f"{name} builds h_full before the isolated-flow early return, "
+            "wasting a full message-passing pass on a discarded result"
+        )
+
+    # GNNShap's SECOND early return (too few coalition players) must also
+    # precede the build.
+    gs = (REPO_ROOT / "src" / "baselines" / "gnnshap_wrapper.py").read_text()
+    assert gs.index("N_local < 3") < gs.index("build_h_full(ctx"), (
+        "gnnshap_wrapper builds h_full before the insufficient_players return"
+    )
+
+
+# ── runtime exercise of the early-return paths (no artifacts, no vendored libs) ─
+
+class _StubEdgeMLPModel(torch.nn.Module):
+    """Only ``edge_mlp`` is touched before any wrapper's early return."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edge_mlp = torch.nn.Linear(4, 2)
+
+
+class _StubBackground:
+    background_node_state = {1: np.zeros(15, dtype=np.float32)}
+
+
+class _StubFlowCtx(_StubCtx):
+    """Stub ctx carrying the few fields the early-return paths read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.input_node_ids = np.arange(3)
+        self.base_node_feats = np.zeros((3, 15), dtype=np.float32)
+        self.x_e_t = torch.zeros(1, 4)
+        self.blocks = []
+        self.target_src_nid = 1
+        self.target_dst_nid = 2
+
+
+def _stub_adapter(monkeypatch, n_edges: int) -> None:
+    """Point the wrappers at a 2-node local subgraph with ``n_edges`` edges.
+
+    ``build_h_full`` is replaced by a landmine: reaching it on an early-return
+    path is exactly the waste this reordering removes.
+    """
+    from torch_geometric.data import Data
+    import src.baselines.adapter as adapter
+
+    edge_index = torch.zeros((2, n_edges), dtype=torch.long)
+    data = Data(x=torch.zeros(2, 15), edge_index=edge_index)
+    monkeypatch.setattr(
+        adapter, "dgl_subgraph_to_pyg", lambda *a, **k: (data, {1: 0, 2: 1})
+    )
+    monkeypatch.setattr(
+        adapter, "fidelity_from_node_mask", lambda *a, **k: (0.1, 0.2)
+    )
+
+    def _landmine(*a, **k):
+        raise AssertionError(
+            "build_h_full ran on an early-return path — a full multi-layer "
+            "message-passing pass whose result is immediately discarded"
+        )
+
+    monkeypatch.setattr(adapter, "build_h_full", _landmine)
+
+
+@pytest.mark.parametrize("wrapper_name", NODE_COALITION_WRAPPERS)
+def test_empty_subgraph_path_reports_real_n_local(monkeypatch, wrapper_name):
+    """Every wrapper's isolated-flow row: full schema, real n_local, no h_full.
+
+    Guards the diagnostic-accuracy half of the reordering: skipping
+    ``build_h_full`` must not silently turn ``n_local`` into 0.
+    """
+    _stub_adapter(monkeypatch, n_edges=0)
+    import importlib
+
+    mod = importlib.import_module(f"src.baselines.{wrapper_name}")
+    fn_name = f"run_{wrapper_name.replace('_wrapper', '')}_with_model"
+    run = getattr(mod, fn_name)
+
+    args = [_StubFlowCtx(), _StubEdgeMLPModel().eval()]
+    if wrapper_name == "pgexplainer_wrapper":
+        args.append(None)                     # trained algorithm — unused here
+    args += [{}, _StubBackground(), None]
+
+    row = run(*args)
+    assert set(row) == EXPECTED_ROW_KEYS
+    assert row["fallback_reason"] == "empty_subgraph"
+    assert row["n_local"] == 2, "real len(gnid_to_local) must survive"
+    assert row["n_subgraph_edges"] == 0
+    assert row["n_h_full_nonzero"] == 0        # UNMEASURED, per empty_diagnostics
+    assert row["runtime_s"] >= 0.0
+
+
+def test_insufficient_players_path_keeps_the_real_edge_count(monkeypatch):
+    """GNNShap's second early return also precedes build_h_full.
+
+    Its subgraph is non-empty (it passed the first guard), so
+    ``n_subgraph_edges`` is a real, free measurement and must not be zeroed.
+    """
+    _stub_adapter(monkeypatch, n_edges=2)
+    from src.baselines.gnnshap_wrapper import run_gnnshap_with_model
+
+    row = run_gnnshap_with_model(
+        _StubFlowCtx(), _StubEdgeMLPModel().eval(), {}, _StubBackground(), None
+    )
+    assert row["fallback_reason"] == "insufficient_players"
+    assert row["n_local"] == 2
+    assert row["n_subgraph_edges"] == 2
+    assert row["n_h_full_nonzero"] == 0
+
+
+# ── Unit B: surrogate_delta is a LOGIT-space measurement ──────────────────────
+
+#: Small synthetic surrogate dimensions for the wrapper output-space tests:
+#: hidden size, edge-feature width, class count.  The wrappers' edge MLP input
+#: is ``2 * _H + _DE`` (h_src ‖ h_dst ‖ x_e).
+_H, _DE, _C = 3, 4, 2
+
+
+def _toy_edge_mlp() -> torch.nn.Module:
+    """Deterministic edge MLP with a large output scale.
+
+    The scale matters: it pushes the readout into the regime where float32
+    softmax saturates, which is exactly the condition under which a
+    probability-space delta collapses to 0.0 while the logit-space delta does
+    not.  Seeded so the assertions below are reproducible.
+    """
+    torch.manual_seed(1234)
+    mlp = torch.nn.Sequential(torch.nn.Linear(2 * _H + _DE, _C))
+    with torch.no_grad():
+        mlp[0].weight.mul_(25.0)
+        mlp[0].bias.zero_()
+    return mlp.eval()
+
+
+def _toy_surrogate_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(h, edge_index, x_e_t) for a 3-node, 2-edge synthetic local subgraph."""
+    torch.manual_seed(99)
+    h = torch.randn(3, _H)
+    edge_index = torch.tensor([[1, 2], [0, 0]], dtype=torch.long)
+    x_e_t = torch.randn(1, _DE)
+    return h, edge_index, x_e_t
+
+
+def test_surrogate_delta_is_computed_in_logit_space():
+    """The function must report max|Δ| over RAW class scores, unrounded.
+
+    Direct unit test with a synthetic ``predict``: no artifacts and no vendored
+    explainer library, so it runs on a fresh clone.  The full-coalition and
+    empty-coalition returns are chosen so the answer is exact and so that the
+    per-class maximum — not the first class, and not the true class — is what
+    comes back.
+    """
+    from src.baselines.adapter import surrogate_delta
+
+    def predict(ei: torch.Tensor) -> torch.Tensor:
+        # Two classes; the SECOND moves further, so a max (not [0]) is required.
+        return (torch.tensor([-4.0, 11.5]) if ei.size(1) > 0
+                else torch.tensor([-1.5, 2.25]))
+
+    edge_index = torch.tensor([[1, 2], [0, 0]], dtype=torch.long)
+    delta = surrogate_delta(predict, edge_index)
+    assert delta == pytest.approx(9.25, abs=1e-6)   # |11.5 - 2.25|, not |−4 −(−1.5)|
+
+    # A provably flat surrogate is exactly 0.0 — the one meaning the docstring
+    # reserves for that value.
+    assert surrogate_delta(lambda ei: torch.tensor([0.5, -0.5]), edge_index) == 0.0
+
+
+def test_surrogate_delta_returns_nan_not_zero_on_failure():
+    """A failed measurement must never be mistakable for a flat surrogate.
+
+    Pins the docstring correction: the fallback is ``float("nan")``, not the
+    ``0.0`` the docstring previously claimed.  0.0 already means "measured, and
+    provably flat", so conflating the two would turn every measurement error
+    into a false flatness verdict.
+    """
+    from src.baselines.adapter import surrogate_delta
+
+    def exploding(ei: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError("synthetic surrogate failure")
+
+    out = surrogate_delta(exploding, torch.tensor([[1], [0]], dtype=torch.long))
+    assert np.isnan(out)
+    assert out != 0.0
+    # The docstring must say so, since NaN-vs-0.0 is the whole contract.
+    assert 'float("nan")' in surrogate_delta.__doc__
+    assert "or 0.0 if it cannot" not in surrogate_delta.__doc__, (
+        "the docstring still advertises the 0.0 fallback the code never had"
+    )
+
+
+def test_surrogate_delta_predict_parameter_is_typed():
+    """``predict`` carries a Callable annotation, not a bare untyped name."""
+    import inspect
+    from src.baselines.adapter import surrogate_delta
+
+    ann = inspect.signature(surrogate_delta).parameters["predict"].annotation
+    assert ann is not inspect.Parameter.empty, "predict is still untyped"
+    # adapter.py uses `from __future__ import annotations`, so this is a string.
+    assert "Callable" in str(ann)
+
+
+def test_graphsvx_forward_is_log_softmax_of_forward_logits():
+    """GraphSVX's library-facing forward must stay in LOG-probability space.
+
+    Relational, deliberately: asserting ``forward == log_softmax(forward_logits)``
+    proves both halves at once — that ``forward_logits`` really is the
+    pre-normalisation reading, and that ``forward`` (which the vendored
+    GraphSVX consumes as ``self.model(x, edge_index).exp()[node_index]``, see
+    the wrapper's own class docstring) was not accidentally moved to raw logits.
+    """
+    from src.baselines.graphsvx_wrapper import GraphSVXNodeWrapper
+
+    h, edge_index, x_e_t = _toy_surrogate_inputs()
+    n = h.size(0)
+    w = GraphSVXNodeWrapper(_toy_edge_mlp(), x_e_t, 0, 1, n).eval()
+
+    with torch.no_grad():
+        logits = w.forward_logits(h, edge_index)
+        out = w(h, edge_index)
+    assert logits.shape == (1, _C)
+    assert out.shape == (n, _C)
+    assert torch.allclose(
+        torch.log_softmax(logits, dim=1).expand(n, -1), out, atol=1e-6
+    )
+    # What GraphSVX actually reads: .exp() of a row must be a distribution.
+    assert torch.allclose(out.exp().sum(dim=1), torch.ones(n), atol=1e-5)
+    # And the logits must NOT already be a distribution — i.e. this is a real
+    # change of space, not a no-op rename.
+    assert not torch.allclose(logits.exp().sum(), torch.tensor(1.0), atol=1e-3)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_pgexplainer_forward_is_softmax_of_forward_logits(weighted):
+    """PGExplainer's library-facing forward must stay in PROBABILITY space.
+
+    The wrapper is registered with PyG under ``ModelReturnType.probs`` /
+    ``return_type="probs"`` (both call sites in pgexplainer_wrapper.py), so
+    PGExplainer's own mask loss reads these rows as a probability vector.
+    Parametrised over ``edge_weight`` so the weighted-aggregation branch — the
+    one PGExplainer actually exercises — is covered too.
+    """
+    from src.baselines.pgexplainer_wrapper import PGECompatibleWrapper
+
+    h, edge_index, x_e_t = _toy_surrogate_inputs()
+    n = h.size(0)
+    w = PGECompatibleWrapper(h, _toy_edge_mlp(), x_e_t, 0, 1, n).eval()
+    ew = torch.ones(edge_index.size(1)) * 0.7 if weighted else None
+
+    with torch.no_grad():
+        logits = w.forward_logits(h, edge_index, ew)
+        out = w(h, edge_index, ew)
+    assert logits.shape == (1, _C)
+    assert torch.allclose(
+        torch.softmax(logits, dim=1).expand(n, -1), out, atol=1e-6
+    )
+    assert torch.allclose(out.sum(dim=1), torch.ones(n), atol=1e-5)
+    assert bool(((out >= 0.0) & (out <= 1.0)).all())
+    assert not torch.allclose(logits.sum(), torch.tensor(1.0), atol=1e-3)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_gnnshap_forward_fn_default_stays_probabilities(weighted):
+    """GNNShap's library-facing forward_fn must stay in PROBABILITY space.
+
+    ``return_logits`` lives on the FACTORY, never on the returned closure:
+    GNNShap invokes ``forward_fn(model, node_features, edge_index, node_idx)``
+    positionally, so a flag on the closure would be a positional-collision
+    hazard.  Asserting the two closures are softmax-related proves the default
+    one (handed to the WLS solver) is untouched.
+    """
+    from src.baselines.gnnshap_wrapper import _make_forward_fn
+
+    h, edge_index, x_e_t = _toy_surrogate_inputs()
+    mlp = _toy_edge_mlp()
+    probs_fn = _make_forward_fn(mlp, x_e_t, 0, 1)
+    logit_fn = _make_forward_fn(mlp, x_e_t, 0, 1, return_logits=True)
+    ew = torch.ones(edge_index.size(1)) * 0.7 if weighted else None
+
+    with torch.no_grad():
+        p = probs_fn(None, h, edge_index, 0, ew)
+        z = logit_fn(None, h, edge_index, 0, ew)
+    assert p.shape == (_C,) and z.shape == (_C,)
+    assert torch.allclose(torch.softmax(z.unsqueeze(0), dim=1).squeeze(0), p,
+                          atol=1e-6)
+    assert torch.allclose(p.sum(), torch.tensor(1.0), atol=1e-5)
+    assert not torch.allclose(z.sum(), torch.tensor(1.0), atol=1e-3)
+
+
+def test_all_wrappers_emit_the_logit_named_column_only():
+    """Every wrapper writes ``surrogate_delta_logit`` and nobody writes the old key.
+
+    Source-text (this module's idiom for cross-wrapper contracts — no artifacts,
+    no vendored libraries).  The rename is what stops a historical mixed-space
+    CSV from being silently reinterpreted as the new uniform column, so a single
+    wrapper left behind would defeat it.
+    """
+    for name in NODE_COALITION_WRAPPERS:
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        assert 'diag["surrogate_delta_logit"]' in src_text, (
+            f"{name} does not record the logit-space column"
+        )
+        assert 'diag["surrogate_delta"]' not in src_text, (
+            f"{name} still records the old ambiguous-space column"
+        )
+
+    # Three of the four must take the measurement off a logits-only entry point.
+    for name, needle in (
+        ("graphsvx_wrapper",    "wrapper.forward_logits("),
+        ("pgexplainer_wrapper", "wrapper.forward_logits("),
+        ("gnnshap_wrapper",     "return_logits=True"),
+    ):
+        src_text = (REPO_ROOT / "src" / "baselines" / f"{name}.py").read_text()
+        assert needle in src_text, (
+            f"{name} does not measure surrogate_delta on raw logits"
+        )
+    # EdgeSHAPer is the deliberate exception: its own API mandates raw logits
+    # from the model, so forward IS the logit entry point.
+    es = (REPO_ROOT / "src" / "baselines" / "edgeshaper_wrapper.py").read_text()
+    assert "def forward_logits" not in es, (
+        "EdgeSHAPModelWrapper.forward already returns raw logits; a "
+        "forward_logits added 'for symmetry' would be dead code"
+    )
+
+
+def test_no_repo_code_expects_a_zero_surrogate_delta_fallback():
+    """Nothing anywhere coerces the column's NaN to 0.0 or tests it for equality.
+
+    The old docstring advertised a ``0.0`` failure fallback the code never
+    implemented.  Correcting the prose is only safe if no consumer was written
+    against the wrong contract — this walks the whole source tree rather than
+    trusting that.
+    """
+    hits: list[str] = []
+    for sub in ("src", "scripts", "explore", "tests"):
+        root = REPO_ROOT / sub
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if path.name == Path(__file__).name:
+                continue
+            for i, line in enumerate(path.read_text().splitlines(), 1):
+                if "surrogate_delta" not in line:
+                    continue
+                if any(tok in line for tok in
+                       ("fillna", "== 0.0", "!= 0.0", "or 0.0", "nan_to_num")):
+                    hits.append(f"{path.relative_to(REPO_ROOT)}:{i}: {line.strip()}")
+    assert not hits, (
+        "code treats a surrogate_delta failure as 0.0, conflating it with a "
+        "provably flat surrogate:\n" + "\n".join(hits)
+    )

@@ -95,12 +95,30 @@ class PGECompatibleWrapper(nn.Module):
         self._dst_local = dst_local_idx
         self._num_nodes = num_nodes
 
-    def forward(
+    def forward_logits(
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_weight: torch.Tensor = None,
     ) -> torch.Tensor:
+        """The surrogate's RAW, pre-softmax edge logits — shape (1, num_classes).
+
+        This is the whole of ``forward``'s computation minus its final
+        ``softmax`` + broadcast, including the DummyMP hook pass-through and the
+        edge-weighted residual aggregation.  ``forward`` is defined in terms of
+        it, so the two can never drift: the logit-space measurement taken by
+        ``adapter.surrogate_delta`` is by construction the same surrogate
+        PGExplainer itself is explaining, read one step earlier.
+
+        Args:
+            x:           (N, hidden) node embeddings, or None/mismatched to fall
+                         back on the registered ``_h_full`` buffer.
+            edge_index:  (2, E) subgraph edges.
+            edge_weight: (E,) coalition/mask weights, or None for no aggregation.
+
+        Returns:
+            (1, num_classes) unnormalised class logits for the target edge.
+        """
         h = x if (x is not None and x.shape == self._h_full.shape) else self._h_full
 
         # Pass h through the dummy MP so PyG's get_embeddings hook captures it.
@@ -117,7 +135,18 @@ class PGECompatibleWrapper(nn.Module):
         h_src = h[self._src_local].unsqueeze(0)            # (1, hidden)
         h_dst = h[self._dst_local].unsqueeze(0)            # (1, hidden)
         combined = torch.cat([h_src, h_dst, self._x_e_t], dim=1)
-        logit = self.edge_mlp(combined)                    # (1, num_classes)
+        return self.edge_mlp(combined)                     # (1, num_classes)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_weight: torch.Tensor = None,
+    ) -> torch.Tensor:
+        # PROBABILITIES, unchanged: this wrapper is registered with PyG under
+        # ModelReturnType.probs / return_type="probs" (both call sites below),
+        # so PGExplainer's own loss reads these rows as a probability vector.
+        logit = self.forward_logits(x, edge_index, edge_weight)  # (1, num_classes)
         proba = torch.softmax(logit, dim=1)
         return proba.expand(self._num_nodes, -1).contiguous()
 
@@ -326,25 +355,47 @@ def run_pgexplainer_with_model(
     from torch_geometric.explain import Explainer
     from src.baselines.adapter import (
         build_h_full,
+        classify_degenerate_attribution,
         dgl_subgraph_to_pyg,
+        empty_diagnostics,
         fidelity_from_node_mask,
+        pack_node_baseline_result,
         surrogate_diagnostics,
         surrogate_delta,
-        SATURATION_EPS,
     )
 
     t0 = time.time()
+    # Accumulated wall-clock spent on instrumentation.  Subtracted from
+    # runtime_s at every exit so the reported runtime keeps its original
+    # meaning; t0 itself is never mutated, so it always means "start".
+    diag_s = 0.0
     edge_mlp_cpu = _move_to_cpu(model.edge_mlp)
 
     pyg_data, gnid_to_local = dgl_subgraph_to_pyg(
         ctx.blocks, None, ctx.base_node_feats
     )
-    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     N_local = len(gnid_to_local)
 
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    # Isolated flow: no neighbours → zero attribution, fallback fidelity.
+    # Checked BEFORE build_h_full, whose multi-layer message-passing result
+    # this branch would immediately discard.
+    if pyg_data.edge_index.size(1) == 0:
+        node_scores_input = np.zeros(len(ctx.input_node_ids))
+        fid_plus, fid_minus = fidelity_from_node_mask(
+            node_scores_input, ctx, bg_node, model, top_k=top_k
+        )
+        return pack_node_baseline_result(
+            ctx, node_scores_input, fid_plus, fid_minus,
+            time.time() - t0 - diag_s,
+            fallback_reason="empty_subgraph",
+            diag=empty_diagnostics(n_local=N_local, n_subgraph_edges=0),
+        )
+
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     # Diagnostics (instrumentation only).  Timed separately and excluded from
     # runtime_s so the reported runtime keeps its original meaning.
@@ -352,17 +403,7 @@ def run_pgexplainer_with_model(
     diag = surrogate_diagnostics(
         h_full, pyg_data.edge_index, src_local, dst_local
     )
-    t0 += time.time() - _t_diag
-
-    # Isolated flow: no neighbours → zero attribution, fallback fidelity
-    if pyg_data.edge_index.size(1) == 0:
-        node_scores_input = np.zeros(len(ctx.input_node_ids))
-        fid_plus, fid_minus = fidelity_from_node_mask(
-            node_scores_input, ctx, bg_node, model, top_k=top_k
-        )
-        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0,
-                            fallback_reason="empty_subgraph", diag=diag)
+    diag_s += time.time() - _t_diag
 
     wrapper = PGECompatibleWrapper(
         h_full, edge_mlp_cpu,
@@ -371,13 +412,17 @@ def run_pgexplainer_with_model(
     ).eval()
 
     _t_diag = time.time()
-    diag["surrogate_delta"] = surrogate_delta(
-        lambda ei: wrapper(
+    # forward_logits, not forward: forward returns softmax probabilities because
+    # PyG is told return_type="probs", and a delta measured there is neither
+    # comparable with the other baselines nor a sound flatness verdict (see
+    # adapter.surrogate_delta).  The full/empty coalition asymmetry is unchanged.
+    diag["surrogate_delta_logit"] = surrogate_delta(
+        lambda ei: wrapper.forward_logits(
             h_full, ei, edge_weight=torch.ones(ei.size(1))
-        )[0] if ei.size(1) > 0 else wrapper(h_full, ei)[0],
+        )[0] if ei.size(1) > 0 else wrapper.forward_logits(h_full, ei)[0],
         pyg_data.edge_index,
     )
-    t0 += time.time() - _t_diag
+    diag_s += time.time() - _t_diag
 
     explainer = Explainer(
         model=wrapper,
@@ -408,58 +453,24 @@ def run_pgexplainer_with_model(
     # No fallback branch exists on PGExplainer's inference path; a degenerate
     # row here means the learned edge-mask MLP itself returned an all-zero or
     # numerically saturated (< SATURATION_EPS) mask.
+    # ``or``, not a plain assignment: any reason set earlier on this path must
+    # survive the degeneracy check that runs after it.
     fallback_reason: str | None = None
-    if node_scores_input.size:
-        peak = float(np.max(np.abs(node_scores_input)))
-        if peak == 0.0:
-            fallback_reason = "estimator_all_zero"
-        elif peak < SATURATION_EPS:
-            fallback_reason = "estimator_saturated"
+    fallback_reason = fallback_reason or classify_degenerate_attribution(
+        node_scores_input
+    )
 
     # Fidelity uses the actual DGL model and original ctx (GPU tensors preserved)
     fid_plus, fid_minus = fidelity_from_node_mask(
         node_scores_input, ctx, bg_node, model, top_k=top_k
     )
 
-    runtime_s = time.time() - t0
+    runtime_s = time.time() - t0 - diag_s
     logger.debug(
         f"PGExplainer EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
-                        fallback_reason=fallback_reason, diag=diag)
-
-
-def _pack_result(
-    ctx: "FlowContext",
-    node_scores: np.ndarray,
-    fid_plus: float,
-    fid_minus: float,
-    runtime_s: float,
-    fallback_reason: str | None = None,
-    diag: dict | None = None,
-) -> dict:
-    """Pack one flow's result.
-
-    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
-    (new CSV columns); they never affect the attribution or fidelity numbers.
-    """
-    from src.baselines.adapter import empty_diagnostics
-
-    d = dict(empty_diagnostics())
-    d["surrogate_delta"] = float("nan")
-    if diag:
-        d.update(diag)
-
-    return {
-        "edge_id":         ctx.global_eid,
-        "true_label":      ctx.true_label,
-        "predicted_label": ctx.predicted_label,
-        "p_full":          round(ctx.p_full, 6),
-        "node_scores":     node_scores.tolist(),
-        "fidelity_plus":   round(fid_plus, 6),
-        "fidelity_minus":  round(fid_minus, 6),
-        "runtime_s":       round(runtime_s, 3),
-        "fallback_reason": fallback_reason,
-        **d,
-    }
+    return pack_node_baseline_result(
+        ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+        fallback_reason=fallback_reason, diag=diag,
+    )

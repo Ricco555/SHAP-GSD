@@ -169,26 +169,47 @@ def run_edgeshaper_with_model(
     """
     from src.baselines.adapter import (
         build_h_full,
+        classify_degenerate_attribution,
         dgl_subgraph_to_pyg,
+        empty_diagnostics,
         fidelity_from_node_mask,
+        pack_node_baseline_result,
         surrogate_diagnostics,
         surrogate_delta,
-        SATURATION_EPS,
     )
 
     t0 = time.time()
+    # Accumulated wall-clock spent on instrumentation.  Subtracted from
+    # runtime_s at every exit so the reported runtime keeps its original
+    # meaning; t0 itself is never mutated, so it always means "start".
+    diag_s = 0.0
     edge_mlp_cpu = _move_to_cpu(model.edge_mlp)
 
     pyg_data, gnid_to_local = dgl_subgraph_to_pyg(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    # Isolated flow fallback — checked BEFORE build_h_full, whose multi-layer
+    # message-passing result this branch would immediately discard.
+    if pyg_data.edge_index.size(1) == 0:
+        node_scores_input = np.zeros(len(ctx.input_node_ids))
+        fid_plus, fid_minus = fidelity_from_node_mask(
+            node_scores_input, ctx, bg_node, model, top_k=top_k
+        )
+        return pack_node_baseline_result(
+            ctx, node_scores_input, fid_plus, fid_minus,
+            time.time() - t0 - diag_s,
+            fallback_reason="empty_subgraph",
+            diag=empty_diagnostics(n_local=N_local, n_subgraph_edges=0),
+        )
+
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     # Diagnostics (instrumentation only).  Timed separately and excluded from
     # runtime_s so the reported runtime keeps its original meaning.
@@ -196,27 +217,22 @@ def run_edgeshaper_with_model(
     diag = surrogate_diagnostics(
         h_full, pyg_data.edge_index, src_local, dst_local
     )
-    t0 += time.time() - _t_diag
-
-    # Isolated flow fallback
-    if pyg_data.edge_index.size(1) == 0:
-        node_scores_input = np.zeros(len(ctx.input_node_ids))
-        fid_plus, fid_minus = fidelity_from_node_mask(
-            node_scores_input, ctx, bg_node, model, top_k=top_k
-        )
-        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0,
-                            fallback_reason="empty_subgraph", diag=diag)
+    diag_s += time.time() - _t_diag
 
     wrapper = EdgeSHAPModelWrapper(
         edge_mlp_cpu, x_e_t_cpu, src_local, dst_local
     ).eval()
 
     _t_diag = time.time()
-    diag["surrogate_delta"] = surrogate_delta(
+    # ``wrapper(...)``, with no ``forward_logits`` hop, is correct here and is
+    # NOT an inconsistency with the other three wrappers: EdgeSHAPer's own API
+    # requires its model to return RAW LOGITS (it applies ``F.softmax`` itself),
+    # so EdgeSHAPModelWrapper.forward is already the logit-space entry point
+    # adapter.surrogate_delta asks for.  There is nothing to unwrap.
+    diag["surrogate_delta_logit"] = surrogate_delta(
         lambda ei: wrapper(h_full, ei)[0], pyg_data.edge_index
     )
-    t0 += time.time() - _t_diag
+    diag_s += time.time() - _t_diag
 
     # Import EdgeSHAPer (just a single source file — add its dir to sys.path)
     if EDGESHAPER_SRC not in sys.path:
@@ -254,58 +270,24 @@ def run_edgeshaper_with_model(
     # No fallback branch exists on EdgeSHAPer's inference path; a degenerate row
     # here means the Monte-Carlo marginal contributions themselves came out
     # all-zero or numerically saturated (< SATURATION_EPS).
+    # ``or``, not a plain assignment: any reason set earlier on this path must
+    # survive the degeneracy check that runs after it.
     fallback_reason: str | None = None
-    if node_scores_input.size:
-        peak = float(np.max(np.abs(node_scores_input)))
-        if peak == 0.0:
-            fallback_reason = "estimator_all_zero"
-        elif peak < SATURATION_EPS:
-            fallback_reason = "estimator_saturated"
+    fallback_reason = fallback_reason or classify_degenerate_attribution(
+        node_scores_input
+    )
 
     # Fidelity computed against actual DGL model
     fid_plus, fid_minus = fidelity_from_node_mask(
         node_scores_input, ctx, bg_node, model, top_k=top_k
     )
 
-    runtime_s = time.time() - t0
+    runtime_s = time.time() - t0 - diag_s
     logger.debug(
         f"EdgeSHAPer EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
-                        fallback_reason=fallback_reason, diag=diag)
-
-
-def _pack_result(
-    ctx: "FlowContext",
-    node_scores: np.ndarray,
-    fid_plus: float,
-    fid_minus: float,
-    runtime_s: float,
-    fallback_reason: str | None = None,
-    diag: dict | None = None,
-) -> dict:
-    """Pack one flow's result.
-
-    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
-    (new CSV columns); they never affect the attribution or fidelity numbers.
-    """
-    from src.baselines.adapter import empty_diagnostics
-
-    d = dict(empty_diagnostics())
-    d["surrogate_delta"] = float("nan")
-    if diag:
-        d.update(diag)
-
-    return {
-        "edge_id":         ctx.global_eid,
-        "true_label":      ctx.true_label,
-        "predicted_label": ctx.predicted_label,
-        "p_full":          round(ctx.p_full, 6),
-        "node_scores":     node_scores.tolist(),
-        "fidelity_plus":   round(fid_plus, 6),
-        "fidelity_minus":  round(fid_minus, 6),
-        "runtime_s":       round(runtime_s, 3),
-        "fallback_reason": fallback_reason,
-        **d,
-    }
+    return pack_node_baseline_result(
+        ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+        fallback_reason=fallback_reason, diag=diag,
+    )

@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import torch
@@ -93,13 +93,32 @@ class GNNShapWrapper(nn.Module):
 # ── Forward function factory ───────────────────────────────────────────────────
 
 def _make_forward_fn(edge_mlp_cpu: nn.Module, x_e_t_cpu: torch.Tensor,
-                     src_relabeled: int, dst_relabeled: int):
+                     src_relabeled: int, dst_relabeled: int,
+                     return_logits: bool = False) -> Callable[..., torch.Tensor]:
     """Return a GNNShap-compatible forward_fn (no-batch mode).
 
     GNNShap calls:
         y_hat = forward_fn(model, node_features, masked_edge_index, node_idx)
     where node_features = data.x[subset] (re-indexed subset of h_full).
     Returns shape (num_classes,) for no-batch mode.
+
+    Args:
+        edge_mlp_cpu:  CPU deep-copy of the model's edge MLP.
+        x_e_t_cpu:     (1, d_e) target edge feature vector on CPU.
+        src_relabeled: readout position of the target edge's source node after
+                       GNNShap's k-hop pruning/relabeling.
+        dst_relabeled: readout position of the target edge's destination node.
+        return_logits: if True the closure returns the RAW, pre-softmax class
+                       logits instead of softmax probabilities.  The flag lives
+                       on the FACTORY, never on the returned closure: GNNShap
+                       calls ``forward_fn`` positionally, so an extra parameter
+                       on the closure itself would be a collision hazard.  Build
+                       a second closure for logit-space measurement instead —
+                       both share this one body, so they cannot drift.
+
+    Returns:
+        A ``forward_fn(model, node_features, edge_index, node_idx, edge_weight)``
+        closure returning a 1-D ``(num_classes,)`` tensor.
     """
     def forward_fn(
         model,
@@ -124,6 +143,10 @@ def _make_forward_fn(edge_mlp_cpu: nn.Module, x_e_t_cpu: torch.Tensor,
         h_dst = h[dst_relabeled].unsqueeze(0)   # (1, hidden)
         combined = torch.cat([h_src, h_dst, x_e_t_cpu], dim=1)
         logit = edge_mlp_cpu(combined)           # (1, num_classes)
+        if return_logits:
+            return logit.squeeze(0)                    # (num_classes,) raw
+        # PROBABILITIES by default, unchanged: this is what GNNShap's
+        # WLS coalition solver is handed as its value function.
         return torch.softmax(logit, dim=1).squeeze(0)   # (num_classes,)
 
     return forward_fn
@@ -229,26 +252,64 @@ def run_gnnshap_with_model(
     from torch_geometric.data import Data
     from src.baselines.adapter import (
         build_h_full,
+        classify_degenerate_attribution,
         dgl_subgraph_to_pyg,
+        empty_diagnostics,
         fidelity_from_node_mask,
+        pack_node_baseline_result,
         surrogate_diagnostics,
         surrogate_delta,
-        SATURATION_EPS,
     )
 
     t0 = time.time()
+    # Accumulated wall-clock spent on instrumentation.  Subtracted from
+    # runtime_s at every exit so the reported runtime keeps its original
+    # meaning; t0 itself is never mutated, so it always means "start".
+    # _zero_fallback below READS this name from the enclosing scope at call
+    # time (it is not a default argument), so it always sees the current value.
+    diag_s = 0.0
     edge_mlp_cpu = _move_to_cpu(model.edge_mlp)
 
     pyg_data, gnid_to_local = dgl_subgraph_to_pyg(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    def _zero_fallback(reason: str, diag_block: dict):
+        scores = np.zeros(len(ctx.input_node_ids))
+        fp, fm = fidelity_from_node_mask(scores, ctx, bg_node, model, top_k=top_k)
+        return pack_node_baseline_result(
+            ctx, scores, fp, fm, time.time() - t0 - diag_s,
+            fallback_reason=reason, diag=diag_block,
+        )
+
+    # Isolated flow or too few players for coalition sampling.  Both checked
+    # BEFORE build_h_full, whose multi-layer message-passing result these
+    # branches would immediately discard.
+    if pyg_data.edge_index.size(1) == 0:
+        return _zero_fallback(
+            "empty_subgraph",
+            empty_diagnostics(n_local=N_local, n_subgraph_edges=0),
+        )
+    if N_local < 3:
+        logger.debug(
+            f"GNNShap EID={ctx.global_eid}: N_local={N_local} < 3, "
+            "insufficient players for coalition sampling — zero fallback"
+        )
+        return _zero_fallback(
+            "insufficient_players",
+            empty_diagnostics(
+                n_local=N_local,
+                n_subgraph_edges=int(pyg_data.edge_index.size(1)),
+            ),
+        )
+
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     # Diagnostics (instrumentation only).  Timed separately and excluded from
     # runtime_s so the reported runtime keeps its original meaning.
@@ -256,23 +317,7 @@ def run_gnnshap_with_model(
     diag = surrogate_diagnostics(
         h_full, pyg_data.edge_index, src_local, dst_local
     )
-    t0 += time.time() - _t_diag
-
-    def _zero_fallback(reason: str):
-        scores = np.zeros(len(ctx.input_node_ids))
-        fp, fm = fidelity_from_node_mask(scores, ctx, bg_node, model, top_k=top_k)
-        return _pack_result(ctx, scores, fp, fm, time.time() - t0,
-                            fallback_reason=reason, diag=diag)
-
-    # Isolated flow or too few players for coalition sampling
-    if pyg_data.edge_index.size(1) == 0:
-        return _zero_fallback("empty_subgraph")
-    if N_local < 3:
-        logger.debug(
-            f"GNNShap EID={ctx.global_eid}: N_local={N_local} < 3, "
-            "insufficient players for coalition sampling — zero fallback"
-        )
-        return _zero_fallback("insufficient_players")
+    diag_s += time.time() - _t_diag
 
     # Pre-compute relabeled positions for forward_fn
     src_relabeled, dst_relabeled = _compute_relabeled_positions(
@@ -291,18 +336,30 @@ def run_gnnshap_with_model(
     # the pruned, relabeled k-hop comp graph around src_local, with
     # node_features = h_full[subset] and readout index = src_relabeled.
     # Measuring it on the full unrelabeled subgraph would overstate the
-    # surrogate's sensitivity to GNNShap's actual player set.
+    # surrogate's sensitivity to GNNShap's actual player set.  Only the output
+    # SPACE changes below — the scoping (_subset / _sub_ei / src_relabeled) is
+    # untouched.
     _t_diag = time.time()
+    # A second closure over the SAME body, differing only in output space: the
+    # library-facing forward_fn above stays softmax-probability (that is what
+    # GNNShap's WLS solver consumes), while the diagnostic is measured on raw
+    # logits, where the flatness predicate is actually sound (see
+    # adapter.surrogate_delta).  Built inside the diagnostic timing window
+    # because nothing but the diagnostic uses it.
+    forward_fn_logits = _make_forward_fn(
+        edge_mlp_cpu, x_e_t_cpu, src_relabeled, dst_relabeled,
+        return_logits=True,
+    )
     from torch_geometric.utils import k_hop_subgraph as _khs
     _subset, _sub_ei, _, _ = _khs(
         node_idx=src_local, num_hops=nhops, edge_index=pyg_data.edge_index,
         relabel_nodes=True, num_nodes=N_local,
     )
     _h_sub = h_full[_subset]
-    diag["surrogate_delta"] = surrogate_delta(
-        lambda ei: forward_fn(wrapper, _h_sub, ei, src_relabeled), _sub_ei
+    diag["surrogate_delta_logit"] = surrogate_delta(
+        lambda ei: forward_fn_logits(wrapper, _h_sub, ei, src_relabeled), _sub_ei
     )
-    t0 += time.time() - _t_diag
+    diag_s += time.time() - _t_diag
 
     # Build PyG Data object for GNNShap
     data = Data(
@@ -350,7 +407,9 @@ def run_gnnshap_with_model(
         sys.path = _orig_path
 
     if explanation is None:
-        return _zero_fallback(fallback_reason or "explainer_returned_none")
+        return _zero_fallback(
+            fallback_reason or "explainer_returned_none", diag
+        )
 
     # GNNShapExplanation stores shap_values (np.array) and sub_edge_index (already numpy)
     shap_vals = np.array(explanation.shap_values)
@@ -362,55 +421,21 @@ def run_gnnshap_with_model(
     # No branch fired, but the estimator itself may still have returned an
     # all-zero / numerically saturated attribution vector.  Recorded so a
     # degenerate row can be told apart from a fallback row.
-    if node_scores_input.size and np.max(np.abs(node_scores_input)) == 0.0:
-        fallback_reason = "estimator_all_zero"
-    elif node_scores_input.size and np.max(np.abs(node_scores_input)) < SATURATION_EPS:
-        fallback_reason = "estimator_saturated"
+    fallback_reason = fallback_reason or classify_degenerate_attribution(
+        node_scores_input
+    )
 
     # Fidelity computed against actual DGL model
     fid_plus, fid_minus = fidelity_from_node_mask(
         node_scores_input, ctx, bg_node, model, top_k=top_k
     )
 
-    runtime_s = time.time() - t0
+    runtime_s = time.time() - t0 - diag_s
     logger.debug(
         f"GNNShap EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
-                        fallback_reason=fallback_reason, diag=diag)
-
-
-def _pack_result(
-    ctx: "FlowContext",
-    node_scores: np.ndarray,
-    fid_plus: float,
-    fid_minus: float,
-    runtime_s: float,
-    fallback_reason: str | None = None,
-    diag: dict | None = None,
-) -> dict:
-    """Pack one flow's result.
-
-    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
-    (new CSV columns); they never affect the attribution or fidelity numbers.
-    """
-    from src.baselines.adapter import empty_diagnostics
-
-    d = dict(empty_diagnostics())
-    d["surrogate_delta"] = float("nan")
-    if diag:
-        d.update(diag)
-
-    return {
-        "edge_id":         ctx.global_eid,
-        "true_label":      ctx.true_label,
-        "predicted_label": ctx.predicted_label,
-        "p_full":          round(ctx.p_full, 6),
-        "node_scores":     node_scores.tolist(),
-        "fidelity_plus":   round(fid_plus, 6),
-        "fidelity_minus":  round(fid_minus, 6),
-        "runtime_s":       round(runtime_s, 3),
-        "fallback_reason": fallback_reason,
-        **d,
-    }
+    return pack_node_baseline_result(
+        ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+        fallback_reason=fallback_reason, diag=diag,
+    )

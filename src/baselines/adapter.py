@@ -22,13 +22,18 @@ Provides:
   fidelity_from_group_importances
                      — computes Fidelity+/- from a 48-group importance vector
                        using the same forward-pass logic as 08_metrics.py
+  classify_degenerate_attribution
+                     — shared all-zero / saturated fallback_reason classifier
+  pack_node_baseline_result
+                     — the one result-row packer for the four node-coalition
+                       baselines (PGExplainer/GNNShap/GraphSVX/EdgeSHAPer)
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import torch
@@ -334,6 +339,30 @@ def _resolve_compute_device(model: "EdgeAwareGraphSAGE") -> torch.device:
             "no parameters."
         )
     return p.device
+
+
+# Versions build_h_full's NUMERICAL OUTPUT SEMANTICS, not the module.
+#
+# scripts/10_baselines.py caches PGExplainer's mask-MLP, which is fit on this
+# function's output; the cache is silently invalid across a semantics change
+# (the MLP's input dim does not change, so nothing raises -- see specs/28).
+# The cached checkpoint's sidecar records this value and a retrain is forced
+# when it differs.
+#
+#   v1 -- original: only the two seed rows held real embeddings; every other
+#         row was zero-filled.
+#   v2 -- commit 01acee1: every subgraph node gets a real, model-derived
+#         embedding.
+#   v3 -- specs/26 + specs/27: compute device resolved from the model's own
+#         parameters, and layer-aligned per-block message passing replacing the
+#         flattened, hop-mixed single graph.
+#
+# BUMP RULE: bump this if the change could make build_h_full return a different
+# tensor for identical inputs -- including a rewrite that only changes
+# floating-point reduction order. Docstring, comment, logging, type-annotation
+# and assertion-message edits do NOT bump it. When in doubt, bump: a spurious
+# bump costs one retrain, a missed bump costs a silently wrong Table-2 column.
+H_FULL_SCHEMA_VERSION: int = 3
 
 
 def build_h_full(
@@ -716,6 +745,33 @@ def fidelity_from_node_mask(
 SATURATION_EPS: float = 1e-12
 
 
+def classify_degenerate_attribution(scores: np.ndarray) -> str | None:
+    """Classify an attribution vector as all-zero, saturated, or informative.
+
+    Instrumentation only — the returned string goes into the ``fallback_reason``
+    column and never influences any attribution or fidelity number.  Shared by
+    all four node-coalition baselines so a degenerate row means the same thing
+    in every wrapper's output.
+
+    Args:
+        scores: attribution vector (any shape; only its magnitudes are read).
+
+    Returns:
+        ``"estimator_all_zero"``   if the peak |score| is exactly 0.0;
+        ``"estimator_saturated"``  if it is non-zero but below SATURATION_EPS;
+        ``None``                   if the vector carries usable magnitude, or is
+                                   empty (nothing to classify).
+    """
+    if scores.size == 0:
+        return None
+    peak = float(np.max(np.abs(scores)))
+    if peak == 0.0:
+        return "estimator_all_zero"
+    if peak < SATURATION_EPS:
+        return "estimator_saturated"
+    return None
+
+
 def surrogate_diagnostics(
     h_full: torch.Tensor,
     edge_index: torch.Tensor,
@@ -777,20 +833,43 @@ def surrogate_diagnostics(
     }
 
 
-def surrogate_delta(predict, edge_index: torch.Tensor) -> float:
-    """Max output change between the full-coalition and empty-coalition surrogate.
+def surrogate_delta(
+    predict: Callable[[torch.Tensor], torch.Tensor],
+    edge_index: torch.Tensor,
+) -> float:
+    """Max LOGIT change between the full-coalition and empty-coalition surrogate.
 
     A value of exactly 0.0 means the surrogate's value function is constant over
     every coalition, so *any* Shapley estimator must return all-zero
     attributions regardless of the estimator's own behaviour.
 
+    **Logit space, not probability space.**  ``predict`` must return the
+    surrogate's RAW, pre-normalisation class scores.  Every caller passes a
+    logits-only entry point for exactly this reason (``forward_logits`` on the
+    GraphSVX/PGExplainer wrappers, ``return_logits=True`` on GNNShap's forward
+    factory, and EdgeSHAPer's ``forward``, which is already raw).  In
+    probability space the predicate above is not merely inconsistent across
+    baselines — it is *wrong*: the wrappers' unnormalised residual aggregation
+    drives high-confidence flows outside the edge MLP's operating range, the
+    float32 softmax saturates, and ``max |Δp|`` collapses to EXACTLY 0.0 on
+    flows whose surrogate is demonstrably not flat (measured: 67/150 real flows
+    at 0.0 in probability space, 150/150 non-zero in logit space — see
+    ``tests/test_baseline_h_full.py``).  That would report a *false* "provably
+    flat surrogate" verdict precisely where the model is most confident.
+
     Args:
         predict:    callable taking a (2, E) edge_index and returning a 1-D
-                    tensor of class scores.
+                    tensor of RAW LOGITS (one per class).
         edge_index: (2, E) local-space subgraph edges.
 
     Returns:
-        max |predict(full) - predict(empty)|, or 0.0 if it cannot be computed.
+        ``max |predict(full) - predict(empty)|`` in logit space, or
+        ``float("nan")`` if the measurement could not be taken.
+
+        NaN, deliberately not 0.0: 0.0 is a semantically loaded *result*
+        ("measured, and the surrogate is provably flat"), so a failed
+        measurement must never be able to masquerade as one.  Consumers must
+        treat NaN as "unmeasured" and skip it, not coerce it to zero.
     """
     try:
         empty = edge_index.new_zeros((2, 0))
@@ -805,12 +884,98 @@ def surrogate_delta(predict, edge_index: torch.Tensor) -> float:
         return float("nan")
 
 
-def empty_diagnostics() -> dict:
-    """Neutral diagnostic block for flows where no subgraph could be built."""
+def empty_diagnostics(n_local: int = 0, n_subgraph_edges: int = 0) -> dict:
+    """Neutral diagnostic block for flows that never reach ``build_h_full``.
+
+    UNMEASURED, not zero-meaning-degenerate: on the wrappers' early-return
+    paths (``fallback_reason`` in ``("empty_subgraph", "insufficient_players")``)
+    ``build_h_full`` is deliberately NOT run — it is a multi-layer
+    message-passing pass whose result the fallback would immediately discard.
+    The three h_full-derived counters (``n_h_full_nonzero``,
+    ``n_live_edges_into_readout``, ``n_live_edges_into_src``) are therefore
+    reported as 0 because nothing measured them, NOT because a measurement
+    found dead rows.  In particular ``n_h_full_nonzero == 0`` on such a row
+    does not contradict ``surrogate_diagnostics``' post-``build_h_full``
+    ``n_h_full_nonzero == n_local`` regression guard.
+
+    The two structural counters are cheap and ARE real when the caller supplies
+    them: ``n_local`` is ``len(gnid_to_local)`` and ``n_subgraph_edges`` is
+    ``edge_index.size(1)``, neither of which needs ``h_full``.
+
+    Args:
+        n_local:          number of nodes in the local subgraph, if known.
+        n_subgraph_edges: number of edges in the local subgraph, if known.
+
+    Returns:
+        dict with the same five keys ``surrogate_diagnostics`` returns.
+    """
     return {
-        "n_local":                    0,
+        "n_local":                    int(n_local),
         "n_h_full_nonzero":           0,
-        "n_subgraph_edges":           0,
+        "n_subgraph_edges":           int(n_subgraph_edges),
         "n_live_edges_into_readout":  0,
         "n_live_edges_into_src":      0,
+    }
+
+
+# ── Shared result packing (node-coalition baselines) ───────────────────────────
+
+def pack_node_baseline_result(
+    ctx: FlowContext,
+    node_scores: np.ndarray,
+    fid_plus: float,
+    fid_minus: float,
+    runtime_s: float,
+    fallback_reason: str | None = None,
+    diag: dict | None = None,
+) -> dict:
+    """Pack one flow's result row for a node-coalition baseline.
+
+    Shared by the four wrappers whose attribution space is the target flow's
+    k-hop NODE set (GNNShap, GraphSVX, PGExplainer, EdgeSHAPer).  It is
+    deliberately not used by ``gnnexplainer_wrapper``, whose rows live in
+    feature-group space and have a different schema.
+
+    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
+    (extra CSV columns); they never affect the attribution or fidelity numbers.
+
+    Args:
+        ctx:             FlowContext for the target flow.
+        node_scores:     (N_input,) per-node importance scores.
+        fid_plus:        Fidelity+ for this flow.
+        fid_minus:       Fidelity- for this flow.
+        runtime_s:       wall-clock seconds attributable to the explainer,
+                         with diagnostic instrumentation time already excluded.
+        fallback_reason: why this row is degenerate, or None if it is not.
+        diag:            diagnostic block from ``surrogate_diagnostics`` or
+                         ``empty_diagnostics`` (optionally carrying
+                         ``surrogate_delta_logit``); missing keys default to the
+                         neutral block with ``surrogate_delta_logit = NaN``.
+
+    Returns:
+        dict of CSV row fields for this flow.  The ``surrogate_delta_logit``
+        column is named for its measurement space: it was ``surrogate_delta``
+        while the four wrappers each measured it in whatever space their own
+        explainer library happened to consume (logits / log-probabilities /
+        probabilities), which made the column neither comparable across
+        baselines nor trustworthy as a flatness verdict.  The rename means no
+        pre-existing mixed-space CSV on disk can be silently read as the new,
+        uniformly logit-space column.
+    """
+    d = dict(empty_diagnostics())
+    d["surrogate_delta_logit"] = float("nan")
+    if diag:
+        d.update(diag)
+
+    return {
+        "edge_id":         ctx.global_eid,
+        "true_label":      ctx.true_label,
+        "predicted_label": ctx.predicted_label,
+        "p_full":          round(ctx.p_full, 6),
+        "node_scores":     node_scores.tolist(),
+        "fidelity_plus":   round(fid_plus, 6),
+        "fidelity_minus":  round(fid_minus, 6),
+        "runtime_s":       round(runtime_s, 3),
+        "fallback_reason": fallback_reason,
+        **d,
     }

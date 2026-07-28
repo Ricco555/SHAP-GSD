@@ -74,11 +74,26 @@ class GraphSVXNodeWrapper(nn.Module):
         self._dst_local = dst_local_idx
         self._num_nodes = num_nodes
 
-    def forward(
+    def forward_logits(
         self,
         x: torch.Tensor,            # (N, hidden) — h_full (or modified by GraphSVX)
         edge_index: torch.Tensor,   # (2, E_masked) — coalition-masked edges
     ) -> torch.Tensor:
+        """The surrogate's RAW, pre-normalisation edge logits — shape (1, C).
+
+        This is the whole of ``forward``'s computation minus its final
+        ``log_softmax`` + broadcast.  ``forward`` is defined in terms of it, so
+        the two can never drift: the logit-space measurement taken by
+        ``adapter.surrogate_delta`` is by construction the same surrogate
+        GraphSVX itself is explaining, read one step earlier.
+
+        Args:
+            x:          (N, hidden) node-embedding matrix.
+            edge_index: (2, E_masked) coalition-masked edges in local space.
+
+        Returns:
+            (1, C) unnormalised class logits for the target edge.
+        """
         h = x.clone()
 
         if edge_index.size(1) > 0:
@@ -94,7 +109,17 @@ class GraphSVXNodeWrapper(nn.Module):
         h_src = h[src_pos].unsqueeze(0)               # (1, hidden)
         h_dst = h[dst_pos].unsqueeze(0)               # (1, hidden)
         combined = torch.cat([h_src, h_dst, self._x_e_t], dim=1)
-        logit = self.edge_mlp(combined)                # (1, C)
+        return self.edge_mlp(combined)                 # (1, C)
+
+    def forward(
+        self,
+        x: torch.Tensor,            # (N, hidden) — h_full (or modified by GraphSVX)
+        edge_index: torch.Tensor,   # (2, E_masked) — coalition-masked edges
+    ) -> torch.Tensor:
+        # LOG-probabilities, unchanged: GraphSVX calls
+        # ``self.model(x, edge_index).exp()[node_index]`` and would silently
+        # read a double-exponentiated score if this ever returned raw logits.
+        logit = self.forward_logits(x, edge_index)     # (1, C)
         log_prob = torch.log_softmax(logit, dim=1)     # (1, C) — GraphSVX applies .exp()
         return log_prob.expand(self._num_nodes, -1).contiguous()
 
@@ -153,25 +178,47 @@ def run_graphsvx_with_model(
     from torch_geometric.data import Data
     from src.baselines.adapter import (
         build_h_full,
+        classify_degenerate_attribution,
         dgl_subgraph_to_pyg,
+        empty_diagnostics,
         fidelity_from_node_mask,
+        pack_node_baseline_result,
         surrogate_diagnostics,
         surrogate_delta,
     )
 
     t0 = time.time()
+    # Accumulated wall-clock spent on instrumentation.  Subtracted from
+    # runtime_s at every exit so the reported runtime keeps its original
+    # meaning; t0 itself is never mutated, so it always means "start".
+    diag_s = 0.0
     edge_mlp_cpu = _move_to_cpu(model.edge_mlp)
 
     pyg_data, gnid_to_local = dgl_subgraph_to_pyg(
         ctx.blocks, None, ctx.base_node_feats
     )
     N_local = len(gnid_to_local)
-    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     src_local = gnid_to_local.get(ctx.target_src_nid, 0)
     dst_local = gnid_to_local.get(ctx.target_dst_nid, 0)
     x_e_t_cpu = ctx.x_e_t.detach().cpu()
     bg_node = background.background_node_state[ctx.true_label]   # (15,)
+
+    # Isolated flow fallback — checked BEFORE build_h_full, whose multi-layer
+    # message-passing result this branch would immediately discard.
+    if pyg_data.edge_index.size(1) == 0:
+        node_scores_input = np.zeros(len(ctx.input_node_ids))
+        fid_plus, fid_minus = fidelity_from_node_mask(
+            node_scores_input, ctx, bg_node, model, top_k=top_k
+        )
+        return pack_node_baseline_result(
+            ctx, node_scores_input, fid_plus, fid_minus,
+            time.time() - t0 - diag_s,
+            fallback_reason="empty_subgraph",
+            diag=empty_diagnostics(n_local=N_local, n_subgraph_edges=0),
+        )
+
+    h_full = build_h_full(ctx, model, gnid_to_local, pyg_data.edge_index)
 
     # Diagnostics (instrumentation only).  Timed separately and excluded from
     # runtime_s so the reported runtime keeps its original meaning.
@@ -179,27 +226,21 @@ def run_graphsvx_with_model(
     diag = surrogate_diagnostics(
         h_full, pyg_data.edge_index, src_local, dst_local
     )
-    t0 += time.time() - _t_diag
-
-    # Isolated flow fallback
-    if pyg_data.edge_index.size(1) == 0:
-        node_scores_input = np.zeros(len(ctx.input_node_ids))
-        fid_plus, fid_minus = fidelity_from_node_mask(
-            node_scores_input, ctx, bg_node, model, top_k=top_k
-        )
-        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0,
-                            fallback_reason="empty_subgraph", diag=diag)
+    diag_s += time.time() - _t_diag
 
     wrapper = GraphSVXNodeWrapper(
         edge_mlp_cpu, x_e_t_cpu, src_local, dst_local, N_local
     ).eval()
 
     _t_diag = time.time()
-    diag["surrogate_delta"] = surrogate_delta(
-        lambda ei: wrapper(h_full, ei)[0], pyg_data.edge_index
+    # forward_logits, not forward: forward returns log-softmax log-probabilities
+    # because that is what GraphSVX's ``.exp()`` consumes, and a delta measured
+    # there is neither comparable with the other baselines nor a sound flatness
+    # verdict (see adapter.surrogate_delta).
+    diag["surrogate_delta_logit"] = surrogate_delta(
+        lambda ei: wrapper.forward_logits(h_full, ei)[0], pyg_data.edge_index
     )
-    t0 += time.time() - _t_diag
+    diag_s += time.time() - _t_diag
 
     # Build PyG Data for GraphSVX (x = h_full; edge_index = subgraph edges)
     data = Data(
@@ -275,10 +316,12 @@ def run_graphsvx_with_model(
         fid_plus, fid_minus = fidelity_from_node_mask(
             node_scores_input, ctx, bg_node, model, top_k=top_k
         )
-        return _pack_result(ctx, node_scores_input, fid_plus, fid_minus,
-                            time.time() - t0,
-                            fallback_reason=fallback_reason
-                            or "graphsvx_returned_none", diag=diag)
+        return pack_node_baseline_result(
+            ctx, node_scores_input, fid_plus, fid_minus,
+            time.time() - t0 - diag_s,
+            fallback_reason=fallback_reason or "graphsvx_returned_none",
+            diag=diag,
+        )
 
     phi = phi_list[0]                  # numpy array, shape (D,)
     neighbours = svx.neighbours        # tensor of local node indices, length D
@@ -297,50 +340,24 @@ def run_graphsvx_with_model(
         node_scores_local, ctx.blocks, gnid_to_local
     )
 
+    # GraphSVX ran and returned players, but the surrogate WLS fit may still
+    # have produced an all-zero / numerically saturated phi.  Never clobbers an
+    # already-set reason (e.g. "empty_phi_or_neighbours" above).
+    fallback_reason = fallback_reason or classify_degenerate_attribution(
+        node_scores_input
+    )
+
     # Fidelity computed against actual DGL model
     fid_plus, fid_minus = fidelity_from_node_mask(
         node_scores_input, ctx, bg_node, model, top_k=top_k
     )
 
-    runtime_s = time.time() - t0
+    runtime_s = time.time() - t0 - diag_s
     logger.debug(
         f"GraphSVX EID={ctx.global_eid}: "
         f"fid+={fid_plus:.4f} fid-={fid_minus:.4f} t={runtime_s:.1f}s"
     )
-    return _pack_result(ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
-                        fallback_reason=fallback_reason, diag=diag)
-
-
-def _pack_result(
-    ctx: "FlowContext",
-    node_scores: np.ndarray,
-    fid_plus: float,
-    fid_minus: float,
-    runtime_s: float,
-    fallback_reason: str | None = None,
-    diag: dict | None = None,
-) -> dict:
-    """Pack one flow's result.
-
-    ``fallback_reason`` and the ``diag`` fields are additive diagnostic metadata
-    (new CSV columns); they never affect the attribution or fidelity numbers.
-    """
-    from src.baselines.adapter import empty_diagnostics
-
-    d = dict(empty_diagnostics())
-    d["surrogate_delta"] = float("nan")
-    if diag:
-        d.update(diag)
-
-    return {
-        "edge_id":         ctx.global_eid,
-        "true_label":      ctx.true_label,
-        "predicted_label": ctx.predicted_label,
-        "p_full":          round(ctx.p_full, 6),
-        "node_scores":     node_scores.tolist(),
-        "fidelity_plus":   round(fid_plus, 6),
-        "fidelity_minus":  round(fid_minus, 6),
-        "runtime_s":       round(runtime_s, 3),
-        "fallback_reason": fallback_reason,
-        **d,
-    }
+    return pack_node_baseline_result(
+        ctx, node_scores_input, fid_plus, fid_minus, runtime_s,
+        fallback_reason=fallback_reason, diag=diag,
+    )
