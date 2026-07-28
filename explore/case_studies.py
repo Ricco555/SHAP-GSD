@@ -81,6 +81,29 @@ EXPL_DIR = _P["explanations"]
 OUT_DIR  = _P["figures"] / "case_studies"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+STRATIFIED_OUT_DIR = _P["figures"] / "case_studies_stratified"
+
+
+def _select_stratified_sample(seed: int = 42) -> list[tuple[str, int]]:
+    """Draw one flow per class uniformly at random from the full explained set.
+
+    The curated CANDIDATES above are filtered to correctly-classified,
+    high-confidence, nonzero-attribution flows. This draws an unfiltered,
+    disclosed-procedure complement — no filtering on correctness, confidence,
+    or attribution — from every class subdirectory under EXPL_DIR (each
+    ``<eid>.json`` file is one already-explained test flow).
+    """
+    import random
+    rng = random.Random(seed)
+    sample: list[tuple[str, int]] = []
+    for class_dir in sorted(p for p in EXPL_DIR.iterdir() if p.is_dir()):
+        json_files = sorted(class_dir.glob("*.json"))
+        if not json_files:
+            continue
+        chosen = rng.choice(json_files)
+        sample.append((class_dir.name, int(chosen.stem)))
+    return sample
+
 
 def _find_local_eid(g: dgl.DGLGraph, global_eid: int) -> int:
     matches = (g.edata[dgl.EID] == global_eid).nonzero(as_tuple=True)[0]
@@ -183,6 +206,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--class", dest="filter_class", default=None,
                     help="Run only this attack class (e.g. Shellcode)")
+    ap.add_argument("--stratified", action="store_true", default=False,
+                    help="Draw an unfiltered, disclosed-procedure random sample "
+                         "(one flow per class, no correctness/confidence/attribution "
+                         "filtering) instead of the curated CANDIDATES list.")
+    ap.add_argument("--stratified-seed", type=int, default=42,
+                    help="Random seed for --stratified sampling. Default: 42.")
     args = ap.parse_args()
 
     cfg = _P["cfg"]
@@ -207,14 +236,31 @@ def main() -> None:
     geid_to_local = {int(g): i for i, g in enumerate(g_test.edata[dgl.EID].numpy())}
 
     quality_rows: list[str] = []
+    diagnostics: list[dict] = []
 
-    candidates = CANDIDATES
-    if args.filter_class:
-        candidates = [(c, e, h) for c, e, h in CANDIDATES if c == args.filter_class]
+    if args.stratified:
+        out_dir = STRATIFIED_OUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sampled = _select_stratified_sample(seed=args.stratified_seed)
+        candidates = [(c, e, None) for c, e in sampled]
+        if args.filter_class:
+            candidates = [(c, e, h) for c, e, h in candidates if c == args.filter_class]
         if not candidates:
-            logger.error(f"No candidate found for class '{args.filter_class}'. "
-                         f"Valid classes: {[c for c,_,_ in CANDIDATES]}")
+            logger.error(f"No stratified sample found for class '{args.filter_class}'.")
             return
+        logger.info(
+            f"Stratified sample (seed={args.stratified_seed}, no filtering on "
+            f"correctness/confidence/attribution): {[(c, e) for c, e, _ in candidates]}"
+        )
+    else:
+        out_dir = OUT_DIR
+        candidates = CANDIDATES
+        if args.filter_class:
+            candidates = [(c, e, h) for c, e, h in CANDIDATES if c == args.filter_class]
+            if not candidates:
+                logger.error(f"No candidate found for class '{args.filter_class}'. "
+                             f"Valid classes: {[c for c,_,_ in CANDIDATES]}")
+                return
 
     for class_name, global_eid, has_nbrs in candidates:
         logger.info(f"Processing {class_name} EID={global_eid} …")
@@ -260,7 +306,7 @@ def main() -> None:
         )
 
         stem = f"{class_name}_{global_eid}"
-        class_dir = OUT_DIR / class_name
+        class_dir = out_dir / class_name
         class_dir.mkdir(parents=True, exist_ok=True)
 
         fig.savefig(str(class_dir / f"{stem}.pdf"), bbox_inches="tight", dpi=300)
@@ -302,12 +348,34 @@ def main() -> None:
             float(np.abs(fg).max() - np.abs(fg).min()),
             len(topo["hop1_nodes"]) + len(topo["hop2_nodes"]),
             float(np.abs(ns).max()) if len(ns) > 0 else 0.0,
-            len(gaps), in_W, proba, has_nbrs,
+            len(gaps), in_W, proba, in_W > 0 if has_nbrs is None else has_nbrs,
         ))
+
+        if args.stratified:
+            nbrs = plain.get("neighbor_shap", [])
+            zero_phi_t = (len(nbrs) == 0) or all(x == 0.0 for x in nbrs)
+            zero_phi_n = (
+                abs(plain.get("src_novelty_shap", 0.0)) == 0.0
+                and abs(plain.get("dst_novelty_shap", 0.0)) == 0.0
+                and (len(ns) == 0 or float(np.abs(ns).max()) == 0.0)
+            )
+            diagnostics.append({
+                "class": class_name,
+                "edge_id": global_eid,
+                "true_label": plain.get("true_label"),
+                "predicted_label": plain.get("predicted_label"),
+                "misclassified": plain.get("true_label") != plain.get("predicted_label"),
+                "predicted_proba": round(float(proba), 4),
+                "low_confidence": bool(proba < 0.5),
+                "zero_phi_T": bool(zero_phi_t),
+                "zero_phi_N": bool(zero_phi_n),
+            })
 
     # Write quality report
     header = (
-        f"Case study quality report — SHAP-GSD (all 9 attack classes)\n"
+        f"Case study quality report — SHAP-GSD "
+        f"({'stratified/unfiltered' if args.stratified else 'curated'} sample, "
+        f"{len(candidates)} classes)\n"
         f"W_seconds={W_seconds}\n"
         + "-" * 110 + "\n"
         + f"{'Class':12s} {'EID':>8s}  {'top_phi':>7s}  {'phi_range':>9s}  "
@@ -322,12 +390,47 @@ def main() -> None:
             f"{n_topo:>6d}  {node_max:>8.4f}  {n_gaps:>6d}  {in_W:>4d}  "
             f"{proba:>5.3f}  {'YES' if has_nbrs else 'no':>8s}"
         )
-    report_path = OUT_DIR / "quality_report.txt"
+    report_path = out_dir / "quality_report.txt"
     with open(report_path, "w") as f:
         f.write(header)
         f.write("\n".join(rows_txt) + "\n")
     logger.info(f"Quality report → {report_path}")
-    logger.info(f"Done. {len(quality_rows)}/9 case studies produced.")
+    logger.info(f"Done. {len(quality_rows)}/{len(candidates)} case studies produced.")
+
+    if args.stratified:
+        n = len(diagnostics)
+        n_misclassified = sum(d["misclassified"] for d in diagnostics)
+        n_low_conf      = sum(d["low_confidence"] for d in diagnostics)
+        n_zero_phi_t    = sum(d["zero_phi_T"] for d in diagnostics)
+        n_zero_phi_n    = sum(d["zero_phi_N"] for d in diagnostics)
+        manifest = {
+            "procedure": (
+                "One flow drawn uniformly at random per class from the full "
+                "explained test set (outputs/explanations/<class>/*.json), with "
+                "NO filtering on correctness, prediction confidence, or nonzero "
+                "multi-granularity attribution. Complements (does not replace) "
+                "the curated CANDIDATES sample."
+            ),
+            "seed": args.stratified_seed,
+            "n_classes_sampled": n,
+            "sample": [(d["class"], d["edge_id"]) for d in diagnostics],
+            "diagnostics_summary": {
+                "n_misclassified": int(n_misclassified),
+                "n_low_confidence_lt_0.5": int(n_low_conf),
+                "n_zero_phi_T": int(n_zero_phi_t),
+                "n_zero_phi_N": int(n_zero_phi_n),
+            },
+            "diagnostics_per_flow": diagnostics,
+        }
+        manifest_path = out_dir / "sampling_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+        logger.info(f"Sampling manifest → {manifest_path}")
+        logger.info(
+            f"Diagnostics: {n_misclassified}/{n} misclassified, "
+            f"{n_low_conf}/{n} low-confidence (<0.5), "
+            f"{n_zero_phi_t}/{n} zero-phi_T, {n_zero_phi_n}/{n} zero-phi_N"
+        )
 
 
 if __name__ == "__main__":

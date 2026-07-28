@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
@@ -260,28 +261,10 @@ def main() -> None:
         "feature category across all flows and classes; the coalition space reduction",
         f"(2^48 vs 2^218, ×10^51) is annotated. Attribution is concentrated: on average",
         f"{overall_mean_score:.1f} groups suffice to explain 80% of each decision.",
-        "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "Grouping 218 dimensions into 48 groups is an arbitrary design choice that",
-        "forces the explainer to treat heterogeneous features as interchangeable.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "Groups are defined by semantic function (e.g., all byte-count features form",
-        "'Volumetric'), not statistical proximity. Treating a group as an atomic coalition",
-        "player preserves the Shapley Dummy axiom: if all features in a group have zero",
-        "marginal contribution, the group's Shapley value is zero. The 10^51 reduction",
-        "in coalition space is not a shortcut — it is what makes KernelSHAP tractable",
-        "on a 218-dim graph-edge feature vector. Concentration scores confirm that the",
-        "grouping does not dilute signal: a small number of groups explain most variance.",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Methods §3.2 — Feature Group Coalition Space. Supports the claim that semantic",
-        "grouping is both theoretically justified (Shapley axioms) and empirically",
-        "efficient (concentrated attributions, tractable computation).",
     ]
+    notes = load_paper_notes(STEM)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))

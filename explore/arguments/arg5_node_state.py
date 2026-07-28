@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
@@ -261,28 +262,10 @@ def main() -> None:
         "Right: violin distribution of φ_N per class (coral fill), sorted by mean",
         fr"φ_N descending; ◆ = mean. φ_N accounts for {frac_min:.0f}–{frac_max:.0f}%",
         "of total |φ|, compared to φ_N ≡ 0 in flat KernelSHAP.",
-        "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "φ_N is just compensation for model uncertainty or noise — the GNN may",
-        "attend to irrelevant neighbours and φ_N captures that noise, not signal.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "node_shap is computed by explicitly ablating each computation node from the",
-        "coalition (masking its feature vector to the background mean) and measuring",
-        "the change in predicted probability. A non-zero node_shap means that node's",
-        "state causally changes the prediction — by construction, not by proxy. If",
-        "the GNN were attending to noise, ablating those nodes would have near-zero",
-        "effect and φ_N would be near-zero. The observed φ_N range of",
-        f"{frac_min:.0f}–{frac_max:.0f}% contradicts the noise hypothesis.",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Results §4.5 — Node-State SHAP and Temporal Context. Supports the claim",
-        "that SHAP-GSD's multi-granularity coalition space captures GNN context that",
-        "flat SHAP misses. The φ_N fraction is the key evidence.",
     ]
+    notes = load_paper_notes(STEM, frac_min=frac_min, frac_max=frac_max)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))

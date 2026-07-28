@@ -124,6 +124,89 @@ class TemporalNeighborhoodSHAP:
 
         return records
 
+    def extract_neighbor_edges(
+        self,
+        blocks: list,
+        target_local_eid: int,
+        target_ts_ms: float,
+    ) -> list[_NeighborEdge]:
+        """Public wrapper over _extract_neighbor_edges for metric code.
+
+        Returns the same in-window neighbor records, in the same order, that
+        explain() uses as KernelSHAP coalition columns.
+
+        Args:
+            blocks:           DGL computation blocks from the sampler.
+            target_local_eid: local EID of the target edge in g_split.
+            target_ts_ms:     target edge timestamp in milliseconds.
+
+        Returns:
+            List of _NeighborEdge records (may be empty).
+        """
+        return self._extract_neighbor_edges(
+            blocks, target_local_eid, target_ts_ms=target_ts_ms
+        )
+
+    def build_masked_node_feats(
+        self,
+        neighbor_records: list[_NeighborEdge],
+        absent_idx: "np.ndarray | list[int]",
+        base_node_feats: np.ndarray,
+        input_node_ids: np.ndarray,
+        target_ts_ms: float,
+    ) -> np.ndarray:
+        """Node-state matrix for one temporal coalition (Option C masking).
+
+        Absent neighbor edges are removed by recomputing the affected endpoints'
+        15-dim states via NodeStateManager.rollback_edges — never by DGL graph
+        surgery. The caller's `blocks` object is reused unchanged.
+
+        Args:
+            neighbor_records: in-window neighbor edges, index-aligned with the
+                              KernelSHAP coalition columns.
+            absent_idx:       indices into neighbor_records that are ABSENT
+                              (coalition bit 0). Empty → base_node_feats is
+                              returned unmodified (a copy is NOT made).
+            base_node_feats:  float32 (N_in, node_state_dim) with all neighbors
+                              present; row j corresponds to input_node_ids[j].
+            input_node_ids:   int array (N_in,) of global node IDs for blocks[0]
+                              input, in block row order.
+            target_ts_ms:     state query time (target edge timestamp, ms).
+
+        Returns:
+            float32 array (N_in, node_state_dim). Either `base_node_feats` itself
+            (no absences) or a modified copy. Callers must treat it as read-only.
+        """
+        assert base_node_feats.shape[0] == len(input_node_ids), (
+            f"row misalignment: base_node_feats has {base_node_feats.shape[0]} rows "
+            f"but input_node_ids has {len(input_node_ids)}"
+        )
+
+        if len(absent_idx) == 0:
+            # All neighbors present — pre-computed states are already correct
+            return base_node_feats
+
+        # Build per-node exclusion lists for all absent edges
+        node_exclusions: dict[int, list[tuple[float, str, int]]] = {}
+        for i in absent_idx:
+            rec = neighbor_records[i]
+            node_exclusions.setdefault(rec.src_nid, []).append(
+                (rec.timestamp_ms, "outgoing", rec.dst_nid)
+            )
+            node_exclusions.setdefault(rec.dst_nid, []).append(
+                (rec.timestamp_ms, "incoming", rec.src_nid)
+            )
+
+        # Recompute states with rollbacks for affected nodes
+        modified_nf = base_node_feats.copy()
+        for j, nid in enumerate(input_node_ids):
+            excl = node_exclusions.get(int(nid))
+            if excl:
+                modified_nf[j] = self.nsm.rollback_edges(
+                    int(nid), target_ts_ms, excl
+                )
+        return modified_nf
+
     def explain(
         self,
         target_local_eid: int,
@@ -176,34 +259,11 @@ class TemporalNeighborhoodSHAP:
             results: list[float] = []
             for row in coalition_matrix:
                 absent_idx = np.where(row == 0)[0]
-                if len(absent_idx) == 0:
-                    # All neighbors present — use pre-computed states
-                    nf_t = torch.tensor(
-                        base_node_feats, dtype=torch.float32, device=self.device
-                    )
-                else:
-                    # Build per-node exclusion lists for all absent edges
-                    node_exclusions: dict[int, list[tuple[float, str, int]]] = {}
-                    for i in absent_idx:
-                        rec = neighbor_records[i]
-                        node_exclusions.setdefault(rec.src_nid, []).append(
-                            (rec.timestamp_ms, "outgoing", rec.dst_nid)
-                        )
-                        node_exclusions.setdefault(rec.dst_nid, []).append(
-                            (rec.timestamp_ms, "incoming", rec.src_nid)
-                        )
-
-                    # Recompute states with rollbacks for affected nodes
-                    modified_nf = base_node_feats.copy()
-                    for j, nid in enumerate(input_node_ids):
-                        excl = node_exclusions.get(int(nid))
-                        if excl:
-                            modified_nf[j] = self.nsm.rollback_edges(
-                                int(nid), target_ts_ms, excl
-                            )
-                    nf_t = torch.tensor(
-                        modified_nf, dtype=torch.float32, device=self.device
-                    )
+                nf = self.build_masked_node_feats(
+                    neighbor_records, absent_idx, base_node_feats,
+                    input_node_ids, target_ts_ms,
+                )
+                nf_t = torch.tensor(nf, dtype=torch.float32, device=self.device)
 
                 with torch.no_grad():
                     logit = model(blocks, nf_t, x_e_t, src_pos, dst_pos)

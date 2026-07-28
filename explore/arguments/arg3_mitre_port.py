@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
@@ -244,30 +245,10 @@ def main() -> None:
         "Right: per-class percentage of flows where DST_PORT_GROUP appears in the",
         "top-5 attributed groups; colour encodes attribution sign (teal = presence,",
         "coral = absence).",
-        "",
-        "REVIEWER CHALLENGE",
-        "------------------",
-        "The 16-bin port encoding is arbitrary; different groupings would produce",
-        "different attributions. There is no principled reason to merge all HTTP",
-        "traffic into one group.",
-        "",
-        "COUNTER-ARGUMENT",
-        "----------------",
-        "Bins are defined by named services, not by statistical proximity. Each bin",
-        "corresponds to a MITRE ATT&CK technique (e.g., ports 80/443 → T1071.001",
-        "Application Layer Protocol: Web Protocols). Per-port SHAP would fragment",
-        "attribution across 65,535 values with near-zero per-port sample frequency,",
-        "making it impossible to identify technique-level patterns. The 16-bin scheme",
-        "is coarser than raw ports but finer than 'any destination port' — it is the",
-        "correct granularity for threat-technique attribution. The MITRE mapping is",
-        "external to our model; it is not circular.",
-        "",
-        "PAPER SECTION PLACEMENT",
-        "-----------------------",
-        "Results §4.4 — MITRE ATT&CK Port Attribution. Demonstrates that SHAP-GSD",
-        "explanations are SOC-actionable: each alert linked to a named technique via",
-        "DST_PORT_GROUP rather than a raw port number.",
     ]
+    notes = load_paper_notes(STEM)
+    if notes:
+        lines += [""] + notes
 
     txt_path = OUT_DIR / f"{STEM}.txt"
     txt_path.write_text("\n".join(lines))
