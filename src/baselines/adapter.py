@@ -307,6 +307,35 @@ def dgl_subgraph_to_pyg(
 
 # ── Surrogate node-embedding matrix (h_full) ──────────────────────────────────
 
+def _resolve_compute_device(model: "EdgeAwareGraphSAGE") -> torch.device:
+    """Return the device the model's GNN layers actually live on.
+
+    ``build_h_full`` runs ``model.convs`` / ``model.bns`` in place on the shared
+    model object, so the model — not the caller, and not the CPU-by-default
+    baseline wrappers — is the authority on where those modules can execute.
+    The wrappers deep-copy only ``model.edge_mlp`` to CPU (``_move_to_cpu``);
+    the conv/BN stack stays wherever ``scripts/10_baselines.py`` put it.
+
+    Args:
+        model: the trained EdgeAwareGraphSAGE whose layers will be run.
+
+    Returns:
+        The ``torch.device`` of the model's first parameter.
+
+    Raises:
+        AssertionError: if the model has no parameters at all, which would make
+            the device unresolvable and any downstream device assert vacuous.
+    """
+    try:
+        p = next(model.parameters())
+    except StopIteration:                       # pragma: no cover - defensive
+        raise AssertionError(
+            "build_h_full cannot resolve a compute device: the model exposes "
+            "no parameters."
+        )
+    return p.device
+
+
 def build_h_full(
     ctx: "FlowContext",
     model: "EdgeAwareGraphSAGE",
@@ -315,42 +344,72 @@ def build_h_full(
 ) -> torch.Tensor:
     """Build the (N_local, hidden) node-embedding matrix used by all baselines.
 
-    Every node of the local subgraph receives a genuine, model-derived
-    embedding: the model's own GNN stack (``model.convs`` / ``model.bns`` /
-    ReLU, ``num_layers`` deep) is run over the local subgraph as ordinary
-    full-graph message passing, rooted simultaneously at every node.
+    What is computed — layer-aligned, per-block message passing.  For each
+    layer ``i`` a homogeneous local graph ``G_i`` is built over all ``N_local``
+    nodes carrying **exactly** ``ctx.blocks[i]``'s edges in local index space,
+    and the pass is ``h = relu(bn_i(conv_i(G_i, h)))``.  This mirrors
+    ``EdgeAwareGraphSAGE.encode()`` (``src/model/sage_model.py``), which zips
+    ``self.convs`` / ``self.bns`` with ``blocks``.  Dropout is omitted because
+    this function is eval-mode-only (asserted below), where it is the identity.
 
-    Why this is equivalent to per-node re-encoding: in ``model.eval()`` mode
-    BatchNorm is a fixed per-row affine map and SAGEConv is a per-destination
-    aggregation, so a node's layer-k output depends only on its own in-edge
-    subtree.  Re-rooting the sampled subgraph on each node in turn and calling
-    ``model.encode()`` N_local times therefore computes exactly the same
-    function as this single pass, at N_local times the cost.
+    What is exact: for a node that is a genuine *destination* in ``blocks[i]``,
+    layer ``i``'s output here equals what ``model.encode()`` computes for it —
+    identical in-neighbour multiset, identical layer-(i-1) inputs.  The seed
+    nodes are the only nodes for which that holds at every layer, so the
+    layered pass's seed rows reproduce ``ctx.h_fixed`` (asserted per flow
+    below), and they are then overwritten with ``ctx.h_fixed`` verbatim so the
+    surrogate's readout equals the real model prediction exactly.
 
-    The two seed rows (the target edge's endpoints) are afterwards overwritten
-    with ``ctx.h_fixed`` — the authoritative embedding the model actually
-    produced from the sampled computation blocks — so the surrogate's readout
-    reproduces the real model prediction rather than an approximation of it.
-    Non-seed rows differ from the seed rows only in provenance (local subgraph
-    vs. sampled blocks), not in the function applied.
+    Approximation 1 — the self-lift.  For a node that appears in ``blocks[i]``
+    only as a *source* (never a destination), the convolution degenerates to
+    the self term alone: ``relu(bn_i(fc_self(h)))``.  (Verified for DGL
+    ``SAGEConv`` with ``aggregator`` in {``mean``, ``pool``, ``lstm``}; the
+    ``gcn`` aggregator has no ``fc_self`` and is not selected by any config in
+    this repo.)  The real model computes *nothing* for such a node at that
+    depth.  The lift invents **no neighbour messages** — it linearly carries a
+    node's deepest genuinely-computed embedding into the final hidden space so
+    that ``h_full`` can be one uniform ``(N_local, hidden)`` matrix, which the
+    wrappers' indexing requires.  This is a documented approximation, not a
+    correctness claim.
 
-    Note that this changes NO coalition-masking mechanism: it only replaces the
-    previous zero-fill of every non-seed row, which made those nodes
-    informationally inert under any coalition.
+    Approximation 2 — the fanout residual.  A 1-hop node's layer-1 embedding
+    uses the neighbours sampled under the *target edge's* cutoff and fanout
+    budget, not the fresh, node-rooted sample a re-rooted ``encode()`` would
+    draw.  Not fixed here, and not fixable without re-rooting.
 
-    Temporal safety: every edge in ``edge_index`` comes from the temporally
-    filtered blocks (all timestamps <= the target edge's), and every node
-    feature in ``ctx.base_node_feats`` is the node state at the target
-    timestamp, so no future information enters (CRITICAL INVARIANT 2/3).
+    Why not per-node re-rooting (the literally-exact-looking option): it costs
+    ``O(N_local)`` ``TemporalNeighborSampler.sample_blocks`` calls per flow per
+    baseline — the sampler call, not the encode, is the cost — across four
+    baselines, the whole Phase-10 flow sample and four datasets.  And it does
+    not actually purchase exactness: a re-rooted sample draws a *different*
+    neighbour set under that node's own cutoff and fanout budget
+    (Approximation 2).
+
+    Device contract: all GNN computation runs on ``_resolve_compute_device``
+    (the model's own parameter device), because ``model.convs`` / ``model.bns``
+    are executed in place on the shared model object.  The return is always a
+    float32 **CPU** tensor: every wrapper's coalition machinery runs on CPU
+    against a CPU deep-copy of ``model.edge_mlp``.
+
+    Temporal safety: every edge in every ``ctx.blocks[i]`` comes from the
+    temporally filtered blocks (all timestamps <= the target edge's), and every
+    node feature is the node state at the target timestamp, so no future
+    information enters (CRITICAL INVARIANT 2/3).  The per-block restriction
+    *narrows* which of those edges each layer may use, so this is a
+    strengthening.
 
     Args:
         ctx:           FlowContext for the target flow.
         model:         the trained EdgeAwareGraphSAGE (must be in eval mode).
         gnid_to_local: global node ID → local index, from dgl_subgraph_to_pyg.
-        edge_index:    (2, E) local-space subgraph edges, used verbatim so that
-                       h_full and the coalition graph describe the same object.
-                       Parallel edges are NOT deduplicated — NetFlow is a
-                       multigraph and each parallel edge is a distinct flow.
+        edge_index:    (2, E) local-space subgraph edges.  NOT the graph used
+                       for message passing any more — it is a **checked
+                       consistency guard**: the concatenation of the per-block
+                       local edge lists, in block order, must equal it exactly
+                       (``torch.equal``), which proves h_full and the coalition
+                       graph describe the same object.  Parallel edges are NOT
+                       deduplicated — NetFlow is a multigraph and each parallel
+                       edge is a distinct flow.
 
     Returns:
         (N_local, hidden) float32 CPU tensor.  All baseline wrappers run on CPU.
@@ -363,12 +422,36 @@ def build_h_full(
         "randomise the surrogate's embeddings."
     )
 
+    device = _resolve_compute_device(model)
+
     n_local = len(gnid_to_local)
     hidden_size = int(ctx.h_fixed.size(1))
+    n_layers = len(model.convs)
+
+    assert len(ctx.blocks) == n_layers, (
+        f"block/layer mismatch: len(ctx.blocks)={len(ctx.blocks)} but the model "
+        f"has {n_layers} conv layers; a fanouts/num_layers disagreement must "
+        "fail loudly, not be silently truncated by zip()."
+    )
+    assert len(model.bns) == n_layers, (
+        f"len(model.bns)={len(model.bns)} != len(model.convs)={n_layers}"
+    )
+    for name, dev in (
+        ("ctx.h_fixed",      ctx.h_fixed.device),
+        ("ctx.node_feats_t", ctx.node_feats_t.device),
+        ("ctx.blocks[0]",    ctx.blocks[0].device),
+        ("ctx.blocks[-1]",   ctx.blocks[-1].device),
+    ):
+        assert dev == device, (
+            f"device mismatch: {name} is on {dev} but the model's layers are on "
+            f"{device}; build_h_full runs model.convs/model.bns in place, so "
+            "every input must already be on the model's device."
+        )
 
     # Local node features, ordered by local index.  dgl_subgraph_to_pyg's local
-    # ordering derives from blocks[0].srcdata[NID] (= input_node_ids), so every
-    # local node must have a row in base_node_feats — assert, do not assume.
+    # ordering derives from blocks[0].srcdata[NID] (= input_node_ids, which is
+    # also node_feats_t's row order), so every local node must have a row —
+    # assert, do not assume.
     input_gnids = ctx.blocks[0].srcdata[_dgl.NID].cpu().tolist()
     input_pos = {g: i for i, g in enumerate(input_gnids)}
     rows: list[int] = []
@@ -378,25 +461,60 @@ def build_h_full(
             "subgraph is not a subset of the block input nodes."
         )
         rows.append(input_pos[gnid])
-    x_local = torch.tensor(
-        ctx.base_node_feats[rows], dtype=torch.float32
+    assert len(rows) == n_local, (
+        f"row map has {len(rows)} entries for {n_local} local nodes"
+    )
+    row_idx = torch.tensor(rows, dtype=torch.long, device=device)
+    # Index the already-on-device node-state tensor rather than re-materialising
+    # ctx.base_node_feats from numpy on the CPU: saves one host→device copy per
+    # flow per call site.  node_feats_t is float32 by construction.
+    x_local = ctx.node_feats_t.index_select(0, row_idx)   # (n_local, 15), on device
+
+    # One homogeneous local graph PER BLOCK, over all n_local nodes, carrying
+    # exactly that block's edges.  Layer i must message-pass over blocks[i]
+    # alone — this is what EdgeAwareGraphSAGE.encode() does, and running every
+    # layer over the flattened union gave non-seed nodes aggregation depth the
+    # trained model never computes for them.
+    block_graphs: list = []
+    cat_src: list[int] = []
+    cat_dst: list[int] = []
+    for block in ctx.blocks:
+        b_src_gnids = block.srcdata[_dgl.NID].cpu().tolist()
+        b_dst_gnids = block.dstdata[_dgl.NID].cpu().tolist()
+        b_srcs, b_dsts = block.edges()
+        s_local: list[int] = []
+        d_local: list[int] = []
+        for s_i, d_i in zip(b_srcs.cpu().tolist(), b_dsts.cpu().tolist()):
+            s_local.append(gnid_to_local[b_src_gnids[s_i]])
+            d_local.append(gnid_to_local[b_dst_gnids[d_i]])
+        cat_src.extend(s_local)
+        cat_dst.extend(d_local)
+        block_graphs.append(_dgl.graph(
+            (torch.tensor(s_local, dtype=torch.int64, device=device),
+             torch.tensor(d_local, dtype=torch.int64, device=device)),
+            num_nodes=n_local,
+            device=device,
+        ))
+
+    # Consistency guard: the per-block reconstruction must be exactly the
+    # edge_index the caller derived from the SAME ctx.blocks via
+    # dgl_subgraph_to_pyg.  If that construction order ever changes, or a caller
+    # passes a subsetted/reordered edge_index, h_full and the coalition graph
+    # would silently describe different objects.
+    recon = torch.stack([
+        torch.tensor(cat_src, dtype=torch.int64),
+        torch.tensor(cat_dst, dtype=torch.int64),
+    ])
+    assert torch.equal(recon, edge_index.detach().cpu().long()), (
+        "edge_index does not match the per-block reconstruction from "
+        "ctx.blocks; h_full and the coalition subgraph would describe "
+        "different graphs."
     )
 
-    # Homogeneous local graph carrying every subgraph edge verbatim.
-    if edge_index.numel() == 0:
-        src_t = torch.empty(0, dtype=torch.int64)
-        dst_t = torch.empty(0, dtype=torch.int64)
-    else:
-        src_t = edge_index[0].cpu().long()
-        dst_t = edge_index[1].cpu().long()
-    g_local = _dgl.graph((src_t, dst_t), num_nodes=n_local)
-
-    convs = list(model.convs)
-    bns = list(model.bns)
     with torch.no_grad():
         h = x_local
-        for conv, bn in zip(convs, bns):
-            h = conv(g_local, h)
+        for g_i, conv, bn in zip(block_graphs, model.convs, model.bns):
+            h = conv(g_i, h)
             h = bn(h)
             h = torch.relu(h)          # no dropout: eval-mode inference only
         h_full = h.detach().cpu().float()
@@ -405,10 +523,37 @@ def build_h_full(
         f"h_full shape {tuple(h_full.shape)} != ({n_local}, {hidden_size})"
     )
 
-    # Overwrite the seed rows with the model's authoritative block-computed
-    # embeddings so the surrogate's readout equals the real model prediction.
+    # Correctness proof, per flow: for a node that is a genuine destination in
+    # blocks[i] at every layer i, the per-block pass computes exactly what
+    # model.encode() computes.  The seed nodes are the only nodes for which that
+    # holds at EVERY layer, so comparing the layered pass's seed rows against
+    # ctx.h_fixed BEFORE overwriting them is the strongest available proof that
+    # this function reproduces the model.  allclose, not equal: mean aggregation
+    # over the same in-neighbour multiset in a different edge order is not
+    # bit-identical.
+    #
+    # Two deliberately different tolerances, so they do not read as an
+    # inconsistency:
+    #   production (here)  atol=1e-4  headroom for GPU reduction-order
+    #       differences, which cannot be measured on the CPU dev machine.  Still
+    #       ~1e4x tighter than the smallest observed |h_per_block - h_flattened|
+    #       of 1.0, so it cannot mask Bug 2's return.
+    #   measured           ~1e-5      the max deviation actually observed on CPU
+    #       over 40 real flows was 8.345e-07 (spec 27 §1.1) — i.e. this assert
+    #       carries ~120x margin on the hardware it has been measured on, and
+    #       the extra headroom above is purely for unmeasured GPU numerics.
     seed_gnids = ctx.blocks[-1].dstdata[_dgl.NID].cpu().tolist()
     h_fixed_cpu = ctx.h_fixed.detach().cpu().float()
+    for i, gnid in enumerate(seed_gnids):
+        local_idx = gnid_to_local.get(gnid)
+        if local_idx is not None:
+            assert torch.allclose(h_full[local_idx], h_fixed_cpu[i], atol=1e-4), (
+                f"layered pass diverged from model.encode() at seed node {gnid}: "
+                f"max|Δ|={float((h_full[local_idx] - h_fixed_cpu[i]).abs().max()):.3e}"
+            )
+
+    # Overwrite the seed rows with the model's authoritative block-computed
+    # embeddings so the surrogate's readout equals the real model prediction.
     for i, gnid in enumerate(seed_gnids):
         local_idx = gnid_to_local.get(gnid)
         if local_idx is not None:
