@@ -41,7 +41,11 @@ submitted state, **infrastructure fixes**: an out-of-memory bug at larger
 dataset scale (fixed by disabling an unused node-state cache; verified to
 produce identical results with it enabled or disabled), hardcoded
 developer-machine paths removed from three baseline-explainer wrappers, and an
-internal lookup optimization (O(n) → O(log n), same data).
+internal lookup optimization (O(n) → O(log n), same data). As of `v2.2.8`,
+`main` also adds independent Fidelity+/Fidelity− metrics for the φ_T and φ_N
+granularities and an unfiltered stratified case-study sampling mode (see
+Phase 8 and Exploration figures below) — **recommended for any new run**, but
+not part of the numbers already reported in the submitted paper.
 
 ---
 
@@ -130,6 +134,8 @@ data/NF-UNSW-NB15-v3.csv
         ▼
 08_metrics.py       →  runs/nf_unsw_nb15_v3/outputs/metrics/summary.json
                        outputs/metrics/table2.txt
+                       outputs/metrics/fidelity_temporal.csv (phi_T)
+                       outputs/metrics/fidelity_novelty.csv (phi_N)
         │
         ▼
 09_w_ablation.py    →  runs/nf_unsw_nb15_v3/outputs/w_ablation/
@@ -186,6 +192,15 @@ Three-granularity Shapley attributions via KernelSHAP:
 
 1,764 flows explained (200/class × 9 attack + 200 Benign − 7 errors).
 
+**Phase 8 — Metrics**
+
+In addition to the feature-group (φ_F) Fidelity+/Fidelity−/Stability in
+`table2.txt`, Phase 8 now computes independent Fidelity+/Fidelity− metrics for
+the temporal-neighbourhood (φ_T) and node-novelty (φ_N) granularities
+(`fidelity_temporal.csv`, `fidelity_novelty.csv`), each masking/rolling back
+only that granularity's own coalition players — not a joint ranking across all
+three. `--skip-temporal-fidelity` / `--skip-novelty-fidelity` disable either.
+
 **Phase 11 — Efficiency audit**
 
 KernelSHAP satisfies the efficiency axiom exactly by construction
@@ -230,6 +245,12 @@ outputs and produce publication-quality charts. Run after phases 01–14 complet
 # Uses runs/nf_unsw_nb15_v3/ outputs automatically via SHAP_GSD_CONFIG
 SHAP_GSD_CONFIG=configs/experiment_nf_unsw_nb15_v3.yaml python explore/table2_figure.py
 ```
+
+`explore/case_studies.py --stratified` draws one flow per class uniformly at
+random from the full explained set, with no filtering on correctness,
+confidence, or attribution, as a disclosed complement to the curated
+case-study selection — writing figures, a `sampling_manifest.json`, and
+per-flow diagnostics to `outputs/figures/case_studies_stratified/`.
 
 All path resolution goes through `explore/_paths.py`, which reads
 `cfg["run"]["dir"]` so outputs land in the correct `runs/<id>/` subdirectory.
