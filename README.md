@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.9**
+**Version 2.2.10**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -57,6 +57,16 @@ real embeddings), so their reported attribution and fidelity numbers on
 model training/evaluation is unaffected. Table 2's baseline columns should
 be regenerated from current `main` before being cited as reproducing the
 paper, and should not be assumed identical to the `v2.1.0` numbers.
+
+As of `v2.2.10`, `main` also fixes two orchestration/config-resolution bugs
+in `scripts/run_dataset.py` and Phase 3 hyperparameter tuning that silently
+substituted default settings (class balancing, seed, early-stopping policy,
+per-trial tuning budget) instead of a run's actual tuned configuration.
+Neither bug affects the submitted `v2.1.0` snapshot's own numbers — that run
+predates the orchestrator and used a working local configuration directly —
+but both matter for any NEW run through `scripts/run_dataset.py` (including
+future Paper 3 dataset runs), which previously risked silently training
+under the wrong settings with no error.
 
 ---
 
