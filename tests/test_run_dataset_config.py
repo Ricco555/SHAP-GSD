@@ -537,8 +537,9 @@ def test_starter_config_shape_does_not_trip_the_guard(tmp_path: Path) -> None:
         ("experiment_nf_bot_iot_v3.yaml", False),
         ("experiment_nf_ton_iot_v3.yaml", False),
         ("experiment_nf_cicids2018_v3.yaml", False),
-        # The real damaged stub from specs/30 §1.4 — trips the guard BY DESIGN.
-        ("experiment_nf_unsw_nb15_v3.yaml", True),
+        # Hand-fixed to a full 7-key tuned config (specs/30 §1.4 stub resolved
+        # 2026-07-29) — matches the already-fixed ../SHAP-GSD-hpc copy.
+        ("experiment_nf_unsw_nb15_v3.yaml", False),
     ],
 )
 def test_real_on_disk_paper3_configs_match_their_expected_verdict(
@@ -546,11 +547,11 @@ def test_real_on_disk_paper3_configs_match_their_expected_verdict(
 ) -> None:
     """Devops 3, 4 — a verdict TABLE against the real checkout, not a blanket pass.
 
-    Deliberately not parameterised as "all ``configs/experiment_nf_*_v3.yaml``
-    pass": that glob matches four files and the fourth is the damaged stub this
-    build exists to catch. A blanket-pass test would be red here and green on a
-    fresh clone (all four are untracked), and would tempt a future agent into
-    weakening the guard. Each entry skips when its file is absent.
+    Verdicts are pinned per-filename rather than asserted as "all
+    ``configs/experiment_nf_*_v3.yaml`` pass" so that if any of these untracked,
+    hand-maintained files regresses back into a bare stub, this test catches it
+    with an explicit per-file expectation instead of silently going green. Each
+    entry skips when its file is absent (all four are untracked).
 
     READ-ONLY: ``_guard_bare_stub`` only parses and text-scans, so the real
     ``configs/`` directory is never written.
