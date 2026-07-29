@@ -8,8 +8,15 @@ Search space (from configs/tuning_grid.yaml):
   batch_size:  [512, 1024, 2048]             3
   Total: 3 × 3 × 4 × 3 = 108
 
-Per trial: 20 epochs, patience 5, evaluated on val macro-F1.
-Selection metric: val_macro_f1 (not accuracy — dominated by benign class).
+Per-trial budget (max_epochs, patience) comes from configs/tuning_grid.yaml's
+trial: block — see resolve_trial_settings(). Shipped value: 40 epochs,
+patience 20 (specs/33 §II.2).
+
+Cross-trial selection uses the SAME metric as per-trial early stopping:
+model.early_stopping_metric from the experiment config, mapped to a training
+curve key ("composite" -> val_composite_f1, "minority_macro_f1" ->
+val_minority_macro_f1, otherwise val_macro_f1). Each trial result records the
+key actually maximised in its selection_metric_used field.
 """
 
 import copy
@@ -31,6 +38,67 @@ from src.model.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
+#: Required sub-keys of ``configs/tuning_grid.yaml``'s ``trial:`` block.
+TRIAL_SETTING_KEYS: tuple[str, ...] = ("max_epochs", "patience")
+
+#: Maps ``model.early_stopping_metric`` policy names to the training-curve key
+#: they correspond to. Unrecognised policy names fall back to
+#: ``"val_macro_f1"`` at the call site (``dict.get`` default).
+SELECTION_METRIC_CURVE_KEY: dict[str, str] = {
+    "composite":         "val_composite_f1",
+    "minority_macro_f1": "val_minority_macro_f1",
+    "macro_f1":          "val_macro_f1",
+}
+
+
+def resolve_trial_settings(grid_cfg: dict) -> dict:
+    """Resolve the per-trial budget from ``configs/tuning_grid.yaml``.
+
+    Reads ``grid_cfg["trial"]["max_epochs"]`` and
+    ``grid_cfg["trial"]["patience"]`` and returns them under the keyword names
+    ``HyperparameterTuner.__init__`` expects. Fails fast: a missing block or
+    key raises ``KeyError`` rather than silently substituting a default, which
+    is the exact bug class this function exists to remove (specs/32 §2.2).
+
+    Unrecognised keys under ``trial:`` are ignored, not rejected — the
+    ../SHAP-GSD-hpc mirror may still carry a ``selection_metric:`` key until it
+    is synced (specs/32 §6), and that must stay harmless.
+
+    Args:
+        grid_cfg: the parsed ``configs/tuning_grid.yaml`` (already merged with
+            ``configs/default.yaml`` by ``load_config``).
+
+    Returns:
+        ``{"max_epochs_per_trial": int, "patience": int}``.
+
+    Raises:
+        KeyError: if ``trial:`` or either required sub-key is absent.
+    """
+    trial = grid_cfg.get("trial")
+    if not isinstance(trial, dict):
+        raise KeyError(
+            "configs/tuning_grid.yaml is missing the required 'trial:' block "
+            "(expected keys: max_epochs, patience). Refusing to guess a per-trial "
+            "budget — see specs/33."
+        )
+
+    for key in TRIAL_SETTING_KEYS:
+        if key not in trial:
+            raise KeyError(
+                f"configs/tuning_grid.yaml: trial.{key} is required and was not found "
+                f"(present keys: {sorted(trial)}). Refusing to substitute a default — "
+                f"see specs/33."
+            )
+
+    max_epochs = int(trial["max_epochs"])
+    patience   = int(trial["patience"])
+
+    logger.info(
+        "Per-trial budget from configs/tuning_grid.yaml [trial]: "
+        "max_epochs=%d, patience=%d", max_epochs, patience
+    )
+    return {"max_epochs_per_trial": max_epochs, "patience": patience}
+
 
 class HyperparameterTuner:
     """Grid search over the SHAP-GSD model hyperparameter space."""
@@ -39,9 +107,8 @@ class HyperparameterTuner:
         self,
         search_space: dict,
         fixed_params: dict,
-        max_epochs_per_trial: int = 20,
-        patience: int = 5,
-        selection_metric: str = "val_macro_f1",
+        max_epochs_per_trial: int,
+        patience: int,
     ) -> None:
         """
         Args:
@@ -49,13 +116,15 @@ class HyperparameterTuner:
             fixed_params:         dict of param_name → value (held constant).
             max_epochs_per_trial: training epochs per trial.
             patience:             early-stopping patience per trial.
-            selection_metric:     metric to maximise ("val_macro_f1").
+
+        Both ``max_epochs_per_trial`` and ``patience`` are required — the
+        per-trial budget has exactly one authority, ``configs/tuning_grid.yaml``'s
+        ``trial:`` block, resolved by ``resolve_trial_settings()``.
         """
         self.search_space          = search_space
         self.fixed_params          = fixed_params
         self.max_epochs_per_trial  = max_epochs_per_trial
         self.patience              = patience
-        self.selection_metric      = selection_metric
 
     # ------------------------------------------------------------------
     # Public
@@ -175,10 +244,7 @@ class HyperparameterTuner:
 
             # Use the same metric as early stopping for trial selection.
             stopping_metric = cfg_trial["model"].get("early_stopping_metric", "macro_f1")
-            metric_key = {
-                "composite":         "val_composite_f1",
-                "minority_macro_f1": "val_minority_macro_f1",
-            }.get(stopping_metric, "val_macro_f1")
+            metric_key = SELECTION_METRIC_CURVE_KEY.get(stopping_metric, "val_macro_f1")
             best_val_f1 = max(curves[metric_key]) if curves.get(metric_key) else 0.0
             elapsed = time.time() - trial_start
 
@@ -186,13 +252,14 @@ class HyperparameterTuner:
                 "trial": i,
                 "params": trial_params,
                 "best_val_macro_f1": best_val_f1,
+                "selection_metric_used": metric_key,
                 "best_epoch": curves["best_epoch"],
                 "elapsed_s": elapsed,
             }
             results.append(result)
 
             logger.info(
-                f"Trial {i+1}: best_val_macro_f1={best_val_f1:.4f}  ({elapsed:.1f}s)"
+                f"Trial {i+1}: {metric_key}={best_val_f1:.4f}  ({elapsed:.1f}s)"
             )
 
             if best_val_f1 > best_val:
@@ -208,13 +275,15 @@ class HyperparameterTuner:
         with open(best_path, "w") as f:
             json.dump(
                 {"best_params": best_params, "best_val_macro_f1": best_val,
+                 "selection_metric_used": results[best_idx].get("selection_metric_used"),
                  "best_trial": best_idx},
                 f, indent=2,
             )
 
         logger.info(
             f"\nGrid search complete. Best trial {best_idx}: "
-            f"val_macro_f1={best_val:.4f}\n{best_params}"
+            f"{results[best_idx].get('selection_metric_used') or 'unrecorded metric'}"
+            f"={best_val:.4f}\n{best_params}"
         )
         return best_params
 

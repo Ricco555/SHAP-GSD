@@ -1,5 +1,12 @@
 """
-Phase 3: Hyperparameter tuning — 108 configurations, ~54h on A100.
+Phase 3: Hyperparameter tuning — 108 configurations (configs/tuning_grid.yaml
+search_space: 3x3x4x3).
+
+Per-trial budget (max_epochs, patience) is read from that file's trial: block —
+it is NOT hardcoded here. Walltime scales with 108 x trial.max_epochs; at the
+shipped 40 epochs the worst case is 4,320 epochs (~108 h on A100 by the
+pre-searchsorted-sampler UNSW estimate, against a 168 h HPC queue cap —
+specs/33 §II.2.3).
 
 Prerequisites:
   - Phase 1 complete: feature_store/ exists
@@ -28,7 +35,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
-from src.model.tuner import HyperparameterTuner
+from src.model.tuner import HyperparameterTuner, resolve_trial_settings
 from src.utils.config import load_config
 
 logging.basicConfig(
@@ -96,7 +103,12 @@ def main(cfg: dict) -> None:
         repo_root / "configs" / "tuning_grid.yaml",
         default_path=repo_root / "configs" / "default.yaml",
     )
-    tuning_ss  = grid_cfg.get("search_space", cfg["tuning"]["search_space"])
+    if "search_space" not in grid_cfg:
+        raise KeyError(
+            "configs/tuning_grid.yaml is missing the required 'search_space:' "
+            "block. Refusing to guess a hyperparameter grid — see specs/33."
+        )
+    tuning_ss  = grid_cfg["search_space"]
     tuning_fix = grid_cfg.get("fixed", {})
     tuning_fix.update({
         "num_layers": cfg["model"]["num_layers"],
@@ -106,12 +118,11 @@ def main(cfg: dict) -> None:
         "node_state_dim": cfg["model"]["node_state_dim"],
     })
 
+    trial_settings = resolve_trial_settings(grid_cfg)
     tuner = HyperparameterTuner(
         search_space=tuning_ss,
         fixed_params=tuning_fix,
-        max_epochs_per_trial=cfg["tuning"]["max_epochs_per_trial"],
-        patience=cfg["tuning"]["patience_per_trial"],
-        selection_metric=cfg["tuning"]["selection_metric"],
+        **trial_settings,
     )
 
     # ── 6. Run tuning ──────────────────────────────────────────────────────────
@@ -142,17 +153,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment_unsw.yaml")
     args = parser.parse_args()
-    cfg  = load_config(REPO_ROOT / args.config)
-    # Inject tuning config defaults if not present in experiment yaml
-    cfg.setdefault("tuning", {
-        "max_epochs_per_trial": 20,
-        "patience_per_trial": 5,
-        "selection_metric": "val_macro_f1",
-        "search_space": {
-            "fanouts":     [[15, 10], [25, 15], [35, 25]],
-            "hidden_size": [64, 128, 256],
-            "dropout":     [0.1, 0.2, 0.3, 0.4],
-            "batch_size":  [512, 1024, 2048],
-        },
-    })
-    main(cfg)
+    main(load_config(REPO_ROOT / args.config))

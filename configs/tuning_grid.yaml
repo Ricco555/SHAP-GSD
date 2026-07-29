@@ -8,7 +8,12 @@ search_space:
   dropout: [0.1, 0.2, 0.3, 0.4]
   batch_size: [512, 1024, 2048]
 
-# Fixed during search
+# Held constant across the grid.
+# NOTE (verified 2026-07-29, specs/32 §1.4): the first five keys below are
+# UNCONDITIONALLY OVERWRITTEN at scripts/03_tune.py by the experiment config's
+# model: block, so editing them here has no effect. balancing_strategy has zero
+# consumers (the balancer reads cfg["balancer"]["strategy"]). Making this block
+# live would change the 108 trials themselves and is deliberately out of scope.
 fixed:
   num_layers: 2
   aggregator: "mean"
@@ -17,7 +22,20 @@ fixed:
   balancing_strategy: "oversample"
   node_state_dim: 15
 
+# Per-trial training budget. READ BY scripts/03_tune.py via
+# src.model.tuner.resolve_trial_settings(); overrides model.max_epochs /
+# model.patience from the experiment config for the duration of the grid
+# search (src/model/tuner.py, cfg_trial["model"]["max_epochs"|"patience"]).
+# Missing keys are a hard error — never silently defaulted (specs/32 §2.2).
+#
+# Budget rationale (specs/33 §II.1-II.2): trials are ranked by
+# model.early_stopping_metric, which is "composite" for UNSW. Per
+# configs/experiment_unsw.yaml:30, the minority class driving composite first
+# appears ~epoch 13 and composite keeps improving 17+ epochs after that
+# (≈ epoch 30). max_epochs 40 clears that with 10 epochs of margin; patience 20
+# survives a 17-epoch non-improving stretch, so a trial is not killed
+# mid-recovery. Worst case 108 × 40 = 4,320 epochs; see §II.2.3 for the
+# 168 h HPC-queue-cap arithmetic.
 trial:
-  max_epochs: 20
-  patience: 5
-  selection_metric: "val_macro_f1"
+  max_epochs: 40
+  patience: 20

@@ -185,10 +185,13 @@ Builds IP-level DGL graphs (one node per unique IP address) and computes the
 **Phase 3 — Hyperparameter tuning**
 
 108-configuration grid search: fanouts × hidden size × dropout × batch size.
-Selection metric: val macro-F1. 20 epochs per trial, patience 5. Results flush
-after every trial — Ctrl-C and re-run to resume.
+Trials are ranked by the same metric used for early stopping
+(`model.early_stopping_metric`; `composite` for NF-UNSW-NB15-v3). 40 epochs per
+trial, patience 20 — set in `configs/tuning_grid.yaml`'s `trial:` block. Results
+flush after every trial — Ctrl-C and re-run to resume.
 
-Best params (NF-UNSW-NB15-v3): hidden=128, fanouts=[25,15], dropout=0.1,
+Best params (NF-UNSW-NB15-v3), selected under the previous 20-epoch /
+patience-5 tuning budget: hidden=128, fanouts=[25,15], dropout=0.1,
 lr=0.001, seed=90.
 
 **Phase 6 — SHAP-GSD explanations**
