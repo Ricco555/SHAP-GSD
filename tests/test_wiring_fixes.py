@@ -55,6 +55,7 @@ Tests:
 
 import ast
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -207,6 +208,30 @@ def test_compute_weights_on_key_removed_from_default_yaml() -> None:
     assert "compute_weights_on" not in cfg.get("balancer", {})
 
 
+# Top-level dirs to prune when walking the filesystem directly (mirrors
+# .gitignore, plus .git itself and other non-source dirs that are never
+# meant to be read as text): the fallback used when no .git is present,
+# e.g. on an HPC deployment that is a plain file copy, not a clone.
+_WALK_EXCLUDE_DIRS = {
+    ".git", "__pycache__", "visualisation", "artifacts", "feature_store",
+    "graphs", "node_state_snapshots", "outputs", "runs", "external", "data",
+    "datasets", "local", "backups", ".pytest_cache", "node_modules", ".venv",
+}
+
+
+def _walk_repo_like_git_ls_files(repo_root: Path) -> list[str]:
+    """Filesystem-walk fallback for ``git ls-files`` when no ``.git`` is
+    present (e.g. a plain-copy HPC deployment). Prunes the same dirs
+    ``.gitignore`` excludes so multi-GB runtime artifacts are never read."""
+    results = []
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in _WALK_EXCLUDE_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            results.append(str(path.relative_to(repo_root)))
+    return results
+
+
 def test_compute_weights_on_not_referenced_anywhere() -> None:
     """No file under the repo (excluding .git/backups) still mentions the
     removed key -- nothing left dangling per the fix instructions."""
@@ -217,9 +242,14 @@ def test_compute_weights_on_not_referenced_anywhere() -> None:
     # git-tracked files only -- avoids walking gitignored runtime dirs
     # (feature_store/, graphs/, artifacts/, outputs/, runs/, data/, ...),
     # some of which contain multi-GB memmaps not meant to be read as text.
-    tracked = subprocess.run(
-        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-    ).stdout.splitlines()
+    # Falls back to a filesystem walk (pruning the same dirs) when no .git
+    # is present, e.g. on an HPC deployment that is a plain file copy.
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        tracked = _walk_repo_like_git_ls_files(REPO_ROOT)
     # specs/ is gitignored (local-only, per CLAUDE.md) so git ls-files misses
     # it -- check its markdown files explicitly since specs/02_graph_model.md
     # is a real place this key could reappear.
