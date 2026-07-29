@@ -137,6 +137,9 @@ def main(cfg: dict) -> None:
     logger.info(f"balanced_train_indices.npy → {bal_path}  ({len(balanced_eids):,} EIDs)")
 
     # ── 9. Class weights from ORIGINAL unbalanced distribution ────────────────
+    # This source is intentionally hardcoded (train_data["labels"], never the
+    # balanced/resampled EIDs) per CLAUDE.md CRITICAL INVARIANT #4 — it is not
+    # a configurable choice, so no config key exposes it as one.
     class_weights = balancer.get_class_weights(
         train_data["labels"],
         method=bal_cfg.get("class_weight_method", "effective_num"),

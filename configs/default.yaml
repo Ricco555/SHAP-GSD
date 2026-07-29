@@ -18,7 +18,6 @@ balancer:
   effective_num_beta: 0.9999             # Cui et al. 2019 — tunable per dataset
   class_weight_max_clamp: null           # null = no clamp; set float as last-resort safety net
   log_class_weights: true                # always log final weights — required for paper reporting
-  compute_weights_on: "original"         # never compute on balanced distribution
 
 output:
   outputs_dir: "outputs"

@@ -177,6 +177,12 @@ class Trainer:
         self.patience    = m["patience"]
         self.fanouts     = m["fanouts"]
 
+        # DataLoader parallelism/pinning knobs — pure performance tuning, no
+        # effect on any computed value (only how index batches are fetched).
+        c = cfg.get("compute", {})
+        self.num_workers = int(c.get("num_workers", 0))
+        self.pin_memory  = bool(c.get("pin_memory", False))
+
         # Opt-in per-batch timing instrumentation (spec 20 §5). This is a
         # debug/profiling switch with a safe default-off, NOT a tunable
         # hyperparameter — the same justification spec 19 gave for
@@ -371,6 +377,8 @@ class Trainer:
             batch_size=self.batch_size,
             shuffle=False,   # INVARIANT: must remain False
             drop_last=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
         )
 
         ctx = torch.enable_grad() if is_train else torch.no_grad()
@@ -449,6 +457,8 @@ class Trainer:
             batch_size=self.batch_size,
             shuffle=False,
             drop_last=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
         )
 
         with torch.no_grad():

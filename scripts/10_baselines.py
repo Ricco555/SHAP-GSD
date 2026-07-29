@@ -270,6 +270,7 @@ def _run_one_flow(
     device: torch.device,
     pg_algorithm=None,
     gnnexplainer_epochs: int = 200,
+    gnnexplainer_lr: float = 0.01,
     gnnshap_nsamples: int = 256,
     graphsvx_nsamples: int = 256,
     edgeshaper_M: int = 100,
@@ -302,6 +303,7 @@ def _run_one_flow(
                 feature_groups=feature_groups,
                 background=background,
                 epochs=gnnexplainer_epochs,
+                lr=gnnexplainer_lr,
                 top_k=top_k_feature,
             )
 
@@ -665,6 +667,7 @@ def main():
     all_results: dict[str, list[dict]] = {}
     kwargs = dict(
         gnnexplainer_epochs=args.gnn_epochs,
+        gnnexplainer_lr=args.gnn_lr,
         gnnshap_nsamples=args.gnnshap_n,
         graphsvx_nsamples=args.graphsvx_n,
         edgeshaper_M=args.edgeshaper_M,
