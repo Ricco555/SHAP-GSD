@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -46,8 +47,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main(cfg: dict) -> None:
+def _assert_early_stopping_metric_declared(config_path: Path) -> None:
+    """Fail closed unless the experiment config itself sets ``model.early_stopping_metric``.
+
+    ``configs/default.yaml`` always supplies ``early_stopping_metric: "macro_f1"``,
+    so a merged config can never be missing the key — checking the merged dict
+    would never fire. This checks the experiment YAML directly, before the
+    merge, so a dataset config that forgot to declare its own selection metric
+    is caught rather than silently tuning 108 trials against the wrong
+    objective. Phase 3 shard jobs (specs/34) call this script directly and
+    bypass ``run_dataset.py``'s bare-stub guard entirely, so this is the only
+    remaining gate. See specs/34 §0.1.
+    """
+    with open(config_path) as f:
+        raw = yaml.safe_load(f) or {}
+    if "early_stopping_metric" not in (raw.get("model") or {}):
+        raise KeyError(
+            f"{config_path} has no model.early_stopping_metric of its own — "
+            "refusing to silently inherit configs/default.yaml's 'macro_f1' "
+            "default for a 108-trial grid search. Add a model: block with "
+            "early_stopping_metric to the experiment config. See specs/34 §0.1."
+        )
+
+
+def main(cfg: dict, config_path: Path) -> None:
     repo_root = REPO_ROOT
+    _assert_early_stopping_metric_declared(config_path)
     device = torch.device(
         cfg["compute"]["device"] if torch.cuda.is_available() else "cpu"
     )
@@ -126,6 +151,13 @@ def main(cfg: dict) -> None:
     )
 
     # ── 6. Run tuning ──────────────────────────────────────────────────────────
+    logger.info(
+        "Effective Phase 3 selection settings: early_stopping_metric=%r, "
+        "minority_class_threshold=%r, composite_minority_weight=%r",
+        cfg["model"]["early_stopping_metric"],
+        cfg["model"].get("minority_class_threshold"),
+        cfg["model"].get("composite_minority_weight"),
+    )
     output_dir = repo_root / cfg["output"]["artifacts_dir"] / "tuning"
     best_params = tuner.run(
         g_train=g_train,
@@ -153,4 +185,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment_unsw.yaml")
     args = parser.parse_args()
-    main(load_config(REPO_ROOT / args.config))
+    config_path = REPO_ROOT / args.config
+    main(load_config(config_path), config_path)
