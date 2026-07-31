@@ -4,6 +4,9 @@ data:
   train_frac: 0.6
   val_frac: 0.3
 
+run:
+  dir: "runs/nf_unsw_nb15_v3"
+
 preprocessing:
   spearman_threshold: 0.995
   ohe_min_frequency: 0.001
