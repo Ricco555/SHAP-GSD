@@ -2,7 +2,10 @@
 Training loop with temporal balancing and early stopping.
 
 Key invariants:
-- DataLoader iterates training EIDs sorted by timestamp (shuffle=False).
+- Training EIDs are iterated sorted by timestamp, never shuffled
+  (shuffle=False) — via _index_batches, which is either the DataLoader path
+  or the compute.fast_index_loader contiguous-slice path; both preserve
+  this ordering identically.
 - TemporalNeighborSampler uses LOCAL edge IDs (DGL graph indices 0..n_edges-1).
 - Edge features are fetched from FeatureStore using GLOBAL EIDs from g.edata[dgl.EID].
 - NodeStateManager receives global node IDs from blocks[0].srcdata[dgl.NID].
@@ -183,6 +186,19 @@ class Trainer:
         self.num_workers = int(c.get("num_workers", 0))
         self.pin_memory  = bool(c.get("pin_memory", False))
 
+        # Opt-in per-batch overhead removals — both default-off, no effect on
+        # any computed value, only on how/where an equivalent computation
+        # happens. See `_index_batches` and the `cpu_src_dst_pos` branches in
+        # `_run_epoch`/`_evaluate` for the exact equivalence argument.
+        #   fast_index_loader: iterate EIDs via contiguous tensor slices
+        #     instead of DataLoader(TensorDataset(...)), avoiding the default
+        #     collate's per-element aten::select/unsqueeze + torch.stack cost.
+        #   cpu_src_dst_pos: call build_src_dst_pos on the CPU-resident block
+        #     node IDs before blocks.to(device), instead of after, avoiding a
+        #     device->host sync from build_src_dst_pos's internal .tolist().
+        self.fast_index_loader = bool(c.get("fast_index_loader", False))
+        self.cpu_src_dst_pos   = bool(c.get("cpu_src_dst_pos", False))
+
         # Opt-in per-batch timing instrumentation (spec 20 §5). This is a
         # debug/profiling switch with a safe default-off, NOT a tunable
         # hyperparameter — the same justification spec 19 gave for
@@ -352,6 +368,57 @@ class Trainer:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _index_batches(self, local_eids: np.ndarray) -> Iterator[torch.Tensor]:
+        """Yield per-batch int64 local-EID tensors over ``local_eids``.
+
+        Two interchangeable implementations selected by
+        ``compute.fast_index_loader``; both yield exactly the same tensors,
+        in the same order, with the same final short batch (``drop_last``
+        is always ``False``, and training never shuffles — see the
+        ``shuffle=False`` invariant documented at this module's top):
+
+        * ``False`` (default): ``DataLoader(TensorDataset(...), shuffle=False)``
+          — the historical path, unchanged.
+        * ``True``: contiguous slices of the same tensor, avoiding the
+          default collate's per-element ``__getitem__``/``torch.stack``
+          overhead, which is pure waste here since the dataset is a single
+          1-D index tensor.
+
+        Args:
+            local_eids: int64 array of local edge IDs, already sorted
+                ascending (training) or already in the graph's natural
+                0..n-1 order (validation).
+
+        Yields:
+            int64 tensor of shape ``(batch_size,)`` (the last one may be
+            shorter).
+        """
+        eids_t = torch.from_numpy(local_eids)
+        if self.fast_index_loader:
+            # .clone() deliberately: a bare slice would be a VIEW into
+            # eids_t (which shares storage with the caller's numpy array,
+            # itself often reused across every epoch — see train()'s
+            # balanced_sorted). The DataLoader path always yields a fresh
+            # tensor via default_collate's torch.stack, so cloning here
+            # preserves that same "no aliasing" contract, not just the same
+            # values, at negligible cost relative to the collate overhead
+            # this flag removes.
+            n = eids_t.shape[0]
+            for i in range(0, n, self.batch_size):
+                yield eids_t[i:i + self.batch_size].long().clone()
+            return
+
+        loader = DataLoader(
+            TensorDataset(eids_t),
+            batch_size=self.batch_size,
+            shuffle=False,   # INVARIANT: must remain False
+            drop_last=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+        for (batch_local_t,) in loader:
+            yield batch_local_t.long()
+
     def _cuda_sync(self) -> None:
         """Synchronize CUDA before/after GPU timing; no-op on CPU devices."""
         if self.device.type == "cuda":
@@ -372,24 +439,23 @@ class Trainer:
 
         timer = _BatchTimer(self.profile_timing, self._cuda_sync)
 
-        loader = DataLoader(
-            TensorDataset(torch.from_numpy(local_eids)),
-            batch_size=self.batch_size,
-            shuffle=False,   # INVARIANT: must remain False
-            drop_last=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
-
         ctx = torch.enable_grad() if is_train else torch.no_grad()
         with ctx:
-            for (batch_local_t,) in loader:
+            for batch_local in self._index_batches(local_eids):
                 with timer.batch():
-                    batch_local = batch_local_t.long()
-
                     with timer.section("sampling"):
                         input_nodes, seed_local, blocks = self.sampler.sample_blocks(
                             g, batch_local
+                        )
+
+                    # When enabled, resolve src/dst positions from the
+                    # still-CPU-resident block node IDs before the blocks
+                    # move to device — build_src_dst_pos's .tolist() forces
+                    # a device->host sync when the tensor is CUDA-resident.
+                    src_pos = dst_pos = None
+                    if self.cpu_src_dst_pos:
+                        src_pos, dst_pos = build_src_dst_pos(
+                            g, seed_local, blocks[-1].dstdata[dgl.NID]
                         )
 
                     blocks = [b.to(self.device) for b in blocks]
@@ -409,8 +475,9 @@ class Trainer:
                     ).float().to(self.device)
 
                     # Positions in last-block output for edge classification
-                    seed_nodes = blocks[-1].dstdata[dgl.NID]
-                    src_pos, dst_pos = build_src_dst_pos(g, seed_local, seed_nodes)
+                    if src_pos is None:
+                        seed_nodes = blocks[-1].dstdata[dgl.NID]
+                        src_pos, dst_pos = build_src_dst_pos(g, seed_local, seed_nodes)
                     src_pos = src_pos.to(self.device)
                     dst_pos = dst_pos.to(self.device)
 
@@ -452,23 +519,18 @@ class Trainer:
         # Use LOCAL edge IDs for the val graph (0..n_val-1)
         local_val_eids = np.arange(self.g_val.num_edges(), dtype=np.int64)
 
-        loader = DataLoader(
-            TensorDataset(torch.from_numpy(local_val_eids)),
-            batch_size=self.batch_size,
-            shuffle=False,
-            drop_last=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
-
         with torch.no_grad():
-            for (batch_local_t,) in loader:
+            for batch_local in self._index_batches(local_val_eids):
                 with timer.batch():
-                    batch_local = batch_local_t.long()
-
                     with timer.section("sampling"):
                         input_nodes, seed_local, blocks = self.sampler.sample_blocks(
                             self.g_val, batch_local
+                        )
+
+                    src_pos = dst_pos = None
+                    if self.cpu_src_dst_pos:
+                        src_pos, dst_pos = build_src_dst_pos(
+                            self.g_val, seed_local, blocks[-1].dstdata[dgl.NID]
                         )
 
                     blocks = [b.to(self.device) for b in blocks]
@@ -487,10 +549,11 @@ class Trainer:
                         self.fs_val.get_batch(global_eids)
                     ).float().to(self.device)
 
-                    seed_nodes = blocks[-1].dstdata[dgl.NID]
-                    src_pos, dst_pos = build_src_dst_pos(
-                        self.g_val, seed_local, seed_nodes
-                    )
+                    if src_pos is None:
+                        seed_nodes = blocks[-1].dstdata[dgl.NID]
+                        src_pos, dst_pos = build_src_dst_pos(
+                            self.g_val, seed_local, seed_nodes
+                        )
                     src_pos = src_pos.to(self.device)
                     dst_pos = dst_pos.to(self.device)
 

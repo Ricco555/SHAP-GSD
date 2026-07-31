@@ -87,6 +87,16 @@ compute:
   device: "cuda"
   num_workers: 0
   pin_memory: true
+  # Opt-in perf flag, default off: replace DataLoader(TensorDataset(eids))
+  # with contiguous-slice index batching. Verified bit-identical batch
+  # contents/order/drop_last semantics vs the DataLoader path — no behavior
+  # change unless explicitly enabled.
+  fast_index_loader: false
+  # Opt-in perf flag, default off: compute build_src_dst_pos from the CPU
+  # block's node IDs before blocks.to(device), instead of after. Same
+  # integer node IDs either way — no behavior change unless explicitly
+  # enabled.
+  cpu_src_dst_pos: false
 
 reproducibility:
   model_seed: 42
