@@ -175,7 +175,7 @@ def _run_ablation(
         aggregator   = m["aggregator"],
     ).to(device)
 
-    abl_dir = Path(cfg["output"]["artifacts_dir"]) / "ablations" / name
+    abl_dir = ROOT / cfg["output"]["artifacts_dir"] / "ablations" / name
     abl_dir.mkdir(parents=True, exist_ok=True)
 
     trainer = Trainer(
@@ -347,10 +347,19 @@ def main() -> None:
         return
 
     # ── Comparison table ──────────────────────────────────────────────────────
-    locked_metrics_path = Path(cfg["output"]["artifacts_dir"]) / "evaluation" / "metrics.json"
+    locked_metrics_path = ROOT / cfg["output"]["artifacts_dir"] / "evaluation" / "metrics.json"
     locked = json.loads(locked_metrics_path.read_text()) if locked_metrics_path.exists() else {}
+    if locked_metrics_path.exists():
+        ckpt_path = ROOT / cfg["output"]["artifacts_dir"] / "best_model.pt"
+        if ckpt_path.exists() and locked_metrics_path.stat().st_mtime < ckpt_path.stat().st_mtime:
+            logger.warning(
+                "locked_run baseline (%s) predates best_model.pt (%s) — "
+                "Δmacro_f1 column may be comparing against a stale evaluation; "
+                "rerun scripts/05_evaluate.py before trusting these deltas.",
+                locked_metrics_path, ckpt_path,
+            )
 
-    abl_dir = Path(cfg["output"]["artifacts_dir"]) / "ablations"
+    abl_dir = ROOT / cfg["output"]["artifacts_dir"] / "ablations"
     abl_dir.mkdir(parents=True, exist_ok=True)
 
     lines = [
