@@ -15,10 +15,16 @@ Prerequisites:
 
 Usage:
   python scripts/03_tune.py --config configs/experiment_unsw.yaml
+  python scripts/03_tune.py --config <yaml> --shard-axes fanouts,hidden_size --shard K/9
 
 Outputs:
   artifacts/tuning/tuning_results.json   (all 108 trial results)
   artifacts/tuning/best_params.json      (best hyperparameters)
+  artifacts/tuning/tuning_results_shard_*.json  (shard mode: this shard's
+                                          results only — no tuning_results.json
+                                          or best_params.json is written)
+  Shard mode requires a final scripts/promote_best.py run to merge shard
+  files and emit tuning_results.json + best_params.json (specs/34, specs/35).
 """
 
 import argparse
@@ -36,6 +42,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
+from src.model.selection import compute_grid_fingerprint, resolve_shard
 from src.model.tuner import HyperparameterTuner, resolve_trial_settings
 from src.utils.config import load_config
 
@@ -70,9 +77,27 @@ def _assert_early_stopping_metric_declared(config_path: Path) -> None:
         )
 
 
-def main(cfg: dict, config_path: Path) -> None:
+def main(
+    cfg: dict,
+    config_path: Path,
+    shard_axes: str | None = None,
+    shard: str | None = None,
+) -> None:
+    """Run Phase-3 grid tuning — the full grid, or one shard of it.
+
+    Args:
+        cfg:         merged experiment config (load_config output).
+        config_path: path to the experiment YAML (for the pre-merge guard).
+        shard_axes:  raw ``--shard-axes`` CLI string, or None (single job).
+        shard:       raw ``--shard`` CLI string ``K/N``, or None (single job).
+    """
     repo_root = REPO_ROOT
     _assert_early_stopping_metric_declared(config_path)
+    if (shard_axes is None) != (shard is None):
+        raise ValueError(
+            "--shard-axes and --shard must be given together "
+            "(or neither, for a full single-job run)."
+        )
     device = torch.device(
         cfg["compute"]["device"] if torch.cuda.is_available() else "cpu"
     )
@@ -144,6 +169,24 @@ def main(cfg: dict, config_path: Path) -> None:
     })
 
     trial_settings = resolve_trial_settings(grid_cfg)
+
+    # ── 5b. Resolve shard ownership + grid fingerprint (shard mode only) ───────
+    # Placed after the search_space fail-fast, the fixed: overwrite and the
+    # num_classes injection, so the fingerprint sees the fully effective
+    # model: block. All shard-selector assertions (unknown axis, batch_size
+    # exclusion, K/N validation) fire inside resolve_shard, before any GPU work.
+    shard_spec = None
+    if shard_axes is not None:
+        shard_spec = resolve_shard(tuning_ss, shard_axes, shard)
+        shard_spec["grid_fingerprint"] = compute_grid_fingerprint(
+            model_block=cfg["model"],
+            search_space=tuning_ss,
+            trial_block={
+                "max_epochs": trial_settings["max_epochs_per_trial"],
+                "patience":   trial_settings["patience"],
+            },
+        )
+
     tuner = HyperparameterTuner(
         search_space=tuning_ss,
         fixed_params=tuning_fix,
@@ -159,6 +202,18 @@ def main(cfg: dict, config_path: Path) -> None:
         cfg["model"].get("composite_minority_weight"),
     )
     output_dir = repo_root / cfg["output"]["artifacts_dir"] / "tuning"
+    if shard_spec is not None:
+        logger.info(
+            "Shard mode: scheme=axis, axes=%s, shard %d/%d owns %s -> "
+            "%d/%d trials, global indices=%s",
+            shard_spec["shard_axes"], shard_spec["shard_index"],
+            shard_spec["num_shards"], shard_spec["owned_values"],
+            len(shard_spec["owned_indices"]), shard_spec["n_total"],
+            shard_spec["owned_indices"],
+        )
+        logger.info("Shard results file: %s",
+                    output_dir / shard_spec["filename"])
+        logger.info("Grid fingerprint: %s", shard_spec["grid_fingerprint"])
     best_params = tuner.run(
         g_train=g_train,
         g_val=g_val,
@@ -175,15 +230,35 @@ def main(cfg: dict, config_path: Path) -> None:
         device=device,
         output_dir=output_dir,
         seed=cfg["reproducibility"]["model_seed"],
+        shard=shard_spec,
     )
 
-    logger.info(f"Best params: {best_params}")
-    logger.info("Tuning complete. Run scripts/04_train.py to train with best params.")
+    if shard_spec is not None:
+        logger.info(f"Shard-local best params (NOT promoted): {best_params}")
+        logger.info(
+            "Shard complete. Run scripts/promote_best.py after ALL shards "
+            "finish to merge shard files and write best_params.json."
+        )
+    else:
+        logger.info(f"Best params: {best_params}")
+        logger.info("Tuning complete. Run scripts/04_train.py to train with best params.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment_unsw.yaml")
+    parser.add_argument(
+        "--shard-axes", default=None, metavar="AXIS[,AXIS...]",
+        help="Comma-separated search_space axis names to partition the grid "
+             "by (e.g. fanouts,hidden_size). Requires --shard. batch_size "
+             "is rejected (dominant-cost axis).",
+    )
+    parser.add_argument(
+        "--shard", default=None, metavar="K/N",
+        help="Own shard K of N under --shard-axes (e.g. 4/9). N must equal "
+             "the product of the chosen axes' cardinalities.",
+    )
     args = parser.parse_args()
     config_path = REPO_ROOT / args.config
-    main(load_config(config_path), config_path)
+    main(load_config(config_path), config_path,
+         shard_axes=args.shard_axes, shard=args.shard)
