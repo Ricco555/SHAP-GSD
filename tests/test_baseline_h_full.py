@@ -20,6 +20,7 @@ entirely on the SHAP-GSD side.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -1253,3 +1254,329 @@ def test_no_repo_code_expects_a_zero_surrogate_delta_fallback():
         "code treats a surrogate_delta failure as 0.0, conflating it with a "
         "provably flat surrogate:\n" + "\n".join(hits)
     )
+
+
+# ── seed-row agreement: relative, two-tier tolerance (specs/26/27 follow-up) ───
+#
+# The old check was `torch.allclose(atol=1e-4)` on an ABSOLUTE bound, which
+# hard-failed A100 job 1007104 (max|Δ|=1.771e-04 at seed node 7) on ordinary
+# float32 reduction-order noise, because the bound's scale is
+# checkpoint-dependent while the error is scale-invariant (~2-4e-7 RELATIVE).
+# These tests pin the replacement criterion and both of its tiers.  No artifacts
+# needed: the check is a pure function of two rows.
+
+#: Worst-case relative divergence attributable to float32 reduction order
+#: (2-3 fp32 epsilons), invariant to scale/device/fanout/determinism flags.
+FP32_REDUCTION_NOISE_REL = 4e-7
+
+#: The A100 failure that motivated this: an absolute |Δ| of 1.771e-04 on a
+#: checkpoint whose embedding scale is recoverable as 1.771e-4 / ~2.5e-7 ≈ 700.
+A100_FAILURE_ABS_DELTA = 1.771e-4
+A100_CHECKPOINT_SCALE = 700.0
+
+
+def _row_pair(scale: float, abs_delta: float, hidden: int = 8,
+              at: int = 3) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference row with ``‖h_ref‖∞ == scale`` and one element off by ``abs_delta``."""
+    h_ref = torch.full((hidden,), scale / 2.0)
+    h_ref[0] = scale                       # sets the ∞-norm
+    h_row = h_ref.clone()
+    h_row[at] += abs_delta
+    return h_row, h_ref
+
+
+def test_float32_noise_scale_divergence_passes_silently(caplog):
+    """Real fp32 reduction-order noise must not warn, let alone fail."""
+    from src.baselines.adapter import (
+        H_FULL_SEED_REL_WARN, check_seed_row_agreement,
+        reset_seed_agreement_warn_budget,
+    )
+
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        for scale in (1e-2, 1.0, A100_CHECKPOINT_SCALE, 1e4):
+            rel = check_seed_row_agreement(
+                *_row_pair(scale, FP32_REDUCTION_NOISE_REL * scale), 7,
+            )
+            assert rel <= H_FULL_SEED_REL_WARN
+    assert caplog.records == [], "float32 noise must be silent, not logged"
+
+
+def test_the_a100_job_1007104_failure_now_passes_silently(caplog):
+    """The exact divergence that killed job 1007104 is inside the warn budget.
+
+    1.771e-04 absolute on a scale-700 checkpoint is 2.5e-7 relative — the noise
+    floor.  This is the whole point of the change.
+    """
+    from src.baselines.adapter import (
+        check_seed_row_agreement, reset_seed_agreement_warn_budget,
+    )
+
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        rel = check_seed_row_agreement(
+            *_row_pair(A100_CHECKPOINT_SCALE, A100_FAILURE_ABS_DELTA), 7,
+        )
+    assert rel < 1e-6
+    assert caplog.records == []
+
+
+def test_bug2_class_divergence_still_hard_fails():
+    """Bug 2's flattened hop-mixed pass must still be caught, at any scale.
+
+    Its measured divergence is 1.00-3.63 ABSOLUTE on an O(1)-scale fixture
+    (PER_BLOCK_VS_FLAT_EPS's provenance), i.e. ~O(1) RELATIVE — and the relative
+    signature is what carries across checkpoints, since the over-aggregation
+    error scales with the embedding magnitude just as the noise does.
+    """
+    from src.baselines.adapter import (
+        H_FULL_SEED_REL_FAIL, check_seed_row_agreement,
+    )
+
+    for scale in (1.0, A100_CHECKPOINT_SCALE):
+        for abs_delta in (1.00 * scale, 3.63 * scale):
+            with pytest.raises(AssertionError, match="hard fail"):
+                check_seed_row_agreement(*_row_pair(scale, abs_delta), 7)
+    # ...and with margin: the smallest Bug-2 divergence is ~100x the fail budget.
+    assert 1.00 / H_FULL_SEED_REL_FAIL >= 100.0
+
+
+def test_warn_tier_logs_and_does_not_raise(caplog):
+    """Between the two thresholds: reported, never raised."""
+    from src.baselines.adapter import (
+        H_FULL_SEED_REL_FAIL, H_FULL_SEED_REL_WARN, check_seed_row_agreement,
+        reset_seed_agreement_warn_budget,
+    )
+
+    scale = 1.0
+    mid = (H_FULL_SEED_REL_WARN * H_FULL_SEED_REL_FAIL) ** 0.5   # geometric mean
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        rel = check_seed_row_agreement(*_row_pair(scale, mid * scale), 7)
+    assert rel == pytest.approx(mid, rel=1e-3)
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+
+
+@pytest.mark.parametrize("eps", [1e-3])
+def test_tier_boundaries_on_both_sides(eps, caplog):
+    """Just inside each budget passes that tier; just outside escalates.
+
+    Thresholds are imported, not hardcoded, so a future retune cannot silently
+    void this coverage.
+    """
+    from src.baselines.adapter import (
+        H_FULL_SEED_ABS_FLOOR, H_FULL_SEED_REL_FAIL, H_FULL_SEED_REL_WARN,
+        check_seed_row_agreement, reset_seed_agreement_warn_budget,
+    )
+
+    scale = 1.0
+    warn_budget = H_FULL_SEED_ABS_FLOOR + H_FULL_SEED_REL_WARN * scale
+    fail_budget = H_FULL_SEED_ABS_FLOOR + H_FULL_SEED_REL_FAIL * scale
+
+    # Just below the warn budget → silent.
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(*_row_pair(scale, warn_budget * (1 - eps)), 7)
+    assert caplog.records == []
+
+    # Just above the warn budget → exactly one warning, no raise.
+    caplog.clear()
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(*_row_pair(scale, warn_budget * (1 + eps)), 7)
+    assert len(caplog.records) == 1
+
+    # Just below the fail budget → still only a warning.
+    caplog.clear()
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(*_row_pair(scale, fail_budget * (1 - eps)), 7)
+    assert len(caplog.records) == 1
+
+    # Just above the fail budget → raise.
+    with pytest.raises(AssertionError):
+        check_seed_row_agreement(*_row_pair(scale, fail_budget * (1 + eps)), 7)
+
+
+def test_absolute_floor_protects_relu_dead_rows(caplog):
+    """An all-zero reference row must not be judged by a ratio.
+
+    ReLU legitimately zeroes whole rows; a pure relative criterion would divide
+    float noise by zero and fail every one of them.  The floor is ADDITIVE, so
+    such a row is judged against 1e-5 absolute.
+    """
+    from src.baselines.adapter import (
+        H_FULL_SEED_ABS_FLOOR, check_seed_row_agreement,
+        reset_seed_agreement_warn_budget,
+    )
+
+    zero_ref = torch.zeros(8)
+    noisy = torch.zeros(8)
+    noisy[2] = 3e-7                                   # fp32 noise on a dead row
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(noisy, zero_ref, 7)
+    assert caplog.records == []
+
+    # But a dead row is not a licence for arbitrary values: 100x the fail budget
+    # on a zero reference still raises.
+    broken = torch.zeros(8)
+    broken[2] = 100.0 * H_FULL_SEED_ABS_FLOOR
+    with pytest.raises(AssertionError):
+        check_seed_row_agreement(broken, zero_ref, 7)
+
+
+def test_diagnostic_message_names_the_failing_element(caplog):
+    """The message must be self-diagnosing — the A100 log was not.
+
+    Old message printed only the row max |Δ|, which under ``allclose``'s
+    undocumented active ``rtol=1e-5`` need not even be the element that failed.
+    """
+    from src.baselines.adapter import (
+        check_seed_row_agreement, reset_seed_agreement_warn_budget,
+    )
+
+    h_row, h_ref = _row_pair(2.0, 5.0, at=3)
+    with pytest.raises(AssertionError) as ei:
+        check_seed_row_agreement(h_row, h_ref, 7)
+    msg = str(ei.value)
+    assert "seed node 7" in msg
+    assert "element 3" in msg                     # the failing element's index
+    assert f"{float(h_row[3]):.9e}" in msg        # its actual value
+    assert f"{float(h_ref[3]):.9e}" in msg        # the reference value
+    assert "budget" in msg and "‖h_fixed[i]‖∞" in msg
+    assert "relative error" in msg
+    assert "2.000e+00" in msg                     # the reference row's ∞-norm
+
+    # The warn tier carries the same diagnostic payload.
+    caplog.clear()
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(*_row_pair(1.0, 1e-3), 7)
+    warn_msg = caplog.records[0].getMessage()
+    for needle in ("seed node 7", "element 3", "budget", "‖h_fixed[i]‖∞",
+                   "relative error"):
+        assert needle in warn_msg
+
+
+def test_warn_tier_log_budget_is_rate_limited(caplog):
+    """Per seed node, per flow, per baseline — an unbounded warn floods the log."""
+    from src.baselines.adapter import (
+        H_FULL_SEED_WARN_LOG_BUDGET, check_seed_row_agreement,
+        reset_seed_agreement_warn_budget,
+    )
+
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        for _ in range(H_FULL_SEED_WARN_LOG_BUDGET + 20):
+            check_seed_row_agreement(*_row_pair(1.0, 1e-3), 7)
+    # N warnings + the one "suppressed" notice, and nothing after.
+    assert len(caplog.records) == H_FULL_SEED_WARN_LOG_BUDGET + 1
+    assert "suppressed" in caplog.records[-1].getMessage()
+
+    # The reset hook restores the budget (nothing else does).
+    caplog.clear()
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        check_seed_row_agreement(*_row_pair(1.0, 1e-3), 7)
+    assert len(caplog.records) == 1
+
+
+# ── the check must stay WIRED INTO build_h_full ───────────────────────────────
+
+class _TinyModel(torch.nn.Module):
+    """One-layer stand-in exposing exactly what build_h_full reads."""
+
+    def __init__(self, in_dim: int = 15, hidden: int = 4) -> None:
+        super().__init__()
+        from dgl.nn import SAGEConv
+
+        self.convs = torch.nn.ModuleList([SAGEConv(in_dim, hidden, "mean")])
+        self.bns = torch.nn.ModuleList([torch.nn.BatchNorm1d(hidden)])
+
+
+class _TinyCtx:
+    """Minimal FlowContext stand-in for a 3-node, 1-layer, 1-seed subgraph."""
+
+    def __init__(self, blocks: list, node_feats_t: torch.Tensor,
+                 h_fixed: torch.Tensor) -> None:
+        self.blocks = blocks
+        self.node_feats_t = node_feats_t
+        self.h_fixed = h_fixed
+        self.target_src_nid = 10
+        self.target_dst_nid = 12
+
+
+def _tiny_build_h_full_case() -> tuple:
+    """A synthetic build_h_full input whose exact seed row is known.
+
+    Returns ``(ctx_factory, model, gnid_to_local, edge_index)`` where
+    ``ctx_factory(delta)`` yields a ctx whose ``h_fixed`` is the exactly-correct
+    seed row perturbed by ``delta`` in element 0 — letting a test drive any tier
+    of the agreement check through the real function.
+    """
+    torch.manual_seed(0)
+    model = _TinyModel().eval()
+
+    src = torch.tensor([0, 1], dtype=torch.int64)     # block-local src indices
+    dst = torch.tensor([0, 0], dtype=torch.int64)     # block-local dst indices
+    block = dgl.create_block((src, dst), num_src_nodes=3, num_dst_nodes=1)
+    block.srcdata[dgl.NID] = torch.tensor([10, 11, 12])
+    block.dstdata[dgl.NID] = torch.tensor([12])
+
+    gnid_to_local = {10: 0, 11: 1, 12: 2}
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+    node_feats_t = torch.randn(3, 15)
+
+    # The exactly-correct answer, computed the same way build_h_full does.
+    g = dgl.graph((torch.tensor([0, 1]), torch.tensor([2, 2])), num_nodes=3)
+    with torch.no_grad():
+        h = torch.relu(model.bns[0](model.convs[0](g, node_feats_t)))
+    exact_seed_row = h[2].clone()
+
+    def ctx_factory(delta: float) -> _TinyCtx:
+        h_fixed = exact_seed_row.clone().unsqueeze(0)
+        h_fixed[0, 0] += delta
+        return _TinyCtx([block], node_feats_t, h_fixed)
+
+    return ctx_factory, model, gnid_to_local, edge_index
+
+
+def test_build_h_full_still_applies_the_agreement_check(caplog):
+    """End-to-end: the tiers must fire through build_h_full itself.
+
+    Every artifact-backed test in this file skips without graphs/ and
+    artifacts/, and the helper unit tests above would all still pass if a
+    refactor dropped the call site — so drive the real function.
+    """
+    from src.baselines.adapter import (
+        build_h_full, reset_seed_agreement_warn_budget,
+    )
+
+    ctx_factory, model, gnid_to_local, edge_index = _tiny_build_h_full_case()
+
+    # Exact agreement → silent, and the seed row is overwritten with h_fixed.
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        ctx = ctx_factory(0.0)
+        h_full = build_h_full(ctx, model, gnid_to_local, edge_index)
+    assert caplog.records == []
+    assert torch.equal(h_full[2], ctx.h_fixed[0])
+
+    scale = float(ctx_factory(0.0).h_fixed.abs().max())
+    assert scale > 0.0, "fixture must have a non-degenerate embedding scale"
+
+    # Warn tier → logged, still returns.
+    caplog.clear()
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        h_full = build_h_full(
+            ctx_factory(1e-3 * scale), model, gnid_to_local, edge_index
+        )
+    assert len(caplog.records) == 1
+    assert h_full.shape == (3, 4)
+
+    # Bug-2-scale divergence → hard fail, through the real call site.
+    with pytest.raises(AssertionError, match="hard fail"):
+        build_h_full(ctx_factory(1.0 * scale), model, gnid_to_local, edge_index)

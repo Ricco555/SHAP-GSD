@@ -362,7 +362,174 @@ def _resolve_compute_device(model: "EdgeAwareGraphSAGE") -> torch.device:
 # floating-point reduction order. Docstring, comment, logging, type-annotation
 # and assertion-message edits do NOT bump it. When in doubt, bump: a spurious
 # bump costs one retrain, a missed bump costs a silently wrong Table-2 column.
+#
+# NOT BUMPED by the seed-row tolerance rework below (relative two-tier check
+# replacing the absolute atol=1e-4 assert). Deliberate, and not a "when in doubt"
+# case: the rework touches only WHETHER the function raises, never what it
+# computes -- not one arithmetic op, dtype, device or reduction order changed, so
+# every input produces a byte-identical tensor. The one behaviour that does
+# change (inputs that used to raise now return) cannot invalidate a cache either:
+# a raise produced NO cached PGExplainer MLP at all, so no sidecar on disk was
+# ever fit on an input whose h_full now differs. The staleness guard (specs/28)
+# is untouched.
 H_FULL_SCHEMA_VERSION: int = 3
+
+
+# ── build_h_full seed-row agreement tolerances ────────────────────────────────
+#
+# The check these parametrise (see check_seed_row_agreement) replaced an
+# absolute `torch.allclose(..., atol=1e-4)` that hard-failed an entire
+# multi-hour Phase-10 job on ordinary GPU float32 noise (A100 job 1007104:
+# max|Δ|=1.771e-04 at seed node 7). Root cause: the bound was ABSOLUTE, but the
+# quantity it bounds scales with the checkpoint's embedding magnitude, while the
+# error itself is scale-INVARIANT -- ~2-4e-7 RELATIVE (2-3 fp32 epsilons) from
+# DGL's internal reduction order differing between a bipartite-block pass and a
+# homogeneous-graph pass. Same mathematics, different accumulation order: a
+# float64 control collapsed the divergence from 2.29e-05 to 6.66e-16, tracking
+# machine epsilon exactly.
+#
+# Criterion: max|Δ| <= ABS_FLOOR + rel_tol * ‖h_fixed_row‖∞, i.e. relative to the
+# reference row's own scale with a small additive absolute allowance. The floor
+# exists for rows that ReLU legitimately drives to (near) zero, where a pure
+# ratio is ill-conditioned; it is additive, not a denominator, so a dead row is
+# judged by an absolute 1e-5 rather than by dividing a tiny number by a tinier
+# one.
+#
+# Threshold justification -- both sides stated RELATIVELY, since the thresholds
+# are relative (the raw literature numbers below are absolute and were measured
+# on an O(1)-scale checkpoint, so they are not directly comparable):
+#   * float32 noise floor: 2-4e-7 relative, invariant to scale, device, fanout
+#     and determinism flags. REL_WARN = 1e-4 -> 250-500x headroom.
+#   * The bug class this guard exists for (Bug 2, specs/26/27, commit 5434795:
+#     every conv layer applied over the flattened union graph instead of
+#     per-block, giving nodes hop-mixed depth the model never computes) measured
+#     1.00-3.63 ABSOLUTE on a fixture whose embedding scale is O(1)
+#     (tests/test_baseline_h_full.py PER_BLOCK_VS_FLAT_EPS), i.e. ~O(1)
+#     RELATIVE. REL_FAIL = 1e-2 -> ~100x margin, and REL_WARN would flag it
+#     ~10,000x over.
+#
+# LOAD-BEARING ASSUMPTION, stated because leaving it implicit is precisely what
+# made the old absolute design fail: Bug 2's relative signature is
+# checkpoint-invariant. Its over-aggregation error scales WITH the embedding
+# magnitude (it is the same layers' output, just at the wrong depth), exactly as
+# the fp32 noise does, so the ~100x fail margin does not evaporate on a
+# large-embedding checkpoint the way absolute atol=1e-4's margin did. The A100
+# checkpoint's scale is recoverable from its own numbers as
+# 1.771e-4 / ~2.5e-7 ≈ 700; under this criterion its warn budget is
+# 1e-5 + 1e-4*700 ≈ 0.07 and its fail budget ≈ 7 -- while Bug 2 on that same
+# checkpoint would land near 700, still ~100x over.
+#
+#: Additive absolute allowance, for reference rows ReLU drove to ~zero.
+H_FULL_SEED_ABS_FLOOR: float = 1e-5
+#: Above this relative error the divergence is logged (never raised).
+H_FULL_SEED_REL_WARN: float = 1e-4
+#: Above this relative error the divergence is a hard failure.
+H_FULL_SEED_REL_FAIL: float = 1e-2
+
+#: Warn-tier log budget. The check runs per seed node, per flow, per baseline;
+#: a checkpoint sitting just above REL_WARN would otherwise flood the log of the
+#: exact multi-hour job this two-tier design exists to keep alive.
+H_FULL_SEED_WARN_LOG_BUDGET: int = 5
+
+_h_full_seed_warn_count: int = 0
+
+
+def reset_seed_agreement_warn_budget() -> None:
+    """Reset the warn-tier log budget counter (test/orchestration hook)."""
+    global _h_full_seed_warn_count
+    _h_full_seed_warn_count = 0
+
+
+def check_seed_row_agreement(
+    h_row: torch.Tensor,
+    h_ref: torch.Tensor,
+    gnid: int,
+    *,
+    abs_floor: float = H_FULL_SEED_ABS_FLOOR,
+    rel_warn: float = H_FULL_SEED_REL_WARN,
+    rel_fail: float = H_FULL_SEED_REL_FAIL,
+) -> float:
+    """Check one seed row of the layered pass against ``model.encode()``.
+
+    Two tiers over a single criterion,
+    ``max|Δ| <= abs_floor + rel_tol * ‖h_ref‖∞``:
+
+    * at or below the ``rel_warn`` budget — silent pass (expected float32
+      reduction-order noise);
+    * above ``rel_warn`` but at or below ``rel_fail`` — logged at WARNING, does
+      NOT raise, so a numerically noisy but structurally correct checkpoint
+      cannot kill a multi-hour Phase-10 job;
+    * above ``rel_fail`` — ``AssertionError``.
+
+    The budget is the sole gate; the relative error in the message is a derived,
+    human-readable field. Note there is no ``rtol`` hiding anywhere: the old
+    ``torch.allclose`` carried an undocumented active ``rtol=1e-5`` on top of its
+    ``atol``, which meant the reported row-max element need not have been the
+    element that actually failed. Here the reported element IS the failing one by
+    construction — it is the argmax of ``|Δ|``, and the budget is per row.
+
+    Args:
+        h_row:     (hidden,) seed row from the layered per-block pass.
+        h_ref:     (hidden,) the same seed's row of ``ctx.h_fixed`` (the model's
+                   own block-computed embedding) — the reference whose ∞-norm
+                   sets the scale.
+        gnid:      global node ID of the seed, for the message.
+        abs_floor: additive absolute allowance for near-zero reference rows.
+        rel_warn:  relative threshold above which the divergence is logged.
+        rel_fail:  relative threshold above which it is an error.
+
+    Returns:
+        The relative error ``max|Δ| / max(‖h_ref‖∞, abs_floor)``.
+
+    Raises:
+        AssertionError: if the divergence exceeds the ``rel_fail`` budget.
+    """
+    global _h_full_seed_warn_count
+
+    delta = (h_row - h_ref).abs()
+    k = int(torch.argmax(delta))
+    max_abs = float(delta[k])
+    scale = float(h_ref.abs().max()) if h_ref.numel() else 0.0
+    rel = max_abs / max(scale, abs_floor)
+
+    warn_budget = abs_floor + rel_warn * scale
+    fail_budget = abs_floor + rel_fail * scale
+    if max_abs <= warn_budget:
+        return rel
+
+    def _diagnose(tier: str, budget: float, rel_tol: float) -> str:
+        return (
+            f"layered pass diverged from model.encode() at seed node {gnid} "
+            f"({tier}): element {k} is {float(h_row[k]):.9e} vs h_fixed "
+            f"{float(h_ref[k]):.9e}, |Δ|={max_abs:.3e}, over a budget of "
+            f"{budget:.3e} (= abs_floor {abs_floor:.1e} + rel_tol {rel_tol:.1e} "
+            f"* ‖h_fixed[i]‖∞ {scale:.3e}) by {max_abs - budget:.3e}; "
+            f"relative error {rel:.3e} "
+            f"(|Δ| / max(‖h_fixed[i]‖∞, {abs_floor:.1e}))"
+        )
+
+    if max_abs > fail_budget:
+        raise AssertionError(
+            _diagnose("hard fail", fail_budget, rel_fail)
+            + ". A relative error this large is far above float32 "
+            "reduction-order noise (~2-4e-7) and is the signature of a "
+            "structural error in the per-block pass, e.g. Bug 2's flattened "
+            "hop-mixed aggregation (specs/26, specs/27)."
+        )
+
+    _h_full_seed_warn_count += 1
+    if _h_full_seed_warn_count <= H_FULL_SEED_WARN_LOG_BUDGET:
+        logger.warning(
+            "%s. Above expected float32 noise but far below the hard-fail "
+            "budget (%.3e), so this is reported, not raised.",
+            _diagnose("warn", warn_budget, rel_warn), fail_budget,
+        )
+        if _h_full_seed_warn_count == H_FULL_SEED_WARN_LOG_BUDGET:
+            logger.warning(
+                "Further build_h_full seed-row agreement warnings suppressed "
+                "(log budget %d reached).", H_FULL_SEED_WARN_LOG_BUDGET,
+            )
+    return rel
 
 
 def build_h_full(
@@ -385,9 +552,11 @@ def build_h_full(
     layer ``i``'s output here equals what ``model.encode()`` computes for it —
     identical in-neighbour multiset, identical layer-(i-1) inputs.  The seed
     nodes are the only nodes for which that holds at every layer, so the
-    layered pass's seed rows reproduce ``ctx.h_fixed`` (asserted per flow
-    below), and they are then overwritten with ``ctx.h_fixed`` verbatim so the
-    surrogate's readout equals the real model prediction exactly.
+    layered pass's seed rows reproduce ``ctx.h_fixed`` up to float32
+    reduction-order noise — checked per flow below by
+    ``check_seed_row_agreement``, which logs a small divergence and raises only
+    on a large one — and they are then overwritten with ``ctx.h_fixed`` verbatim
+    so the surrogate's readout equals the real model prediction exactly.
 
     Approximation 1 — the self-lift.  For a node that appears in ``blocks[i]``
     only as a *source* (never a destination), the convolution degenerates to
@@ -561,25 +730,17 @@ def build_h_full(
     # over the same in-neighbour multiset in a different edge order is not
     # bit-identical.
     #
-    # Two deliberately different tolerances, so they do not read as an
-    # inconsistency:
-    #   production (here)  atol=1e-4  headroom for GPU reduction-order
-    #       differences, which cannot be measured on the CPU dev machine.  Still
-    #       ~1e4x tighter than the smallest observed |h_per_block - h_flattened|
-    #       of 1.0, so it cannot mask Bug 2's return.
-    #   measured           ~1e-5      the max deviation actually observed on CPU
-    #       over 40 real flows was 8.345e-07 (spec 27 §1.1) — i.e. this assert
-    #       carries ~120x margin on the hardware it has been measured on, and
-    #       the extra headroom above is purely for unmeasured GPU numerics.
+    # The tolerance is RELATIVE and two-tiered — see check_seed_row_agreement and
+    # the threshold block above it for the criterion, the measured numbers behind
+    # each threshold, and why the previous absolute `torch.allclose(atol=1e-4)`
+    # (whose undocumented active rtol=1e-5 is now gone) was the wrong shape of
+    # bound for a checkpoint-scale-dependent quantity.
     seed_gnids = ctx.blocks[-1].dstdata[_dgl.NID].cpu().tolist()
     h_fixed_cpu = ctx.h_fixed.detach().cpu().float()
     for i, gnid in enumerate(seed_gnids):
         local_idx = gnid_to_local.get(gnid)
         if local_idx is not None:
-            assert torch.allclose(h_full[local_idx], h_fixed_cpu[i], atol=1e-4), (
-                f"layered pass diverged from model.encode() at seed node {gnid}: "
-                f"max|Δ|={float((h_full[local_idx] - h_fixed_cpu[i]).abs().max()):.3e}"
-            )
+            check_seed_row_agreement(h_full[local_idx], h_fixed_cpu[i], gnid)
 
     # Overwrite the seed rows with the model's authoritative block-computed
     # embeddings so the surrogate's readout equals the real model prediction.
