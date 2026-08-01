@@ -1404,7 +1404,8 @@ def test_absolute_floor_protects_relu_dead_rows(caplog):
 
     ReLU legitimately zeroes whole rows; a pure relative criterion would divide
     float noise by zero and fail every one of them.  The floor is ADDITIVE, so
-    such a row is judged against 1e-5 absolute.
+    such a row is judged against ``H_FULL_SEED_ABS_FLOOR`` (1e-4) absolute —
+    equal to the ``atol`` this check replaced, not smaller.
     """
     from src.baselines.adapter import (
         H_FULL_SEED_ABS_FLOOR, check_seed_row_agreement,
@@ -1425,6 +1426,45 @@ def test_absolute_floor_protects_relu_dead_rows(caplog):
     broken[2] = 100.0 * H_FULL_SEED_ABS_FLOOR
     with pytest.raises(AssertionError):
         check_seed_row_agreement(broken, zero_ref, 7)
+
+
+def test_non_finite_seed_rows_hard_fail_not_warn(caplog):
+    """NaN/inf must raise, not fall through to the warn tier.
+
+    The two-tier gate is a pair of comparisons, and BOTH are False for NaN
+    (``nan <= warn_budget`` and ``nan > fail_budget``), so without an explicit
+    guard a NaN embedding reaches the warn branch by accident — logged a handful
+    of times, then rate-limited into silence, then into Table 2.  An infinite
+    reference does the same by making both budgets infinite.  The superseded
+    ``torch.allclose`` returned False on either, i.e. raised: the relaxation is
+    of the TOLERANCE, never of what counts as a valid embedding.
+    """
+    from src.baselines.adapter import (
+        check_seed_row_agreement, reset_seed_agreement_warn_budget,
+    )
+
+    ref = torch.ones(4)
+
+    nan_row = torch.ones(4)
+    nan_row[2] = float("nan")
+    assert not torch.allclose(nan_row, ref, atol=1e-4), "old check raised here"
+
+    inf_row = torch.ones(4)
+    inf_row[2] = float("inf")
+
+    inf_ref = torch.ones(4)
+    inf_ref[0] = float("inf")
+    plain_row = torch.ones(4)
+    plain_row[2] = 5.0
+    assert not torch.allclose(plain_row, inf_ref, atol=1e-4), "old check raised here"
+
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        for row, reference in ((nan_row, ref), (inf_row, ref),
+                               (plain_row, inf_ref), (ref, torch.full((4,), float("nan")))):
+            with pytest.raises(AssertionError, match="non-finite|hard fail"):
+                check_seed_row_agreement(row, reference, 7)
+    assert caplog.records == [], "a non-finite row must never be a mere warning"
 
 
 def test_diagnostic_message_names_the_failing_element(caplog):

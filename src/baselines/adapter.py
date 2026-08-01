@@ -32,6 +32,7 @@ Provides:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -434,8 +435,22 @@ H_FULL_SCHEMA_VERSION: int = 3
 # large-embedding checkpoint the way absolute atol=1e-4's margin did. The A100
 # checkpoint's scale is recoverable from its own numbers as
 # 1.771e-4 / ~2.5e-7 ≈ 700; under this criterion its warn budget is
-# 1e-5 + 1e-4*700 ≈ 0.07 and its fail budget ≈ 7 -- while Bug 2 on that same
+# 1e-4 + 1e-4*700 ≈ 0.07 and its fail budget ≈ 7 -- while Bug 2 on that same
 # checkpoint would land near 700, still ~100x over.
+#
+# EVIDENCE CAVEAT on the Bug-2 margin, stated rather than left implied. The
+# 1.00-3.63 figure is spec 27 §6.3c's max over the WHOLE h_full matrix, and the
+# flattened-control test that pins it (test_per_block_pass_differs_from_flattened)
+# scopes itself to NON-SEED rows -- Bug 2's divergence at the SEED rows, which is
+# what this check actually sees, has never been measured. The O(1)-scale premise
+# is likewise reconstructed, not measured: spec 27 §1.1's 8.345e-07 absolute at
+# 2-4e-7 relative implies a reference-checkpoint scale of ~2-4, so Bug 2 lands at
+# ~0.25-1.8 relative and the fail margin is 25-180x, not a flat 100x. Both gaps
+# are INHERITED from commit 5434795, which justified atol=1e-4 off the same
+# non-seed number; this rework does not introduce them, but it does spend the
+# slack (~1e4x down to ~25-180x), so closing them empirically -- a pre-overwrite
+# seed-row run of _flattened_h_full against a real checkpoint -- is worth doing
+# before the next Table-2 regeneration.
 #
 #: Additive absolute allowance, for reference rows ReLU drove to ~zero. Equal to
 #: the superseded atol by design — see the STRICT-RELAXATION INVARIANT above.
@@ -522,6 +537,26 @@ def check_seed_row_agreement(
 
     warn_budget = abs_floor + rel_warn * scale
     fail_budget = abs_floor + rel_fail * scale
+
+    # Non-finite values are an unconditional hard failure, checked BEFORE the
+    # budget comparisons. Both `max_abs <= warn_budget` and
+    # `max_abs > fail_budget` are False when max_abs is NaN, so without this a
+    # NaN embedding would fall through to the warn tier -- be logged a handful
+    # of times, be rate-limited into silence, and then land in Table 2. An
+    # infinite reference makes both budgets infinite and does the same. The
+    # superseded `torch.allclose` returned False on either, i.e. raised: this
+    # rework is a deliberate relaxation of the TOLERANCE, never a relaxation of
+    # what counts as a valid embedding.
+    if not (math.isfinite(max_abs) and math.isfinite(scale)):
+        raise AssertionError(
+            f"layered pass produced a non-finite seed row at seed node {gnid} "
+            f"(hard fail): element {k} is {float(h_row[k]):.9e} vs h_fixed "
+            f"{float(h_ref[k]):.9e}, |Δ|={max_abs:.3e}, "
+            f"‖h_fixed[i]‖∞={scale:.3e}. NaN/inf is never float32 "
+            "reduction-order noise; it is a broken checkpoint or a broken "
+            "subgraph, and must not reach the surrogate."
+        )
+
     if max_abs <= warn_budget:
         return rel
 
