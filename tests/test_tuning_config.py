@@ -386,8 +386,11 @@ def test_run_records_selection_metric_used() -> None:
     run_src = inspect.getsource(HyperparameterTuner.run)
     # Added to each trial result dict...
     assert '"selection_metric_used": metric_key,' in run_src
-    # ...and to the best_params.json payload.
-    assert '"selection_metric_used": results[best_idx].get("selection_metric_used")' in run_src
+    # ...and to the best_params.json payload. (Pin updated for the specs/35
+    # sharding build: best_idx ceased to exist — selection now goes through
+    # src.model.selection.select_best, which returns the winning RECORD, and
+    # the payload reads the field off that record. Same property, new source.)
+    assert '"selection_metric_used": best.get("selection_metric_used")' in run_src
     # The resume-compatible field name is retained alongside it.
     assert '"best_val_macro_f1": best_val_f1,' in run_src
 

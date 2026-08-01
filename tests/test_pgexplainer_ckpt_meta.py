@@ -165,7 +165,21 @@ def test_write_sidecar_produces_valid_schema(tmp_path: Path) -> None:
     sidecar = write_sidecar(ckpt, payload)
 
     assert sidecar == sidecar_path_for(ckpt)
-    data = json.loads(sidecar.read_text())
+    raw = sidecar.read_text()
+    data = json.loads(raw)
+
+    # Pin the raw on-disk shape produced via the shared
+    # src.model.selection.write_json_atomic (specs/35 findings #4-6
+    # consolidation). NOTE, not a "no new bug" claim: the pre-consolidation
+    # write_sidecar() did `json.dump(...); f.write("\n")`, i.e. it left a
+    # trailing newline; write_json_atomic() does not append one. Nothing
+    # downstream (json.loads here, or check_checkpoint's own json.load)
+    # cares about the trailing newline, so this is not a functional
+    # regression -- but it IS an unannounced on-disk format change from a
+    # refactor billed as behavior-preserving, and this assertion exists so
+    # any future re-drift is visible in a test diff rather than silent.
+    assert not raw.endswith("\n")
+    assert raw == json.dumps(data, indent=2, sort_keys=True)
 
     for key in (
         "schema", "h_full_schema_version", "best_model_sha256",

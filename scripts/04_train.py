@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
 from src.model.sage_model import EdgeAwareGraphSAGE
+from src.model.selection import SHARD_FILE_PREFIX
 from src.model.trainer import Trainer
 from src.utils.config import load_config
 
@@ -58,6 +59,29 @@ def main(cfg: dict, best_params_path: Path | None = None) -> None:
         logger.info(f"Loading best params from {best_params_path}: {best}")
         cfg["model"].update(best)
     else:
+        # Sharded Phase-3 tuning (specs/34, specs/35) never writes
+        # best_params.json itself -- scripts/promote_best.py does, only
+        # after all shards finish. If shard result files are present here
+        # with no best_params.json, the grid WAS tuned but never promoted:
+        # that is a forgotten-step error, not "no tuning happened yet", and
+        # must not be allowed to fall through to silently training on
+        # untuned defaults (which would discard the entire point of the
+        # grid search with nothing but a WARNING in the log). A directory
+        # with no shard residue at all (fresh run, ablations, tests) is the
+        # genuine no-tuning-yet case and keeps the existing soft-warning
+        # behavior unchanged.
+        shard_files = sorted(
+            best_params_path.parent.glob(SHARD_FILE_PREFIX + "*.json")
+        )
+        if shard_files:
+            raise RuntimeError(
+                f"best_params.json not found at {best_params_path}, but "
+                f"{len(shard_files)} sharded Phase-3 result file(s) are "
+                f"present there ({[p.name for p in shard_files]}). The grid "
+                "was tuned in shard mode but never promoted. Run "
+                "'python scripts/promote_best.py --tuning-dir "
+                f"{best_params_path.parent}' before scripts/04_train.py."
+            )
         logger.warning(
             f"best_params.json not found at {best_params_path}. "
             "Using default model config. Run 03_tune.py first for optimal results."

@@ -14,7 +14,10 @@ checkpoint (the payload is a pickled nn.Module loaded with weights_only=False,
 which is exactly what you should not open to establish provenance).
 
 Deliberately import-light: stdlib only (hashlib, json, os, pathlib, datetime,
-dataclasses, importlib). No torch/dgl/torch_geometric import here, so the unit
+dataclasses, importlib) PLUS src.model.selection.write_json_atomic, itself
+stdlib-only (specs/34 §4.3) — the single shared tmp-file + os.replace atomic
+write used everywhere in this project, so this module does not hand-maintain
+its own second copy. No torch/dgl/torch_geometric import here, so the unit
 tests need no GPU, no artifacts and no third-party explainer libraries
 (see tests/test_pgexplainer_ckpt_meta.py). See specs/28 and specs/29.
 """
@@ -28,6 +31,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from src.model.selection import write_json_atomic
 
 SIDECAR_SCHEMA: str = "pgexplainer_algorithm.meta/1"
 SIDECAR_SUFFIX: str = ".meta.json"
@@ -198,11 +203,13 @@ def build_sidecar_payload(
 def write_sidecar(ckpt_path: Path, payload: dict) -> Path:
     """Atomically write the sidecar next to ``ckpt_path``.
 
-    Writes ``<sidecar>.tmp`` then ``os.replace`` onto the final name, so the
-    sidecar is never observable half-written. (The checkpoint and its sidecar
-    are two files and CANNOT be written atomically with respect to each other;
-    they do not need to be -- specs/28 §2.4 shows both crash orderings degrade
-    to a retrain.)
+    Delegates to ``src.model.selection.write_json_atomic`` -- the one
+    shared tmp-file + os.replace atomic-write implementation this project
+    uses everywhere, rather than a second hand-maintained copy -- with
+    ``sort_keys=True`` for a stable on-disk key order. (The checkpoint and
+    its sidecar are two files and CANNOT be written atomically with respect
+    to each other; they do not need to be -- specs/28 §2.4 shows both crash
+    orderings degrade to a retrain.)
 
     Args:
         ckpt_path: Path of the checkpoint the sidecar describes.
@@ -212,11 +219,7 @@ def write_sidecar(ckpt_path: Path, payload: dict) -> Path:
         The sidecar path written.
     """
     sidecar = sidecar_path_for(ckpt_path)
-    tmp = sidecar.with_name(sidecar.name + ".tmp")
-    with open(tmp, "w") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, sidecar)
+    write_json_atomic(sidecar, payload, sort_keys=True)
     return sidecar
 
 

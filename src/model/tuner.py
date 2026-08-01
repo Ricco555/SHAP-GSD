@@ -17,10 +17,15 @@ model.early_stopping_metric from the experiment config, mapped to a training
 curve key ("composite" -> val_composite_f1, "minority_macro_f1" ->
 val_minority_macro_f1, otherwise val_macro_f1). Each trial result records the
 key actually maximised in its selection_metric_used field.
+
+Shard mode (specs/34, specs/35): when run() receives a shard spec it OWNS
+only the trials whose axis values match the spec's owned_values, writes its
+results to a per-shard file in the same tuning directory, and NEVER writes
+tuning_results.json or best_params.json — scripts/promote_best.py merges the
+shard files and emits those two artifacts.
 """
 
 import copy
-import itertools
 import json
 import logging
 import time
@@ -34,6 +39,12 @@ import dgl
 from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
 from src.model.sage_model import EdgeAwareGraphSAGE
+from src.model.selection import (
+    build_shard_header,
+    enumerate_grid,
+    select_best,
+    write_json_atomic,
+)
 from src.model.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -147,6 +158,7 @@ class HyperparameterTuner:
         output_dir: Path,
         seed: int = 42,
         train_label_counts: np.ndarray | None = None,
+        shard: dict | None = None,
     ) -> dict:
         """Run all hyperparameter trials and return the best config.
 
@@ -165,9 +177,21 @@ class HyperparameterTuner:
             device:              torch device.
             output_dir:          directory to write tuning_results.json, best_params.json.
             seed:                base random seed (trial i uses seed+i).
+            shard:               Optional shard spec from
+                                 ``src.model.selection.resolve_shard`` (plus a
+                                 ``grid_fingerprint`` key added by the caller).
+                                 When given, this process OWNS ONLY the trials
+                                 whose axis values match ``shard["owned_values"]``;
+                                 it reads/writes only
+                                 ``output_dir / shard["filename"]`` and NEVER
+                                 writes ``tuning_results.json`` or
+                                 ``best_params.json`` (specs/34 §3.5). Default
+                                 ``None`` = today's single-job behavior,
+                                 unchanged.
 
         Returns:
-            best_params dict (values for the tuned hyperparameters).
+            best_params dict (values for the tuned hyperparameters). In shard
+            mode this is the SHARD-LOCAL best, not the grid-wide winner.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -175,33 +199,71 @@ class HyperparameterTuner:
         configs = list(self._configs())
         n_total = len(configs)
 
+        if shard is not None:
+            # Guard against a tuning-grid edit between resolve_shard and run()
+            # (both currently derive from the same in-memory dict, so this
+            # cannot fire today — specs/35 §III.2).
+            assert len(configs) == shard["n_total"], (
+                f"grid size {len(configs)} != shard n_total "
+                f"{shard['n_total']} — the tuning grid changed between shard "
+                f"resolution and run()"
+            )
+
+        # Selection-metric curve key — same expression as the per-trial one.
+        selection_metric_used = SELECTION_METRIC_CURVE_KEY.get(
+            base_cfg["model"].get("early_stopping_metric", "macro_f1"),
+            "val_macro_f1",
+        )
+
+        header: dict | None = None
+        if shard is not None:
+            # Single source of truth for the 12-key header schema
+            # (src.model.selection.build_shard_header) — shared with any
+            # test fixture that fabricates shard files, so the two cannot
+            # drift apart (specs/35 §III.5).
+            header = build_shard_header(shard, selection_metric_used)
+
         # ── Resume: load any previously completed trials ───────────────────────
-        tuning_path = output_dir / "tuning_results.json"
+        tuning_path = output_dir / (
+            shard["filename"] if shard is not None else "tuning_results.json"
+        )
+        n_owned = len(shard["owned_indices"]) if shard is not None else n_total
         completed: dict[int, dict] = {}
         if tuning_path.exists():
             with open(tuning_path) as f:
-                for r in json.load(f):
-                    completed[r["trial"]] = r
+                stored = json.load(f)
+            if shard is not None:
+                self._check_shard_resume_header(
+                    stored["header"], header, tuning_path
+                )
+                records = stored["results"]
+            else:
+                records = stored
+            for r in records:
+                completed[r["trial"]] = r
             logger.info(
-                f"Resuming: {len(completed)}/{n_total} trials already done, "
-                f"{n_total - len(completed)} remaining."
+                f"Resuming: {len(completed)}/{n_owned} trials already done, "
+                f"{n_owned - len(completed)} remaining."
             )
         else:
-            logger.info(f"Starting grid search: {n_total} configurations")
+            logger.info(
+                f"Starting grid search: {n_total} configurations"
+                + (f" ({n_owned} owned by this shard)" if shard is not None else "")
+            )
 
         results: list[dict] = []
-        best_val = -1.0
-        best_idx = -1
+        owned = shard["owned_values"] if shard is not None else None
 
-        for i, trial_params in enumerate(configs):
+        for i, trial_params in enumerate(configs):   # ALWAYS the FULL list — never
+            if owned is not None and any(            # truncated, sliced or pre-filtered
+                trial_params[a] != v for a, v in owned.items()
+            ):
+                continue
             if i in completed:
                 result = completed[i]
                 results.append(result)
                 f1 = result["best_val_macro_f1"]
                 logger.info(f"[Trial {i+1}/{n_total}] SKIP (done, f1={f1:.4f})  {trial_params}")
-                if f1 > best_val:
-                    best_val = f1
-                    best_idx = i
                 continue
 
             trial_start = time.time()
@@ -262,44 +324,97 @@ class HyperparameterTuner:
                 f"Trial {i+1}: {metric_key}={best_val_f1:.4f}  ({elapsed:.1f}s)"
             )
 
-            if best_val_f1 > best_val:
-                best_val = best_val_f1
-                best_idx = i
-
             # Flush after every trial so a Ctrl-C loses at most one trial's work.
-            with open(tuning_path, "w") as f:
-                json.dump(results, f, indent=2)
+            if shard is not None:
+                write_json_atomic(
+                    tuning_path, {"header": header, "results": results}
+                )
+            else:
+                write_json_atomic(tuning_path, results)
 
-        best_params = results[best_idx]["params"]
-        best_path   = output_dir / "best_params.json"
-        with open(best_path, "w") as f:
-            json.dump(
-                {"best_params": best_params, "best_val_macro_f1": best_val,
-                 "selection_metric_used": results[best_idx].get("selection_metric_used"),
-                 "best_trial": best_idx},
-                f, indent=2,
+        best = select_best(results)
+        if best is None:
+            raise RuntimeError("no trial results to select from")
+
+        if shard is None:
+            best_path = output_dir / "best_params.json"
+            write_json_atomic(
+                best_path,
+                {"best_params": best["params"],
+                 "best_val_macro_f1": best["best_val_macro_f1"],
+                 "selection_metric_used": best.get("selection_metric_used"),
+                 "best_trial": best["trial"]},
             )
-
-        logger.info(
-            f"\nGrid search complete. Best trial {best_idx}: "
-            f"{results[best_idx].get('selection_metric_used') or 'unrecorded metric'}"
-            f"={best_val:.4f}\n{best_params}"
-        )
-        return best_params
+            logger.info(
+                f"\nGrid search complete. Best trial {best['trial']}: "
+                f"{best.get('selection_metric_used') or 'unrecorded metric'}"
+                f"={best['best_val_macro_f1']:.4f}\n{best['params']}"
+            )
+        else:
+            logger.info(
+                "\nShard %d/%d complete. Shard-local best trial %d: %s=%.4f "
+                "(NOT promoted — run scripts/promote_best.py after all shards "
+                "finish).\n%s",
+                shard["shard_index"], shard["num_shards"], best["trial"],
+                best.get("selection_metric_used") or "unrecorded metric",
+                best["best_val_macro_f1"], best["params"],
+            )
+        return best["params"]
 
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_shard_resume_header(
+        stored: dict, current: dict, path: Path
+    ) -> None:
+        """Fail-closed shard-resume guard (specs/35 §III.5).
+
+        The stored shard file's header must agree with the current
+        invocation on every identity field — a ``tuning_grid.yaml`` or
+        config edit between submission and resume must not silently
+        continue (the sharded analogue of specs/28/29's staleness guard).
+        A ``pbs_jobid`` mismatch is only a warning: a resubmission after a
+        walltime kill is legitimate, and the header is rewritten with the
+        current job's id on the next flush.
+
+        Raises:
+            RuntimeError: naming the field, the file, and both values, on
+                any identity-field mismatch.
+        """
+        for field in (
+            "shard_index", "num_shards", "n_total", "partition_scheme",
+            "shard_axes", "owned_values", "grid_fingerprint",
+        ):
+            if stored.get(field) != current[field]:
+                raise RuntimeError(
+                    f"Shard resume refused: header field {field!r} in {path} "
+                    f"is {stored.get(field)!r} but this invocation computed "
+                    f"{current[field]!r}. The tuning grid or effective config "
+                    f"changed between submission and resume — move the stale "
+                    f"shard file aside to start this shard over."
+                )
+        if stored.get("pbs_jobid") != current["pbs_jobid"]:
+            logger.warning(
+                "Shard resume under a different PBS job id (%s -> %s) — "
+                "legitimate after a walltime kill; continuing.",
+                stored.get("pbs_jobid"), current["pbs_jobid"],
+            )
+
     def _configs(self) -> list[dict]:
-        """Enumerate all grid configurations."""
-        keys   = list(self.search_space.keys())
-        values = [self.search_space[k] for k in keys]
-        configs = []
-        for combo in itertools.product(*values):
-            cfg = dict(zip(keys, combo))
+        """Enumerate all grid configurations.
+
+        Delegates the base enumeration to
+        ``src.model.selection.enumerate_grid`` — the single enumeration
+        authority shared with ``resolve_shard`` — then merges fixed params.
+        ``setdefault`` cannot alter axis values, so for every axis in
+        ``search_space``, ``_configs()[i][axis] ==
+        enumerate_grid(search_space)[i][axis]``.
+        """
+        configs = enumerate_grid(self.search_space)
+        for cfg in configs:
             # Merge fixed params (fixed values are not overridden by grid)
             for k, v in self.fixed_params.items():
                 cfg.setdefault(k, v)
-            configs.append(cfg)
         return configs
