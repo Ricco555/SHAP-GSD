@@ -13,6 +13,13 @@ emits the exact artifacts a single-job Phase 3 run produces:
                          "selection_metric_used", "best_trial"}
                         — the contract scripts/04_train.py consumes
 
+This script is a thin CLI wrapper: file-gathering/parsing live here, but
+the completeness/consistency gate (`validate_shards`, `PromoteError`) is
+implemented once in `src.model.selection` — "the single enumeration
+authority" for shard logic (specs/35 §V.4) — and imported from there, so
+any future stdlib-only consumer of shard files does not have to duplicate
+it or import this script via importlib.
+
 HARD CONTRACT: stdlib-only import chain (plus src.model.selection, itself
 stdlib-only) — this script must run on a login node with no
 torch/dgl/numpy/yaml installed (specs/34 §4.3). Idempotent: a pure
@@ -30,36 +37,20 @@ import argparse
 import json
 import logging
 import sys
-from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.model.selection import (
+    PromoteError,
     SHARD_FILE_PREFIX,
     select_best,
+    validate_shards,
     write_json_atomic,
 )
 
 logger = logging.getLogger(__name__)
-
-#: Header fields that must be identical across every shard file for a merge
-#: to be admissible (specs/35 §V.4 check 1). `grid_fingerprint` is the R6
-#: mixed-grid guard: shard files produced under different effective configs
-#: must never be silently merged.
-_AGREEMENT_FIELDS: tuple[str, ...] = (
-    "num_shards",
-    "n_total",
-    "partition_scheme",
-    "shard_axes",
-    "selection_metric_used",
-    "grid_fingerprint",
-)
-
-
-class PromoteError(RuntimeError):
-    """Raised with a fully-worded, operator-actionable message."""
 
 
 def gather_shard_files(tuning_dir: Path) -> list[Path]:
@@ -141,146 +132,6 @@ def load_shard_files(paths: list[Path]) -> list[dict]:
             )
         )
     return shards
-
-
-def _canon(value: object) -> str:
-    """Canonical JSON rendering of a header value, for equality grouping."""
-    return json.dumps(value, sort_keys=True)
-
-
-def validate_shards(shards: list[dict], num_shards: int | None = None) -> None:
-    """Fail-closed completeness + consistency gate (specs/35 §V.4).
-
-    All checks run; failures are accumulated and raised together in one
-    ``PromoteError`` so the operator sees the full picture in one pass.
-    It must be impossible to promote from a partial grid silently
-    (specs/34 §4.1).
-
-    Args:
-        shards: loaded shard dicts from :func:`load_shard_files`.
-        num_shards: optional operator-supplied cross-check; the headers
-            remain the authority.
-
-    Raises:
-        PromoteError: naming every violated check.
-    """
-    failures: list[str] = []
-
-    # 1. Header agreement across all files.
-    for field in _AGREEMENT_FIELDS:
-        by_value: dict[str, list[str]] = {}
-        for shard in shards:
-            by_value.setdefault(
-                _canon(shard["header"].get(field)), []
-            ).append(shard["file"])
-        if len(by_value) > 1:
-            detail = "; ".join(
-                f"{value} in {files}" for value, files in sorted(by_value.items())
-            )
-            if field == "grid_fingerprint":
-                failures.append(
-                    "header field 'grid_fingerprint' disagrees — shard files "
-                    "were produced under different effective configs — "
-                    f"refusing to merge: {detail}"
-                )
-            else:
-                failures.append(
-                    f"header field {field!r} disagrees across shard files: "
-                    f"{detail}"
-                )
-
-    # Authority values for the remaining checks: the first header's. If the
-    # agreement check above failed for these fields, that failure is already
-    # recorded; the remaining checks still run so the report is complete.
-    header0 = shards[0]["header"]
-    agreed_num_shards = header0.get("num_shards")
-    agreed_n_total = header0.get("n_total")
-
-    # 2. Operator --num-shards cross-check (headers are the authority).
-    if num_shards is not None and num_shards != agreed_num_shards:
-        failures.append(
-            f"--num-shards {num_shards} does not match the shard headers' "
-            f"num_shards {agreed_num_shards}"
-        )
-
-    # 3. Shard-index cover: exactly one file per k in range(num_shards).
-    index_files: dict[object, list[str]] = {}
-    for shard in shards:
-        index_files.setdefault(shard["header"].get("shard_index"), []).append(
-            shard["file"]
-        )
-    if isinstance(agreed_num_shards, int):
-        for k in range(agreed_num_shards):
-            if k not in index_files:
-                failures.append(
-                    f"no shard file claims shard_index {k} of "
-                    f"{agreed_num_shards}"
-                )
-    for k, files in sorted(index_files.items(), key=lambda kv: _canon(kv[0])):
-        if len(files) > 1:
-            failures.append(
-                f"shard_index {k} is claimed by multiple files: {files}"
-            )
-
-    # 4. Per-file completeness against each file's OWN owned_indices.
-    for shard in shards:
-        name = shard["file"]
-        owned = shard["header"].get("owned_indices") or []
-        trials = [r["trial"] for r in shard["results"]]
-        counts = Counter(trials)
-        missing_trials = sorted(set(owned) - set(trials))
-        foreign = sorted(set(trials) - set(owned))
-        dupes = sorted(t for t, c in counts.items() if c > 1)
-        if missing_trials:
-            failures.append(
-                f"{name} is incomplete: missing trials {missing_trials} — "
-                "re-run that shard"
-            )
-        if foreign:
-            failures.append(
-                f"{name} contains trials it does not own per its own header: "
-                f"{foreign}"
-            )
-        if dupes:
-            failures.append(f"{name} contains duplicate trial records: {dupes}")
-
-    # 5. Global exactness — asserted independently of checks 3+4: the union
-    #    of all trial indices must be exactly range(n_total).
-    trial_files: dict[object, list[str]] = {}
-    for shard in shards:
-        for record in shard["results"]:
-            trial_files.setdefault(record["trial"], []).append(shard["file"])
-    if isinstance(agreed_n_total, int):
-        gaps = sorted(set(range(agreed_n_total)) - set(trial_files))
-        if gaps:
-            failures.append(
-                f"merged results do not cover the full grid: missing trial "
-                f"indices {gaps} of range({agreed_n_total})"
-            )
-    global_dupes = {
-        t: files for t, files in trial_files.items() if len(files) > 1
-    }
-    for t in sorted(global_dupes, key=_canon):
-        failures.append(
-            f"trial index {t} appears in more than one shard file: "
-            f"{global_dupes[t]}"
-        )
-    extraneous = sorted(
-        t for t in trial_files
-        if isinstance(agreed_n_total, int)
-        and not (isinstance(t, int) and 0 <= t < agreed_n_total)
-    )
-    if extraneous:
-        failures.append(
-            f"trial indices outside range({agreed_n_total}): {extraneous}"
-        )
-
-    if failures:
-        raise PromoteError(
-            "refusing to promote — {} gate failure(s):\n  {}".format(
-                len(failures), "\n  ".join(failures)
-            )
-        )
 
 
 def promote(tuning_dir: Path, num_shards: int | None = None) -> dict:

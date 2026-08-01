@@ -28,9 +28,7 @@ shard files and emits those two artifacts.
 import copy
 import json
 import logging
-import os
 import time
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +40,7 @@ from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
 from src.model.sage_model import EdgeAwareGraphSAGE
 from src.model.selection import (
-    SHARD_SCHEMA_VERSION,
+    build_shard_header,
     enumerate_grid,
     select_best,
     write_json_atomic,
@@ -219,20 +217,11 @@ class HyperparameterTuner:
 
         header: dict | None = None
         if shard is not None:
-            header = {
-                "schema_version": SHARD_SCHEMA_VERSION,
-                "shard_index": shard["shard_index"],
-                "num_shards": shard["num_shards"],
-                "n_total": shard["n_total"],
-                "partition_scheme": shard["partition_scheme"],
-                "shard_axes": shard["shard_axes"],
-                "owned_values": shard["owned_values"],
-                "owned_indices": shard["owned_indices"],
-                "selection_metric_used": selection_metric_used,
-                "grid_fingerprint": shard["grid_fingerprint"],
-                "pbs_jobid": os.environ.get("PBS_JOBID", "none"),
-                "started_at": datetime.now().astimezone().isoformat(),
-            }
+            # Single source of truth for the 12-key header schema
+            # (src.model.selection.build_shard_header) — shared with any
+            # test fixture that fabricates shard files, so the two cannot
+            # drift apart (specs/35 §III.5).
+            header = build_shard_header(shard, selection_metric_used)
 
         # ── Resume: load any previously completed trials ───────────────────────
         tuning_path = output_dir / (

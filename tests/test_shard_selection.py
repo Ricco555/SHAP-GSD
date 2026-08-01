@@ -60,6 +60,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.model.selection import (  # noqa: E402
     FORBIDDEN_SHARD_AXES,
     SHARD_FILE_PREFIX,
+    SHARD_SCHEMA_VERSION,
+    build_shard_header,
     compute_grid_fingerprint,
     enumerate_grid,
     resolve_shard,
@@ -111,6 +113,7 @@ def test_s1_synthetic_grid_ownership_is_value_lookup_cover_and_disjoint():
             n *= len(SYNTH[a])
 
         seen: dict[int, int] = {}  # global trial index -> owning k
+        names: set[str] = set()    # filenames seen so far in this partition
         for k in range(n):
             spec = resolve_shard(SYNTH, ",".join(axes), f"{k}/{n}")
 
@@ -139,6 +142,17 @@ def test_s1_synthetic_grid_ownership_is_value_lookup_cover_and_disjoint():
                     f"{seen[i]} and {k}"
                 )
                 seen[i] = k
+
+            # Filename uniqueness: no two shards of the SAME partition may
+            # resolve to the same on-disk filename (finding #1's failure
+            # mode -- a colliding filename means one shard's completed
+            # trials get silently overwritten by write_json_atomic's
+            # unconditional os.replace).
+            assert spec["filename"] not in names, (
+                f"axes={axes}, k={k}: filename {spec['filename']!r} "
+                "collides with an earlier shard of the same partition"
+            )
+            names.add(spec["filename"])
 
         # Full cover: union over all k is exactly range(12).
         assert sorted(seen) == list(range(SYNTH_N_TOTAL)), f"axes={axes}"
@@ -184,12 +198,19 @@ def test_s2_real_grid_cover_and_disjointness(axes):
         n *= len(ss[a])
 
     all_owned: list[int] = []
+    names: set[str] = set()
     for k in range(n):
         spec = resolve_shard(ss, axes, f"{k}/{n}")
         assert spec["n_total"] == 108
         # Disjointness against everything seen so far.
         assert not set(spec["owned_indices"]) & set(all_owned)
         all_owned.extend(spec["owned_indices"])
+        # Filename uniqueness within this partition (finding #1).
+        assert spec["filename"] not in names, (
+            f"axes={axes}, k={k}: filename {spec['filename']!r} collides "
+            "with an earlier shard of the same partition"
+        )
+        names.add(spec["filename"])
     # Full cover of range(108).
     assert sorted(all_owned) == list(range(108))
 
@@ -520,6 +541,26 @@ def test_s9_cli_axis_order_normalizes_to_same_verbatim_filename():
     assert a["owned_indices"] == b["owned_indices"]
 
 
+def test_s9_filename_is_injective_on_signed_values():
+    """Distinct signed axis values (1 vs -1, 0.1 vs -0.1) must not collapse
+    to the same filename slug: the old _slug() stripped a leading '-' as
+    generic punctuation, so two shards could resolve to the IDENTICAL
+    filename and silently overwrite each other's results via
+    write_json_atomic's unconditional os.replace. Today's real grid never
+    exercises this (all-positive axis values), but resolve_shard must stay
+    correct for any future signed axis."""
+    grid = {"delta": [1, -1], "eps": [0.1, -0.1]}
+    n = len(grid["delta"]) * len(grid["eps"])
+    filenames = [
+        resolve_shard(grid, "delta,eps", f"{k}/{n}")["filename"]
+        for k in range(n)
+    ]
+    assert len(set(filenames)) == n, (
+        f"filenames collided for distinct signed axis-value combinations: "
+        f"{filenames}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # S10 — stdlib-only import contract of src/model/selection.py
 # ──────────────────────────────────────────────────────────────────────────
@@ -574,6 +615,13 @@ def test_s11_tuner_iterates_full_configs_list():
     assert "[c for c in configs" not in src  # no pre-loop filtering
     assert "configs[:" not in src            # no slicing
     assert "enumerate_grid(self.search_space)" in src
+    # Finding #6 (header-schema extraction): tuner.py must call the shared
+    # build_shard_header() helper rather than hand-maintain its own copy of
+    # the 12-key header dict literal. A regression here would silently
+    # re-introduce the drift risk build_shard_header exists to close (a
+    # future header field added to one copy and not the other).
+    assert "build_shard_header(shard, selection_metric_used)" in src
+    assert '"schema_version": SHARD_SCHEMA_VERSION' not in src
 
 
 def test_s11_tune_script_shard_flags_and_pairing_guard():
@@ -585,3 +633,96 @@ def test_s11_tune_script_shard_flags_and_pairing_guard():
     assert "resolve_shard" in src
     assert "compute_grid_fingerprint" in src
     assert "(shard_axes is None) != (shard is None)" in src
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# S12 — build_shard_header: single-source-of-truth header schema
+# (extracted from HyperparameterTuner.run()'s inline dict literal into
+# src/model/selection.py, specs/35 §III.5; findings #4-6). Previously this
+# helper had no DIRECT test — only indirect coverage via
+# tests/test_promote_best.py's fixture, which always passes explicit
+# pbs_jobid/started_at and therefore never exercises the os.environ /
+# datetime.now() default branches actually used by the real tuner.py write
+# path.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _dummy_shard() -> dict:
+    """A minimal, valid resolve_shard()-shaped dict plus grid_fingerprint,
+    exactly the shape build_shard_header's docstring requires."""
+    ss = _real_search_space()
+    spec = resolve_shard(ss, "fanouts,hidden_size", "8/9")
+    spec["grid_fingerprint"] = "deadbeef" * 8
+    return spec
+
+
+def test_s12_header_has_exact_12_key_schema():
+    """The header dict written to disk must have EXACTLY the 12 keys the
+    shard-file format (specs/35 §III.5) and validate_shards() depend on —
+    no more, no fewer. A drifted key set is exactly the failure mode this
+    extraction exists to prevent (a hand-maintained second copy silently
+    gaining/losing a field)."""
+    shard = _dummy_shard()
+    header = build_shard_header(
+        shard, "val_composite_f1",
+        pbs_jobid="123.testhost", started_at="2026-08-01T09:00:00+02:00",
+    )
+    assert set(header) == {
+        "schema_version", "shard_index", "num_shards", "n_total",
+        "partition_scheme", "shard_axes", "owned_values", "owned_indices",
+        "selection_metric_used", "grid_fingerprint", "pbs_jobid",
+        "started_at",
+    }
+    assert header["schema_version"] == SHARD_SCHEMA_VERSION
+    assert header["shard_index"] == shard["shard_index"]
+    assert header["num_shards"] == shard["num_shards"]
+    assert header["n_total"] == shard["n_total"]
+    assert header["partition_scheme"] == shard["partition_scheme"]
+    assert header["shard_axes"] == shard["shard_axes"]
+    assert header["owned_values"] == shard["owned_values"]
+    assert header["owned_indices"] == shard["owned_indices"]
+    assert header["selection_metric_used"] == "val_composite_f1"
+    assert header["grid_fingerprint"] == shard["grid_fingerprint"]
+    assert header["pbs_jobid"] == "123.testhost"
+    assert header["started_at"] == "2026-08-01T09:00:00+02:00"
+
+
+def test_s12_explicit_overrides_pass_through_unchanged():
+    """pbs_jobid/started_at, when given, are used verbatim — no env/clock
+    lookup happens even if PBS_JOBID is set in the test environment."""
+    shard = _dummy_shard()
+    header = build_shard_header(
+        shard, "macro_f1", pbs_jobid="999.supek", started_at="frozen-value",
+    )
+    assert header["pbs_jobid"] == "999.supek"
+    assert header["started_at"] == "frozen-value"
+
+
+def test_s12_default_pbs_jobid_reads_environment(monkeypatch):
+    """Absent an explicit pbs_jobid, the header falls back to
+    os.environ['PBS_JOBID'] -- this is the real tuner.py write path's
+    behavior, previously only reachable by actually running under PBS."""
+    shard = _dummy_shard()
+
+    monkeypatch.setenv("PBS_JOBID", "42.supek.example")
+    header = build_shard_header(shard, "macro_f1")
+    assert header["pbs_jobid"] == "42.supek.example"
+
+    monkeypatch.delenv("PBS_JOBID", raising=False)
+    header = build_shard_header(shard, "macro_f1")
+    assert header["pbs_jobid"] == "none"
+
+
+def test_s12_default_started_at_is_isoformat_now():
+    """Absent an explicit started_at, the header stamps a real
+    datetime.now().astimezone().isoformat() string (parseable, timezone-
+    aware, close to 'now') rather than a placeholder."""
+    from datetime import datetime
+
+    shard = _dummy_shard()
+    before = datetime.now().astimezone()
+    header = build_shard_header(shard, "macro_f1")
+    after = datetime.now().astimezone()
+
+    parsed = datetime.fromisoformat(header["started_at"])
+    assert parsed.tzinfo is not None
+    assert before <= parsed <= after

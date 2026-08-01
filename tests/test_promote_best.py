@@ -59,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.model.selection import (  # noqa: E402
+    build_shard_header,
     compute_grid_fingerprint,
     resolve_shard,
 )
@@ -151,22 +152,18 @@ def _write_shard_set(
     for k in range(N_SHARDS):
         spec = resolve_shard(SYNTH, "beta", f"{k}/{N_SHARDS}")
         block = (model_block_for_shard or {}).get(k, MODEL_BLOCK)
-        header = {
-            "schema_version": 1,
-            "shard_index": spec["shard_index"],
-            "num_shards": spec["num_shards"],
-            "n_total": spec["n_total"],
-            "partition_scheme": spec["partition_scheme"],
-            "shard_axes": spec["shard_axes"],
-            "owned_values": spec["owned_values"],
-            "owned_indices": spec["owned_indices"],
-            "selection_metric_used": "val_composite_f1",
-            "grid_fingerprint": compute_grid_fingerprint(
-                block, SYNTH, TRIAL_BLOCK
-            ),
-            "pbs_jobid": f"99999{k}.testhost",
-            "started_at": "2026-08-01T09:00:00+02:00",
-        }
+        # spec + a "grid_fingerprint" key is exactly the shape
+        # HyperparameterTuner.run() passes to build_shard_header (specs/35
+        # §III.5) -- calling the SAME helper here (rather than hand-listing
+        # the 12 header fields in this fixture) means the fixture cannot
+        # silently drift from the real write path (finding #6).
+        spec["grid_fingerprint"] = compute_grid_fingerprint(block, SYNTH, TRIAL_BLOCK)
+        header = build_shard_header(
+            spec,
+            "val_composite_f1",
+            pbs_jobid=f"99999{k}.testhost",
+            started_at="2026-08-01T09:00:00+02:00",
+        )
         results = [_record(i, f1_for(i)) for i in spec["owned_indices"]]
         path = tuning_dir / spec["filename"]
         with open(path, "w") as f:
@@ -439,6 +436,78 @@ def test_p8_cli_exit_codes(tmp_path):
     assert promote_best.main(
         ["--tuning-dir", str(tmp_path), "--num-shards", str(N_SHARDS)]
     ) == 0
+
+
+# ---------------------------------------------------------------------------
+# P10 — fail-closed when every header consistently carries a missing/non-int
+# num_shards or n_total (regression: these must not silently disable the
+# shard-index-cover and global-coverage checks)
+# ---------------------------------------------------------------------------
+
+def test_p10_all_headers_missing_num_shards_fails_closed(tmp_path):
+    """Every shard file agreeing on a MISSING num_shards must still be a
+    gate failure, not a silent pass-through that then skips the
+    shard-index-cover check (validate_shards §V.4 check 1)."""
+    paths = _write_shard_set(tmp_path)
+    for p in paths:
+        _rewrite(p, lambda d: d["header"].pop("num_shards"))
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "num_shards" in msg
+    assert "must be present and an int" in msg
+    assert not (tmp_path / "best_params.json").exists()
+
+
+def test_p10_all_headers_non_int_n_total_fails_closed(tmp_path):
+    """Every shard file agreeing on a non-int (string) n_total must still
+    be a gate failure, not silently skip the global-coverage check."""
+    paths = _write_shard_set(tmp_path)
+    for p in paths:
+        _rewrite(p, lambda d: d["header"].__setitem__("n_total", "12"))
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "n_total" in msg
+    assert "must be present and an int" in msg
+    assert not (tmp_path / "best_params.json").exists()
+
+
+def test_p10_all_headers_bool_num_shards_fails_closed(tmp_path):
+    """A bool ``num_shards`` (e.g. JSON ``true``) must be rejected too:
+    ``bool`` is a subclass of ``int`` in Python, so a bare
+    ``isinstance(value, int)`` check treats ``True`` as the valid int 1.
+    With 3 real shard files present but ``num_shards`` corrupted to
+    ``True`` (== 1), the OLD code's check 3 would run ``range(1)`` --
+    verifying only that shard_index 0 exists -- and silently promote from
+    2 missing shards. This must fail closed exactly like a missing or
+    string value does."""
+    paths = _write_shard_set(tmp_path)
+    assert len(paths) == N_SHARDS == 3
+    for p in paths:
+        _rewrite(p, lambda d: d["header"].__setitem__("num_shards", True))
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "num_shards" in msg
+    assert "must be present and an int" in msg
+    assert not (tmp_path / "best_params.json").exists()
+
+
+def test_p10_all_headers_bool_n_total_fails_closed(tmp_path):
+    """A bool ``n_total`` (e.g. JSON ``true``) must be rejected too, for
+    the same subclass-of-int reason as num_shards above: the OLD code's
+    check 5 would run ``range(1)`` and accept a merge covering only trial
+    0 out of the real 12-trial grid as "complete"."""
+    paths = _write_shard_set(tmp_path)
+    for p in paths:
+        _rewrite(p, lambda d: d["header"].__setitem__("n_total", True))
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "n_total" in msg
+    assert "must be present and an int" in msg
+    assert not (tmp_path / "best_params.json").exists()
 
 
 # ---------------------------------------------------------------------------
