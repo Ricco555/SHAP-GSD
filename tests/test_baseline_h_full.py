@@ -1467,13 +1467,18 @@ def test_warn_tier_log_budget_is_rate_limited(caplog):
         reset_seed_agreement_warn_budget,
     )
 
+    assert H_FULL_SEED_WARN_LOG_BUDGET < 10, "this test assumes 10 is the first decade past the budget"
     reset_seed_agreement_warn_budget()
     with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
-        for _ in range(H_FULL_SEED_WARN_LOG_BUDGET + 20):
+        for _ in range(30):
             check_seed_row_agreement(*_row_pair(1.0, 1e-3), 7)
-    # N warnings + the one "suppressed" notice, and nothing after.
-    assert len(caplog.records) == H_FULL_SEED_WARN_LOG_BUDGET + 1
-    assert "suppressed" in caplog.records[-1].getMessage()
+    # N warnings + the "suppressed" notice + one decade re-log at #10, and
+    # nothing else: 30 divergences must not mean 30 log lines.
+    assert len(caplog.records) == H_FULL_SEED_WARN_LOG_BUDGET + 2
+    assert "suppressed" in caplog.records[H_FULL_SEED_WARN_LOG_BUDGET].getMessage()
+    # The decade re-log carries the running total, so "how bad was it?" stays
+    # answerable from the log after suppression kicks in.
+    assert "#10 this process" in caplog.records[-1].getMessage()
 
     # The reset hook restores the budget (nothing else does).
     caplog.clear()
@@ -1481,6 +1486,37 @@ def test_warn_tier_log_budget_is_rate_limited(caplog):
     with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
         check_seed_row_agreement(*_row_pair(1.0, 1e-3), 7)
     assert len(caplog.records) == 1
+
+
+def test_new_check_is_a_strict_relaxation_of_the_old_absolute_one(caplog):
+    """Nothing that passed ``allclose(atol=1e-4, rtol=1e-5)`` may warn or fail.
+
+    The replacement exists to stop spurious failures; a criterion that is
+    tighter anywhere would trade one false alarm for another.  The dangerous
+    regime is the ReLU-dead row, where the relative term contributes nothing and
+    the additive floor is the only protection — which is why the floor equals
+    the old ``atol`` rather than being smaller than it.
+    """
+    from src.baselines.adapter import (
+        H_FULL_SEED_ABS_FLOOR, check_seed_row_agreement,
+        reset_seed_agreement_warn_budget,
+    )
+
+    OLD_ATOL, OLD_RTOL = 1e-4, 1e-5
+    assert H_FULL_SEED_ABS_FLOOR >= OLD_ATOL, (
+        "the absolute floor must not be thinner than the atol it replaces"
+    )
+
+    reset_seed_agreement_warn_budget()
+    with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
+        for scale in (0.0, 1e-6, 1e-3, 1.0, 1e3, A100_CHECKPOINT_SCALE):
+            # Largest |Δ| the OLD check would have tolerated on this row.
+            old_budget = OLD_ATOL + OLD_RTOL * (scale / 2.0)
+            h_row, h_ref = _row_pair(scale, old_budget)
+            check_seed_row_agreement(h_row, h_ref, 7)     # must not raise
+    assert caplog.records == [], (
+        "a divergence the superseded absolute check accepted now warns"
+    )
 
 
 # ── the check must stay WIRED INTO build_h_full ───────────────────────────────
@@ -1551,6 +1587,7 @@ def test_build_h_full_still_applies_the_agreement_check(caplog):
     refactor dropped the call site — so drive the real function.
     """
     from src.baselines.adapter import (
+        H_FULL_SEED_ABS_FLOOR, H_FULL_SEED_REL_FAIL, H_FULL_SEED_REL_WARN,
         build_h_full, reset_seed_agreement_warn_budget,
     )
 
@@ -1566,13 +1603,17 @@ def test_build_h_full_still_applies_the_agreement_check(caplog):
 
     scale = float(ctx_factory(0.0).h_fixed.abs().max())
     assert scale > 0.0, "fixture must have a non-degenerate embedding scale"
+    warn_budget = H_FULL_SEED_ABS_FLOOR + H_FULL_SEED_REL_WARN * scale
+    fail_budget = H_FULL_SEED_ABS_FLOOR + H_FULL_SEED_REL_FAIL * scale
 
-    # Warn tier → logged, still returns.
+    # Warn tier → logged, still returns.  The perturbation is derived from the
+    # imported budgets, so it lands mid-band whatever the fixture's scale is.
     caplog.clear()
     reset_seed_agreement_warn_budget()
     with caplog.at_level(logging.WARNING, logger="src.baselines.adapter"):
         h_full = build_h_full(
-            ctx_factory(1e-3 * scale), model, gnid_to_local, edge_index
+            ctx_factory((warn_budget + fail_budget) / 2.0),
+            model, gnid_to_local, edge_index,
         )
     assert len(caplog.records) == 1
     assert h_full.shape == (3, 4)

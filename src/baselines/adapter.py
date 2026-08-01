@@ -392,8 +392,26 @@ H_FULL_SCHEMA_VERSION: int = 3
 # reference row's own scale with a small additive absolute allowance. The floor
 # exists for rows that ReLU legitimately drives to (near) zero, where a pure
 # ratio is ill-conditioned; it is additive, not a denominator, so a dead row is
-# judged by an absolute 1e-5 rather than by dividing a tiny number by a tinier
+# judged by an absolute 1e-4 rather than by dividing a tiny number by a tinier
 # one.
+#
+# STRICT-RELAXATION INVARIANT: ABS_FLOOR is 1e-4, equal to the OLD atol, and not
+# smaller. The old check passed when max|Δ| <= 1e-4 + 1e-5*|h_fixed[i]| (that
+# rtol was active and undocumented); the new warn budget is
+# 1e-4 + 1e-4*‖h_fixed_row‖∞ >= that for every row, since ‖·‖∞ >= |·| elementwise
+# and REL_WARN > the old rtol. So nothing that passed before can warn or fail
+# now. This matters concretely: a seed row that ReLU drove to ~zero has
+# ‖h_fixed_row‖∞ ≈ 0, so the relative term contributes nothing and the floor is
+# the ONLY protection -- and a dead row's post-ReLU norm says nothing about the
+# pre-activation magnitudes whose float noise produced Δ. A thinner floor would
+# have made this check STRICTER than the one it replaces exactly on the
+# near-dead-BatchNorm checkpoints where it is least justified.
+#
+# Regime note, so the margin claim below is not read too broadly: the 250-500x
+# figure holds where rel_tol*scale dominates the floor (scale >> 1). In the
+# floor-dominated regime the margin is 1e-4 / 8.345e-07 ≈ 120x against the only
+# absolute noise measurement available (CPU, 40 real flows, spec 27 §1.1) --
+# i.e. exactly the margin the previous design carried there, preserved.
 #
 # Threshold justification -- both sides stated RELATIVELY, since the thresholds
 # are relative (the raw literature numbers below are absolute and were measured
@@ -419,8 +437,9 @@ H_FULL_SCHEMA_VERSION: int = 3
 # 1e-5 + 1e-4*700 ≈ 0.07 and its fail budget ≈ 7 -- while Bug 2 on that same
 # checkpoint would land near 700, still ~100x over.
 #
-#: Additive absolute allowance, for reference rows ReLU drove to ~zero.
-H_FULL_SEED_ABS_FLOOR: float = 1e-5
+#: Additive absolute allowance, for reference rows ReLU drove to ~zero. Equal to
+#: the superseded atol by design — see the STRICT-RELAXATION INVARIANT above.
+H_FULL_SEED_ABS_FLOOR: float = 1e-4
 #: Above this relative error the divergence is logged (never raised).
 H_FULL_SEED_REL_WARN: float = 1e-4
 #: Above this relative error the divergence is a hard failure.
@@ -432,6 +451,15 @@ H_FULL_SEED_REL_FAIL: float = 1e-2
 H_FULL_SEED_WARN_LOG_BUDGET: int = 5
 
 _h_full_seed_warn_count: int = 0
+
+
+def _is_power_of_ten(n: int) -> bool:
+    """True if ``n`` is 1, 10, 100, ... — the warn tier's decade re-log points."""
+    if n < 1:
+        return False
+    while n % 10 == 0:
+        n //= 10
+    return n == 1
 
 
 def reset_seed_agreement_warn_budget() -> None:
@@ -518,16 +546,25 @@ def check_seed_row_agreement(
         )
 
     _h_full_seed_warn_count += 1
-    if _h_full_seed_warn_count <= H_FULL_SEED_WARN_LOG_BUDGET:
+    n = _h_full_seed_warn_count
+    # Full detail for the first N, then decade sampling with the running total:
+    # the counter is process-global (one Phase-10 job runs four baselines over
+    # thousands of flows), so a flat cut-off would let the first baseline's
+    # warnings permanently silence the other three and leave "how bad was it?"
+    # unanswerable from the log.
+    decade_relog = n > H_FULL_SEED_WARN_LOG_BUDGET and _is_power_of_ten(n)
+    if n <= H_FULL_SEED_WARN_LOG_BUDGET or decade_relog:
         logger.warning(
             "%s. Above expected float32 noise but far below the hard-fail "
-            "budget (%.3e), so this is reported, not raised.",
-            _diagnose("warn", warn_budget, rel_warn), fail_budget,
+            "budget (%.3e), so this is reported, not raised. "
+            "[seed-row warning #%d this process]",
+            _diagnose("warn", warn_budget, rel_warn), fail_budget, n,
         )
-        if _h_full_seed_warn_count == H_FULL_SEED_WARN_LOG_BUDGET:
+        if n == H_FULL_SEED_WARN_LOG_BUDGET:
             logger.warning(
                 "Further build_h_full seed-row agreement warnings suppressed "
-                "(log budget %d reached).", H_FULL_SEED_WARN_LOG_BUDGET,
+                "(log budget %d reached); the running total will be re-reported "
+                "at each power of ten.", H_FULL_SEED_WARN_LOG_BUDGET,
             )
     return rel
 
