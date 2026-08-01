@@ -595,12 +595,14 @@ def test_run_writes_the_same_11_key_payload_as_promote() -> None:
 def test_shipped_tuning_grid_selection_resolves() -> None:
     """T29 — the real, shipped ``configs/tuning_grid.yaml`` parses via
     ``resolve_selection_settings``, and its default ``tie_break_axes``
-    matches specs/38 §5's documented ordering verbatim."""
+    matches the owner-confirmed fanouts-first/hidden_size-first ordering
+    (specs/36 §6.2's literal wording, specs/37 §5 Q1 resolution,
+    2026-08-01) — ``batch_size`` deliberately excluded, not merely
+    deprioritized, to avoid its unmeasured optimizer-step-count confound."""
     grid_cfg = load_config(GRID_PATH, default_path=DEFAULT_PATH)
     result = resolve_selection_settings(grid_cfg)
     assert result["tie_band_pp"] == 2.0
     assert result["tie_break_axes"] == [
-        {"axis": "batch_size", "cheapest": "last"},
         {"axis": "fanouts", "cheapest": "first"},
         {"axis": "hidden_size", "cheapest": "first"},
     ]

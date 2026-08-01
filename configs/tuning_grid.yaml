@@ -51,15 +51,11 @@ trial:
 # this pipeline's measured run-to-run noise (specs/36 S4.2-S4.3: sigma ~=
 # 1.5-2.3pp, vs a top-1/top-2 gap of 0.042-0.075pp) and are treated as tied.
 #
-# tie_break_axes: ordered, most cost-significant axis first (specs/34 S1.2
-# measured per-epoch wall-time spread: batch_size 2.55-2.64x, fanouts
-# 1.20x, hidden_size ~1.07x -- dropout excluded, no measured cost trend).
-# "cheapest" names which END of this axis's OWN search_space list (above)
-# is the lower-cost value -- NOT a numeric ascending/descending rule,
-# because batch_size's list is size-ascending but COST-descending (2048 is
-# listed last and is cheapest). Axis names are validated against the live
-# search_space; an unknown axis, or a cheapest value other than
-# "first"/"last", is a hard error (specs/37 S3.2).
+# tie_break_axes: ordered, highest-priority axis first. "cheapest" names
+# which END of this axis's OWN search_space list (above) is the preferred
+# value -- NOT a numeric ascending/descending rule. Axis names are
+# validated against the live search_space; an unknown axis, or a cheapest
+# value other than "first"/"last", is a hard error (specs/37 S3.2).
 #
 # tie_band_pp: 2.0 CONFIRMED by the project owner (2026-08-01, specs/37 S5
 # Q2) -- sits inside the measured sigma range (1.5-2.3pp), deliberately
@@ -67,15 +63,24 @@ trial:
 # production scale (largest directly measured: 1.5M edges/12 epochs, vs
 # real UNSW trials at 2.6M edges/40 epochs -- specs/36 S7.1).
 #
-# tie_break_axes ordering (specs/37 S5 Q1) is STILL PENDING -- the shipped
-# batch_size-first ordering best matches the measured per-epoch cost spread
-# but, because learning_rate is fixed across the grid, systematically
-# prefers fewer optimizer steps/epoch on a 50-row minority class -- a
-# training-dynamics confound specs/36 S6.2's literal fanouts-first/
-# hidden_size-first wording avoids. Revisit before the hold lifts.
+# tie_break_axes: fanouts-first / hidden_size-first (specs/36 S6.2's
+# literal wording) CONFIRMED by the project owner (2026-08-01, specs/37 S5
+# Q1) -- batch_size deliberately excluded from tie-breaking, not merely
+# deprioritized. batch_size is by far the dominant measured cost axis
+# (specs/34 S1.2: 2.55-2.64x spread, vs fanouts 1.20x and hidden_size
+# ~1.07x), but learning_rate is fixed across this grid, so batch_size is
+# coupled to optimizer-step count per epoch -- an unmeasured
+# training-dynamics confound on this dataset's small minority class that
+# the owner weighted above the (largely theoretical, given weak A100
+# utilization across this whole batch_size range -- fixed at grid sizes
+# comparable to TE-G-SAGE, not GPU-saturation-driven) cost savings.
+# Verified moot in practice on job 1007104's actual 8-trial tie set at
+# tie_band_pp=2.0: batch_size-first and fanouts-first orderings pick the
+# IDENTICAL winner there (trial 1) -- this choice has zero effect on the
+# one real run it was checked against, so there was nothing to trade away
+# by choosing the quality-safer ordering.
 selection:
   tie_band_pp: 2.0
   tie_break_axes:
-    - {axis: batch_size, cheapest: last}
     - {axis: fanouts, cheapest: first}
     - {axis: hidden_size, cheapest: first}
