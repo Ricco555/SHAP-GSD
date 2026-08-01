@@ -36,6 +36,10 @@ Covered here (Stream A: scripts/03_tune.py + src/model/tuner.py):
   S11 (partial, tuner-side) — source pin that run() iterates the FULL
        configs list, best_idx is gone, and _configs delegates to
        enumerate_grid.
+  S12 — build_shard_header: single-source-of-truth 15-key header schema.
+  S13 — select_best_tie_aware / validate_tie_break_axes: tie-band
+       selection + config-driven axis-priority tie-break (specs/37 §3,
+       specs/38 §1.2).
 
 NOT covered here (other streams / discharged elsewhere per specs/35
 §VII.2's note): promote_best.py end-to-end (tests/test_promote_best.py),
@@ -66,6 +70,8 @@ from src.model.selection import (  # noqa: E402
     enumerate_grid,
     resolve_shard,
     select_best,
+    select_best_tie_aware,
+    validate_tie_break_axes,
     write_json_atomic,
 )
 
@@ -635,6 +641,20 @@ def test_s11_tune_script_shard_flags_and_pairing_guard():
     assert "(shard_axes is None) != (shard is None)" in src
 
 
+def test_s11_tune_script_attaches_selection_fields_to_shard_spec():
+    """specs/38 §3.3: scripts/03_tune.py must attach tie_band_pp/
+    tie_break_axes/search_space onto shard_spec before HyperparameterTuner
+    ever sees it -- build_shard_header (src/model/selection.py) hard-
+    subscripts all three off the shard dict it is given, so a dropped
+    attachment here would only surface at runtime in shard mode (GPU/HPC
+    path, not exercised by any test) as a bare KeyError. Pins the supply
+    side of the same seam test_s13_result_never_depends_on_elapsed_s and
+    the P11/P12 promote_best.py tests pin the consumption side of."""
+    src = (REPO_ROOT / "scripts" / "03_tune.py").read_text()
+    for field in ("tie_band_pp", "tie_break_axes", "search_space"):
+        assert f'shard_spec["{field}"]' in src
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # S12 — build_shard_header: single-source-of-truth header schema
 # (extracted from HyperparameterTuner.run()'s inline dict literal into
@@ -647,20 +667,24 @@ def test_s11_tune_script_shard_flags_and_pairing_guard():
 # ──────────────────────────────────────────────────────────────────────────
 
 def _dummy_shard() -> dict:
-    """A minimal, valid resolve_shard()-shaped dict plus grid_fingerprint,
-    exactly the shape build_shard_header's docstring requires."""
+    """A minimal, valid resolve_shard()-shaped dict plus grid_fingerprint
+    and the three selection-policy fields, exactly the shape
+    build_shard_header's docstring requires."""
     ss = _real_search_space()
     spec = resolve_shard(ss, "fanouts,hidden_size", "8/9")
     spec["grid_fingerprint"] = "deadbeef" * 8
+    spec["tie_band_pp"] = 2.0
+    spec["tie_break_axes"] = [{"axis": "batch_size", "cheapest": "last"}]
+    spec["search_space"] = ss
     return spec
 
 
-def test_s12_header_has_exact_12_key_schema():
-    """The header dict written to disk must have EXACTLY the 12 keys the
-    shard-file format (specs/35 §III.5) and validate_shards() depend on —
-    no more, no fewer. A drifted key set is exactly the failure mode this
-    extraction exists to prevent (a hand-maintained second copy silently
-    gaining/losing a field)."""
+def test_s12_header_has_exact_15_key_schema():
+    """The header dict written to disk must have EXACTLY the 15 keys the
+    shard-file format (specs/35 §III.5, specs/38 §1.3) and
+    validate_shards() depend on — no more, no fewer. A drifted key set is
+    exactly the failure mode this extraction exists to prevent (a
+    hand-maintained second copy silently gaining/losing a field)."""
     shard = _dummy_shard()
     header = build_shard_header(
         shard, "val_composite_f1",
@@ -669,8 +693,8 @@ def test_s12_header_has_exact_12_key_schema():
     assert set(header) == {
         "schema_version", "shard_index", "num_shards", "n_total",
         "partition_scheme", "shard_axes", "owned_values", "owned_indices",
-        "selection_metric_used", "grid_fingerprint", "pbs_jobid",
-        "started_at",
+        "selection_metric_used", "grid_fingerprint", "tie_band_pp",
+        "tie_break_axes", "search_space", "pbs_jobid", "started_at",
     }
     assert header["schema_version"] == SHARD_SCHEMA_VERSION
     assert header["shard_index"] == shard["shard_index"]
@@ -684,6 +708,9 @@ def test_s12_header_has_exact_12_key_schema():
     assert header["grid_fingerprint"] == shard["grid_fingerprint"]
     assert header["pbs_jobid"] == "123.testhost"
     assert header["started_at"] == "2026-08-01T09:00:00+02:00"
+    assert header["tie_band_pp"] == shard["tie_band_pp"]
+    assert header["tie_break_axes"] == shard["tie_break_axes"]
+    assert header["search_space"] == shard["search_space"]
 
 
 def test_s12_explicit_overrides_pass_through_unchanged():
@@ -726,3 +753,305 @@ def test_s12_default_started_at_is_isoformat_now():
     parsed = datetime.fromisoformat(header["started_at"])
     assert parsed.tzinfo is not None
     assert before <= parsed <= after
+
+
+def test_shard_schema_version_bumped_to_2():
+    """specs/38 §8.2: SHARD_SCHEMA_VERSION must be 2 (was 1 pre-fix), and
+    every header build_shard_header produces stamps that version. This
+    pins the VERSION NUMBER specifically; test_s12_header_has_exact_15_key_schema
+    (above) pins the header's key SET -- the two are deliberately separate
+    assertions so a regression in either is caught independently."""
+    assert SHARD_SCHEMA_VERSION == 2
+    header = build_shard_header(_dummy_shard(), "val_composite_f1")
+    assert header["schema_version"] == 2
+    assert len(header) == 15
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# S13 — select_best_tie_aware / validate_tie_break_axes: tie-band selection
+# + config-driven axis-priority tie-break (specs/36 D2, specs/37 §3,
+# specs/38 §1.1/§1.2). validate_tie_break_axes is exercised indirectly
+# through select_best_tie_aware (which calls it first, per specs/38 §0.2's
+# shared-validator decision) rather than directly -- its only independent
+# behavior (structural axis/cheapest validation) is fully covered by the
+# rejection tests below, and it has no other caller-visible contract.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _tb_record(trial: int, f1: float, **params) -> dict:
+    """A trial record whose "params" dict carries REAL per-axis values (not
+    _record()'s placeholder {"hidden_size": 64 + trial}), so a tie-break
+    axis lookup can actually run against it."""
+    return {
+        "trial": trial,
+        "params": params,
+        "best_val_macro_f1": f1,
+        "selection_metric_used": "val_composite_f1",
+        "elapsed_s": 100.0 + trial,
+    }
+
+
+def test_s13_zero_band_matches_legacy_select_best():
+    """tie_band_pp=0.0, tie_break_axes=[] degenerates to plain select_best,
+    byte-for-byte, on any fixture with a UNIQUE top score (specs/38 §1.2's
+    docstring guarantee) -- the primary regression property for the new
+    mechanism (specs/37 §3.1)."""
+    fixtures = [
+        [_record(i, f1) for i, f1 in enumerate([0.3, 0.5, 0.9, 0.4, 0.7, 0.1])],
+        [_record(7, 0.9), _record(1, 0.3), _record(3, 0.4), _record(0, 0.2)],
+    ]
+    for fixture in fixtures:
+        expected = select_best(fixture)
+        result = select_best_tie_aware(fixture, 0.0, [], {})
+        assert result["winner"] == expected
+        assert result["argmax"] == expected
+        assert result["tie_set_size"] == 1
+        assert result["tie_set_trials"] == [expected["trial"]]
+
+
+def test_s13_zero_band_with_exact_score_tie():
+    """At tie_band_pp=0.0, `winner == argmax == select_best(results)` still
+    holds when two-plus records share the exact max score, but
+    tie_set_size is NOT 1 in that case -- it is the number of tied
+    records. Reuses S6's own tied-score fixture so this is pinned against
+    the exact scenario select_best's own tie-break test exercises."""
+    records = [
+        _record(0, 0.5),
+        _record(2, 0.9),
+        _record(4, 0.9),  # exact tie with trial 2 at the top
+        _record(5, 0.7),
+    ]
+    expected = select_best(records)
+    result = select_best_tie_aware(records, 0.0, [], {})
+    assert result["winner"] == expected
+    assert result["winner"]["trial"] == 2  # lowest of the tied indices
+    assert result["tie_set_trials"] == [2, 4]
+    assert result["tie_set_size"] == 2  # NOT 1 -- do not conflate with the above
+
+
+def test_s13_tie_band_boundary_is_inclusive():
+    """Pins the `<=` (not `<`) band-membership semantics (specs/37 §3.3):
+    a candidate exactly `tie_band_pp` below the max is included.
+
+    tie_band_pp=6.25 (band=0.0625) with max_score=1.0 is deliberately
+    chosen so the boundary score (0.9375) and the band width are both
+    EXACTLY representable in binary floating point -- with an ordinary
+    decimal band like 2.0 (0.02), `1.0 - 0.98` evaluates to
+    0.020000000000000018 in IEEE 754 double precision, which is NOT
+    `<= 0.02`, making an exact-boundary assertion flaky by construction
+    rather than a real test of the `<=` semantics.
+    """
+    records = [
+        _record(0, 1.00),    # max
+        _record(1, 0.9375),  # exactly at the 6.25pp boundary -> included
+        _record(2, 0.94),    # just inside -> included
+        _record(3, 0.93),    # just outside -> excluded
+    ]
+    result = select_best_tie_aware(records, 6.25, [], {})
+    assert set(result["tie_set_trials"]) == {0, 1, 2}
+    assert 3 not in result["tie_set_trials"]
+
+
+def test_s13_tie_break_prefers_configured_cheapest_axis():
+    """Two in-band trials differing only on batch_size; batch_size=2048
+    ranks cheaper by the configured ordering and wins even though it is
+    not the argmax."""
+    ss = {"batch_size": [512, 1024, 2048]}
+    records = [
+        _tb_record(0, 0.90, batch_size=512),   # argmax
+        _tb_record(1, 0.89, batch_size=2048),  # in-band, configured-cheaper
+    ]
+    result = select_best_tie_aware(
+        records, 2.0, [{"axis": "batch_size", "cheapest": "last"}], ss
+    )
+    assert result["winner"]["trial"] == 1
+    assert result["argmax"]["trial"] == 0
+
+
+def test_s13_tie_break_cascades_through_axes_in_order():
+    """Three in-band trials tying on the FIRST configured axis but
+    differing on the second must be decided by the second axis -- proves
+    the cascade, not just first-axis-only resolution."""
+    ss = {"batch_size": [512, 1024, 2048], "hidden_size": [64, 128, 256]}
+    axes = [
+        {"axis": "batch_size", "cheapest": "last"},
+        {"axis": "hidden_size", "cheapest": "first"},
+    ]
+    records = [
+        _tb_record(0, 0.90, batch_size=2048, hidden_size=256),   # argmax
+        _tb_record(1, 0.89, batch_size=2048, hidden_size=64),    # ties on
+        #                                                          batch_size,
+        #                                                          wins on
+        #                                                          hidden_size
+        _tb_record(2, 0.885, batch_size=1024, hidden_size=64),   # loses on
+        #                                                          batch_size
+        #                                                          alone
+    ]
+    result = select_best_tie_aware(records, 2.0, axes, ss)
+    assert result["winner"]["trial"] == 1
+
+
+def test_s13_single_clear_winner_outside_any_band():
+    """The production-shaped case: at a real, non-degenerate band
+    (tie_band_pp=2.0, matching the shipped configs/tuning_grid.yaml
+    default), exactly one trial is inside it. This exercises the
+    tie_break_axes loop over a SINGLETON candidate list (the immediate
+    `len(candidates) == 1` break) and pins that the cheaper-but-losing
+    trials (outside the band) are correctly never even considered --
+    unlike every other S13 tie-break test, which always has >= 2 in-band
+    candidates."""
+    ss = {"batch_size": [512, 1024, 2048], "hidden_size": [64, 128]}
+    axes = [
+        {"axis": "batch_size", "cheapest": "last"},
+        {"axis": "hidden_size", "cheapest": "first"},
+    ]
+    records = [
+        _tb_record(0, 0.90, batch_size=512, hidden_size=128),   # sole winner
+        _tb_record(1, 0.50, batch_size=2048, hidden_size=64),   # cheaper by
+        #                                                         config, but
+        #                                                         WAY outside
+        #                                                         the band
+        _tb_record(2, 0.40, batch_size=2048, hidden_size=64),
+    ]
+    result = select_best_tie_aware(records, 2.0, axes, ss)
+    assert result["winner"]["trial"] == 0
+    assert result["argmax"]["trial"] == 0
+    assert result["tie_set_trials"] == [0]
+    assert result["tie_set_size"] == 1
+
+
+def test_s13_residual_tie_falls_back_to_lowest_trial_index():
+    """In-band trials identical on every configured tie_break_axes entry
+    fall back to the lowest global trial index -- select_best's own
+    tie-break direction."""
+    ss = {"batch_size": [512, 1024]}
+    axes = [{"axis": "batch_size", "cheapest": "last"}]
+    records = [
+        _tb_record(5, 0.90, batch_size=1024),
+        _tb_record(2, 0.89, batch_size=1024),  # identical on the only axis
+    ]
+    result = select_best_tie_aware(records, 2.0, axes, ss)
+    assert result["winner"]["trial"] == 2
+
+
+def test_s13_unknown_tie_break_axis_rejected():
+    with pytest.raises(ValueError) as excinfo:
+        select_best_tie_aware(
+            [_tb_record(0, 0.9, batch_size=512)], 2.0,
+            [{"axis": "nope", "cheapest": "first"}], {"batch_size": [512]},
+        )
+    assert "nope" in str(excinfo.value)
+
+
+def test_s13_invalid_cheapest_value_rejected():
+    with pytest.raises(ValueError) as excinfo:
+        select_best_tie_aware(
+            [_tb_record(0, 0.9, batch_size=512)], 2.0,
+            [{"axis": "batch_size", "cheapest": "middle"}], {"batch_size": [512]},
+        )
+    assert "middle" in str(excinfo.value)
+
+
+def test_s13_tie_set_member_missing_axis_key_raises():
+    """A tie-set record whose params dict is missing a tie_break_axes-named
+    key must raise, naming the trial and the axis -- never silently
+    skipped or treated as maximally cheap/expensive."""
+    records = [
+        _tb_record(0, 0.90, batch_size=512),
+        _tb_record(1, 0.89, hidden_size=64),  # no "batch_size" key at all
+    ]
+    with pytest.raises(ValueError) as excinfo:
+        select_best_tie_aware(
+            records, 2.0, [{"axis": "batch_size", "cheapest": "last"}],
+            {"batch_size": [512, 1024]},
+        )
+    msg = str(excinfo.value)
+    assert "trial 1" in msg
+    assert "batch_size" in msg
+
+
+def test_s13_tie_set_member_out_of_search_space_value_raises():
+    """A tie-set record's params value that is not a member of that axis's
+    search_space list must raise the same way -- naming the trial, the
+    axis, and the offending value."""
+    records = [
+        _tb_record(0, 0.90, batch_size=512),
+        _tb_record(1, 0.89, batch_size=9999),  # not in search_space
+    ]
+    with pytest.raises(ValueError) as excinfo:
+        select_best_tie_aware(
+            records, 2.0, [{"axis": "batch_size", "cheapest": "last"}],
+            {"batch_size": [512, 1024]},
+        )
+    msg = str(excinfo.value)
+    assert "trial 1" in msg
+    assert "9999" in msg
+
+
+def test_s13_negative_tie_band_pp_rejected():
+    with pytest.raises(ValueError):
+        select_best_tie_aware([_record(0, 0.9)], -1.0, [], {})
+
+
+def test_s13_empty_results_raises():
+    """specs/38 §0.1: select_best_tie_aware itself raises ValueError on an
+    empty results list -- the production call sites (tuner.py,
+    promote_best.py) guard this before calling it, but the function's own
+    contract must hold for any other caller."""
+    with pytest.raises(ValueError):
+        select_best_tie_aware([], 2.0, [], {})
+
+
+def test_s13_dense_sparse_parity():
+    """Mirrors S6's dense/sparse parity: a dense (single-job) result list
+    and an equivalent sparse/shuffled (merged-shards) sublist produce the
+    identical winner/argmax/tie_set_trials -- the direct cross-shard-safety
+    property specs/37 §3.2's revision exists for."""
+    dense = [_record(i, f1) for i, f1 in enumerate(
+        [0.3, 0.5, 0.9, 0.4, 0.89, 0.1]
+    )]
+    result_dense = select_best_tie_aware(dense, 2.0, [], {})
+
+    sparse = [dense[0], dense[2], dense[4], dense[5]]
+    result_sparse = select_best_tie_aware(sparse, 2.0, [], {})
+
+    assert result_sparse["winner"] == result_dense["winner"]
+    assert result_sparse["argmax"] == result_dense["argmax"]
+    assert result_sparse["tie_set_trials"] == result_dense["tie_set_trials"]
+
+
+def test_s13_tie_set_trials_sorted_and_complete():
+    records = [
+        _record(5, 0.90),
+        _record(1, 0.89),
+        _record(9, 0.50),
+        _record(3, 0.881),
+    ]
+    result = select_best_tie_aware(records, 2.0, [], {})
+    assert result["tie_set_trials"] == [1, 3, 5]
+
+
+def test_s13_result_never_depends_on_elapsed_s():
+    """The direct regression test for the flaw specs/37 §3.2 revised away
+    from: two in-band candidates with wildly different elapsed_s but
+    identical tie_break_axes values must be decided by the trial-index
+    fallback, and a fixture that omits elapsed_s entirely must still
+    produce a valid winner -- proving the field is never read at all."""
+    ss = {"batch_size": [512, 1024]}
+    axes = [{"axis": "batch_size", "cheapest": "last"}]  # ties on this axis
+    records = [
+        {"trial": 5, "params": {"batch_size": 1024}, "best_val_macro_f1": 0.90,
+         "selection_metric_used": "val_composite_f1", "elapsed_s": 1.0},
+        {"trial": 2, "params": {"batch_size": 1024}, "best_val_macro_f1": 0.89,
+         "selection_metric_used": "val_composite_f1", "elapsed_s": 99999.0},
+    ]
+    result = select_best_tie_aware(records, 2.0, axes, ss)
+    assert result["winner"]["trial"] == 2  # trial-index fallback, not elapsed_s
+
+    records_no_elapsed = [
+        {"trial": 5, "params": {"batch_size": 1024}, "best_val_macro_f1": 0.90,
+         "selection_metric_used": "val_composite_f1"},
+        {"trial": 2, "params": {"batch_size": 1024}, "best_val_macro_f1": 0.89,
+         "selection_metric_used": "val_composite_f1"},
+    ]
+    result2 = select_best_tie_aware(records_no_elapsed, 2.0, axes, ss)
+    assert result2["winner"]["trial"] == 2

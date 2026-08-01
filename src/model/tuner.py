@@ -42,7 +42,8 @@ from src.model.sage_model import EdgeAwareGraphSAGE
 from src.model.selection import (
     build_shard_header,
     enumerate_grid,
-    select_best,
+    select_best_tie_aware,
+    validate_tie_break_axes,
     write_json_atomic,
 )
 from src.model.trainer import Trainer
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 #: Required sub-keys of ``configs/tuning_grid.yaml``'s ``trial:`` block.
 TRIAL_SETTING_KEYS: tuple[str, ...] = ("max_epochs", "patience")
+
+#: Required sub-keys of configs/tuning_grid.yaml's selection: block.
+SELECTION_SETTING_KEYS: tuple[str, ...] = ("tie_band_pp", "tie_break_axes")
 
 #: Maps ``model.early_stopping_metric`` policy names to the training-curve key
 #: they correspond to. Unrecognised policy names fall back to
@@ -111,6 +115,79 @@ def resolve_trial_settings(grid_cfg: dict) -> dict:
     return {"max_epochs_per_trial": max_epochs, "patience": patience}
 
 
+def resolve_selection_settings(grid_cfg: dict) -> dict:
+    """Resolve the trial-selection noise band and tie-break ordering from
+    configs/tuning_grid.yaml's selection: block (specs/37 S3.1, S3.2).
+
+    Fails fast: a missing 'selection:' block, a missing 'tie_band_pp' or
+    'tie_break_axes' key, a negative tie_band_pp, an axis name in
+    tie_break_axes not present in grid_cfg["search_space"], or a
+    "cheapest" value other than "first"/"last" all raise -- never silently
+    defaulted or ignored. Mirrors resolve_trial_settings' fail-fast
+    discipline exactly (specs/32 S2.2's precedent).
+
+    Args:
+        grid_cfg: the parsed configs/tuning_grid.yaml (already merged with
+            configs/default.yaml by load_config). Takes the WHOLE grid_cfg,
+            not grid_cfg["selection"] alone, specifically so
+            tie_break_axes can be validated against the live
+            grid_cfg["search_space"] at config-load time, before any GPU
+            work -- the same fail-fast placement discipline as
+            _assert_early_stopping_metric_declared (03_tune.py) and
+            resolve_shard's own assertions.
+
+    Returns:
+        {"tie_band_pp": float, "tie_break_axes": list[dict]}.
+
+    Raises:
+        KeyError: missing 'selection:' block or a required sub-key.
+        ValueError: negative tie_band_pp, or an invalid tie_break_axes
+            entry (see validate_tie_break_axes).
+    """
+    selection = grid_cfg.get("selection")
+    if not isinstance(selection, dict):
+        raise KeyError(
+            "configs/tuning_grid.yaml is missing the required 'selection:' "
+            "block (expected keys: tie_band_pp, tie_break_axes). Refusing "
+            "to silently default the trial-selection noise band or "
+            "tie-break ordering — see specs/37 §3.1."
+        )
+
+    for key in SELECTION_SETTING_KEYS:
+        if key not in selection:
+            raise KeyError(
+                f"configs/tuning_grid.yaml: selection.{key} is required and "
+                f"was not found (present keys: {sorted(selection)}). "
+                "Refusing to substitute a default — see specs/37 §3.1."
+            )
+
+    if not isinstance(selection["tie_band_pp"], (int, float)) or isinstance(
+        selection["tie_band_pp"], bool
+    ):
+        raise ValueError(
+            f"configs/tuning_grid.yaml: selection.tie_band_pp must be a "
+            f"number, got {selection['tie_band_pp']!r} "
+            f"({type(selection['tie_band_pp']).__name__}) — an empty YAML "
+            "value ('tie_band_pp:' with nothing after it) parses to None "
+            "and must not silently reach float()."
+        )
+    tie_band_pp = float(selection["tie_band_pp"])
+    if tie_band_pp < 0:
+        raise ValueError(
+            f"configs/tuning_grid.yaml: selection.tie_band_pp must be >= 0, "
+            f"got {tie_band_pp!r}."
+        )
+
+    tie_break_axes = selection["tie_break_axes"]
+    validate_tie_break_axes(tie_break_axes, grid_cfg.get("search_space", {}))
+
+    logger.info(
+        "Selection settings from configs/tuning_grid.yaml [selection]: "
+        "tie_band_pp=%.3f, tie_break_axes=%s", tie_band_pp, tie_break_axes,
+    )
+    return {"tie_band_pp": tie_band_pp, "tie_break_axes": tie_break_axes}
+
+
 class HyperparameterTuner:
     """Grid search over the SHAP-GSD model hyperparameter space."""
 
@@ -120,6 +197,8 @@ class HyperparameterTuner:
         fixed_params: dict,
         max_epochs_per_trial: int,
         patience: int,
+        tie_band_pp: float,
+        tie_break_axes: list[dict],
     ) -> None:
         """
         Args:
@@ -127,15 +206,24 @@ class HyperparameterTuner:
             fixed_params:         dict of param_name → value (held constant).
             max_epochs_per_trial: training epochs per trial.
             patience:             early-stopping patience per trial.
+            tie_band_pp:          trial-selection noise band, in percentage
+                                   points of the primary metric (specs/37 S3.1).
+            tie_break_axes:       ordered [{"axis": str, "cheapest": "first"
+                                   | "last"}, ...] tie-break priority
+                                   (specs/37 S3.2).
 
-        Both ``max_epochs_per_trial`` and ``patience`` are required — the
-        per-trial budget has exactly one authority, ``configs/tuning_grid.yaml``'s
-        ``trial:`` block, resolved by ``resolve_trial_settings()``.
+        All four of max_epochs_per_trial/patience/tie_band_pp/tie_break_axes
+        are required — the per-trial budget and the selection policy each
+        have exactly one authority, configs/tuning_grid.yaml's trial: and
+        selection: blocks, resolved by resolve_trial_settings() /
+        resolve_selection_settings().
         """
         self.search_space          = search_space
         self.fixed_params          = fixed_params
         self.max_epochs_per_trial  = max_epochs_per_trial
         self.patience              = patience
+        self.tie_band_pp           = tie_band_pp
+        self.tie_break_axes        = tie_break_axes
 
     # ------------------------------------------------------------------
     # Public
@@ -274,6 +362,7 @@ class HyperparameterTuner:
             cfg_trial["model"]["max_epochs"] = self.max_epochs_per_trial
             cfg_trial["model"]["patience"]   = self.patience
 
+            torch.manual_seed(seed + i)
             model = EdgeAwareGraphSAGE(
                 node_in_dim=node_in_dim,
                 edge_in_dim=edge_in_dim,
@@ -332,34 +421,47 @@ class HyperparameterTuner:
             else:
                 write_json_atomic(tuning_path, results)
 
-        best = select_best(results)
-        if best is None:
+        if not results:
             raise RuntimeError("no trial results to select from")
+        result = select_best_tie_aware(
+            results, self.tie_band_pp, self.tie_break_axes, self.search_space
+        )
 
         if shard is None:
             best_path = output_dir / "best_params.json"
-            write_json_atomic(
-                best_path,
-                {"best_params": best["params"],
-                 "best_val_macro_f1": best["best_val_macro_f1"],
-                 "selection_metric_used": best.get("selection_metric_used"),
-                 "best_trial": best["trial"]},
-            )
+            write_json_atomic(best_path, {
+                "best_params":           result["winner"]["params"],
+                "best_val_macro_f1":     result["winner"]["best_val_macro_f1"],
+                "selection_metric_used": result["winner"].get("selection_metric_used"),
+                "best_trial":            result["winner"]["trial"],
+                "argmax_trial":          result["argmax"]["trial"],
+                "argmax_val_macro_f1":   result["argmax"]["best_val_macro_f1"],
+                "tie_band_pp":           result["tie_band_pp"],
+                "tie_break_axes":        result["tie_break_axes"],
+                "tie_set_trials":        result["tie_set_trials"],
+                "tie_set_size":          result["tie_set_size"],
+                "selection_method":      "tie_band_axis_priority",
+            })
             logger.info(
-                f"\nGrid search complete. Best trial {best['trial']}: "
-                f"{best.get('selection_metric_used') or 'unrecorded metric'}"
-                f"={best['best_val_macro_f1']:.4f}\n{best['params']}"
+                f"\nGrid search complete. Best trial "
+                f"{result['winner']['trial']} (argmax trial "
+                f"{result['argmax']['trial']}, tie set size "
+                f"{result['tie_set_size']}): "
+                f"{result['winner'].get('selection_metric_used') or 'unrecorded metric'}"
+                f"={result['winner']['best_val_macro_f1']:.4f}\n{result['winner']['params']}"
             )
         else:
             logger.info(
                 "\nShard %d/%d complete. Shard-local best trial %d: %s=%.4f "
-                "(NOT promoted — run scripts/promote_best.py after all shards "
-                "finish).\n%s",
-                shard["shard_index"], shard["num_shards"], best["trial"],
-                best.get("selection_metric_used") or "unrecorded metric",
-                best["best_val_macro_f1"], best["params"],
+                "(NOT promoted — shard-local tie set only, over this "
+                "shard's own owned trials; run scripts/promote_best.py "
+                "after all shards finish for the full-grid decision).\n%s",
+                shard["shard_index"], shard["num_shards"],
+                result["winner"]["trial"],
+                result["winner"].get("selection_metric_used") or "unrecorded metric",
+                result["winner"]["best_val_macro_f1"], result["winner"]["params"],
             )
-        return best["params"]
+        return result["winner"]["params"]
 
     # ------------------------------------------------------------------
     # Private
@@ -386,6 +488,7 @@ class HyperparameterTuner:
         for field in (
             "shard_index", "num_shards", "n_total", "partition_scheme",
             "shard_axes", "owned_values", "grid_fingerprint",
+            "tie_band_pp", "tie_break_axes", "search_space",
         ):
             if stored.get(field) != current[field]:
                 raise RuntimeError(

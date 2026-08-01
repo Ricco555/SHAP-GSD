@@ -9,9 +9,11 @@ emits the exact artifacts a single-job Phase 3 run produces:
 
   tuning_results.json   bare list of all trial records, sorted by global
                         trial index (same schema as a single-job run)
-  best_params.json      {"best_params", "best_val_macro_f1",
-                         "selection_metric_used", "best_trial"}
-                        — the contract scripts/04_train.py consumes
+  best_params.json      see src/model/selection.py's select_best_tie_aware
+                        docstring and specs/38 §6.1 for the full
+                        best_params.json schema — 4 legacy keys (still
+                        authoritative for scripts/04_train.py's consumption)
+                        plus 7 additive selection-provenance keys
 
 This script is a thin CLI wrapper: file-gathering/parsing live here, but
 the completeness/consistency gate (`validate_shards`, `PromoteError`) is
@@ -45,7 +47,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.model.selection import (
     PromoteError,
     SHARD_FILE_PREFIX,
-    select_best,
+    select_best_tie_aware,
     validate_shards,
     write_json_atomic,
 )
@@ -158,11 +160,33 @@ def promote(tuning_dir: Path, num_shards: int | None = None) -> dict:
     validate_shards(shards, num_shards=num_shards)
 
     records = [r for s in shards for r in s["results"]]
-    best = select_best(records)
-    if best is None:
+    if not records:
         raise PromoteError(
             f"shard files in {tuning_dir} contain no trial records"
         )
+
+    # validate_shards() already confirmed every shard header agrees on
+    # tie_band_pp/tie_break_axes/search_space (S1.4's _AGREEMENT_FIELDS) --
+    # this is a presence check for the residual "all shards uniformly
+    # missing the field" gap that check cannot close (S1.4), so a v1-schema
+    # shard file set fails with a clear PromoteError, not a bare KeyError.
+    header0 = shards[0]["header"]
+    missing_selection_fields = [
+        f for f in ("tie_band_pp", "tie_break_axes", "search_space")
+        if f not in header0
+    ]
+    if missing_selection_fields:
+        raise PromoteError(
+            f"shard header(s) in {tuning_dir} are missing required "
+            f"selection field(s) {missing_selection_fields} -- these shard "
+            "files were produced under SHARD_SCHEMA_VERSION < 2 (before "
+            "the Phase-3 selection-noise fix). Re-run the shard jobs under "
+            "the current code."
+        )
+    tie_band_pp    = header0["tie_band_pp"]
+    tie_break_axes = header0["tie_break_axes"]
+    search_space   = header0["search_space"]
+    result = select_best_tie_aware(records, tie_band_pp, tie_break_axes, search_space)
 
     results_path = tuning_dir / "tuning_results.json"
     if results_path.exists():
@@ -175,10 +199,17 @@ def promote(tuning_dir: Path, num_shards: int | None = None) -> dict:
     )
 
     payload = {
-        "best_params": best["params"],
-        "best_val_macro_f1": best["best_val_macro_f1"],
-        "selection_metric_used": best.get("selection_metric_used"),
-        "best_trial": best["trial"],
+        "best_params":           result["winner"]["params"],
+        "best_val_macro_f1":     result["winner"]["best_val_macro_f1"],
+        "selection_metric_used": result["winner"].get("selection_metric_used"),
+        "best_trial":            result["winner"]["trial"],
+        "argmax_trial":          result["argmax"]["trial"],
+        "argmax_val_macro_f1":   result["argmax"]["best_val_macro_f1"],
+        "tie_band_pp":           result["tie_band_pp"],
+        "tie_break_axes":        result["tie_break_axes"],
+        "tie_set_trials":        result["tie_set_trials"],
+        "tie_set_size":          result["tie_set_size"],
+        "selection_method":      "tie_band_axis_priority",
     }
     write_json_atomic(tuning_dir / "best_params.json", payload)
 
@@ -203,11 +234,12 @@ def promote(tuning_dir: Path, num_shards: int | None = None) -> dict:
     )
 
     logger.info(
-        "Promoted best trial %d: params=%s, %s=%.6f",
-        best["trial"],
-        best["params"],
-        best.get("selection_metric_used"),
-        best["best_val_macro_f1"],
+        "Promoted best trial %d (argmax trial %d, tie set size %d): "
+        "params=%s, %s=%.6f",
+        result["winner"]["trial"], result["argmax"]["trial"],
+        result["tie_set_size"], result["winner"]["params"],
+        result["winner"].get("selection_metric_used"),
+        result["winner"]["best_val_macro_f1"],
     )
     logger.info("Wrote %s and %s", results_path, tuning_dir / "best_params.json")
     return payload

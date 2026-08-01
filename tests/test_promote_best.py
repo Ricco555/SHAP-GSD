@@ -158,6 +158,9 @@ def _write_shard_set(
         # the 12 header fields in this fixture) means the fixture cannot
         # silently drift from the real write path (finding #6).
         spec["grid_fingerprint"] = compute_grid_fingerprint(block, SYNTH, TRIAL_BLOCK)
+        spec["tie_band_pp"] = 0.0
+        spec["tie_break_axes"] = []
+        spec["search_space"] = SYNTH
         header = build_shard_header(
             spec,
             "val_composite_f1",
@@ -189,7 +192,7 @@ def test_p1_happy_path_outputs_and_schema(tmp_path):
     _write_shard_set(tmp_path)
     payload = promote_best.promote(tmp_path)
 
-    # best_params.json: EXACTLY the four contract keys (tuner.py schema).
+    # best_params.json: EXACTLY the 11-key schema (specs/38 §6.1).
     best_path = tmp_path / "best_params.json"
     with open(best_path) as f:
         on_disk = json.load(f)
@@ -198,6 +201,13 @@ def test_p1_happy_path_outputs_and_schema(tmp_path):
         "best_val_macro_f1",
         "selection_metric_used",
         "best_trial",
+        "argmax_trial",
+        "argmax_val_macro_f1",
+        "tie_band_pp",
+        "tie_break_axes",
+        "tie_set_trials",
+        "tie_set_size",
+        "selection_method",
     }
     assert on_disk == payload
     # Winner: trial 11 has the max f1 under _default_f1.
@@ -205,6 +215,13 @@ def test_p1_happy_path_outputs_and_schema(tmp_path):
     assert on_disk["best_val_macro_f1"] == _default_f1(11)
     assert on_disk["selection_metric_used"] == "val_composite_f1"
     assert on_disk["best_params"] == _record(11, 0.0)["params"]
+    assert on_disk["argmax_trial"] == 11
+    assert on_disk["argmax_val_macro_f1"] == _default_f1(11)
+    assert on_disk["tie_band_pp"] == 0.0
+    assert on_disk["tie_break_axes"] == []
+    assert on_disk["tie_set_trials"] == [11]
+    assert on_disk["tie_set_size"] == 1
+    assert on_disk["selection_method"] == "tie_band_axis_priority"
 
     # tuning_results.json: a bare list of ALL records sorted by global trial
     # index — the same shape a single-job run produces.
@@ -381,6 +398,50 @@ def test_p6_header_disagreement_n_total(tmp_path):
     assert paths[1].name in msg
 
 
+def test_tie_band_pp_is_a_required_header_agreement_field(tmp_path):
+    """specs/38 §8.2: two shard files disagreeing on tie_band_pp must
+    refuse to merge, naming the field — the same _AGREEMENT_FIELDS
+    machinery already exercised for n_total/selection_metric_used above,
+    now covering the fix's own three new header fields."""
+    paths = _write_shard_set(tmp_path)
+    _rewrite(paths[1], lambda d: d["header"].__setitem__("tie_band_pp", 5.0))
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "'tie_band_pp'" in msg
+    assert paths[1].name in msg
+
+
+def test_tie_break_axes_is_a_required_header_agreement_field(tmp_path):
+    paths = _write_shard_set(tmp_path)
+    _rewrite(
+        paths[1],
+        lambda d: d["header"].__setitem__(
+            "tie_break_axes", [{"axis": "gamma", "cheapest": "first"}]
+        ),
+    )
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "'tie_break_axes'" in msg
+    assert paths[1].name in msg
+
+
+def test_search_space_is_a_required_header_agreement_field(tmp_path):
+    paths = _write_shard_set(tmp_path)
+    modified_ss = dict(SYNTH)
+    modified_ss["alpha"] = [1, 2, 3]
+    _rewrite(
+        paths[1],
+        lambda d: d["header"].__setitem__("search_space", modified_ss),
+    )
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "'search_space'" in msg
+    assert paths[1].name in msg
+
+
 def test_p6_header_disagreement_selection_metric(tmp_path):
     paths = _write_shard_set(tmp_path)
     _rewrite(
@@ -526,6 +587,130 @@ def test_p9_tie_breaks_to_lower_global_index_across_shards(tmp_path):
     payload = promote_best.promote(tmp_path)
     assert payload["best_trial"] == 3
     assert payload["best_val_macro_f1"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# P11 — tie-aware selection through promote is NOT shard-local
+# (specs/37 §3.2's revision, specs/38 §8.2)
+# ---------------------------------------------------------------------------
+
+def test_p11_promote_uses_tie_aware_selection_across_shards(tmp_path):
+    """The argmax trial and the tie-break-preferred, in-band trial live in
+    DIFFERENT shard files — proves select_best_tie_aware's winner is not
+    accidentally shard-local, and is not decided by elapsed_s (the flaw
+    specs/37 §3.2 revised away from: this fixture gives every trial an
+    elapsed_s that would pick the WRONG winner if elapsed_s were consulted).
+
+    Built from enumerate_grid(SYNTH) directly (not _record()'s placeholder
+    {"alpha": None, "trial_marker": trial} params) so a real per-axis
+    tie-break lookup actually runs, per specs/38 §8.2's explicit guidance.
+    """
+    from src.model.selection import enumerate_grid
+
+    combos = enumerate_grid(SYNTH)
+    # argmax: first trial with gamma == 0.5 ("expensive" by the configured
+    # tie-break below).
+    argmax_trial = next(i for i, c in enumerate(combos) if c["gamma"] == 0.5)
+    # tie-break-preferred: first trial with gamma == 0.25 ("cheapest": last
+    # -> preferred) AND a DIFFERENT beta value, so it lives in a different
+    # shard file than argmax_trial (shards partition on "beta").
+    tie_trial = next(
+        i for i, c in enumerate(combos)
+        if c["gamma"] == 0.25 and c["beta"] != combos[argmax_trial]["beta"]
+    )
+    assert combos[argmax_trial]["beta"] != combos[tie_trial]["beta"]
+
+    tie_band_pp = 2.0
+    tie_break_axes = [{"axis": "gamma", "cheapest": "last"}]
+    argmax_f1 = 0.90
+    tie_f1 = argmax_f1 - (tie_band_pp / 100.0) / 2  # inside the band
+    other_f1 = 0.10
+
+    def f1_for(trial: int) -> float:
+        if trial == argmax_trial:
+            return argmax_f1
+        if trial == tie_trial:
+            return tie_f1
+        return other_f1
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for k in range(N_SHARDS):
+        spec = resolve_shard(SYNTH, "beta", f"{k}/{N_SHARDS}")
+        spec["grid_fingerprint"] = compute_grid_fingerprint(
+            MODEL_BLOCK, SYNTH, TRIAL_BLOCK
+        )
+        # Deliberately NOT the fixture's default 0.0/[] -- a real band and a
+        # real tie-break ordering, on trials whose params carry real axis
+        # values (combos[i], not _record()'s placeholder).
+        spec["tie_band_pp"] = tie_band_pp
+        spec["tie_break_axes"] = tie_break_axes
+        spec["search_space"] = SYNTH
+        header = build_shard_header(
+            spec,
+            "val_composite_f1",
+            pbs_jobid=f"77777{k}.testhost",
+            started_at="2026-08-01T09:00:00+02:00",
+        )
+        results = [
+            {
+                "trial": i,
+                "params": combos[i],
+                "best_val_macro_f1": f1_for(i),
+                "selection_metric_used": "val_composite_f1",
+                "best_epoch": 7,
+                # Every candidate's elapsed_s is set so that "lowest
+                # elapsed_s in the merged tie set" would pick the WRONG
+                # trial (argmax_trial, not tie_trial) -- a regression here
+                # fails loudly if elapsed_s is ever reconsulted.
+                "elapsed_s": 1.0 if i == argmax_trial else 99999.0,
+            }
+            for i in spec["owned_indices"]
+        ]
+        path = tmp_path / spec["filename"]
+        with open(path, "w") as f:
+            json.dump({"header": header, "results": results}, f, indent=2)
+
+    payload = promote_best.promote(tmp_path)
+    assert payload["argmax_trial"] == argmax_trial
+    assert payload["argmax_val_macro_f1"] == argmax_f1
+    assert payload["best_trial"] == tie_trial
+    assert payload["best_val_macro_f1"] == tie_f1
+    assert payload["tie_set_size"] == 2
+    assert sorted(payload["tie_set_trials"]) == sorted([argmax_trial, tie_trial])
+    assert payload["selection_method"] == "tie_band_axis_priority"
+
+
+# ---------------------------------------------------------------------------
+# P12 — a v1-schema shard file set (missing the three selection fields)
+# fails with a clear, informative PromoteError, not a bare KeyError
+# ---------------------------------------------------------------------------
+
+def test_p12_promote_raises_clear_error_on_missing_selection_header_fields(
+    tmp_path,
+):
+    """Simulates shard files produced under SHARD_SCHEMA_VERSION < 2 (before
+    this fix): every header uniformly missing tie_band_pp/tie_break_axes/
+    search_space. validate_shards()'s agreement loop cannot catch a
+    UNIFORMLY missing field (specs/38 §1.4's documented residual gap) —
+    this is the local presence check in promote() (specs/38 §4.2) that
+    closes it with a named, operator-actionable error instead."""
+    paths = _write_shard_set(tmp_path)
+
+    def _drop_selection_fields(d):
+        for f in ("tie_band_pp", "tie_break_axes", "search_space"):
+            d["header"].pop(f, None)
+
+    for p in paths:
+        _rewrite(p, _drop_selection_fields)
+
+    with pytest.raises(PromoteError) as exc:
+        promote_best.promote(tmp_path)
+    msg = str(exc.value)
+    assert "tie_band_pp" in msg
+    assert "tie_break_axes" in msg
+    assert "search_space" in msg
+    assert "SHARD_SCHEMA_VERSION" in msg
+    assert not (tmp_path / "best_params.json").exists()
 
 
 # ---------------------------------------------------------------------------

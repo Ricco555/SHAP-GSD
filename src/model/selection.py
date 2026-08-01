@@ -25,7 +25,7 @@ from pathlib import Path
 SHARD_FILE_PREFIX: str = "tuning_results_shard"
 
 #: Version of the shard-file on-disk schema ({"header": ..., "results": ...}).
-SHARD_SCHEMA_VERSION: int = 1
+SHARD_SCHEMA_VERSION: int = 2
 
 #: Axes that may never be chosen as shard-partition axes. ``batch_size`` is
 #: the dominant-cost axis (measured 2.55-2.64x per-epoch wall-time spread,
@@ -72,6 +72,149 @@ def select_best(results: list[dict]) -> dict | None:
             best_val = record["best_val_macro_f1"]
             best = record
     return best
+
+
+def validate_tie_break_axes(tie_break_axes: list[dict], search_space: dict) -> None:
+    """Structural validation of a tie_break_axes list against the live
+    search_space (specs/37 S3.2, specs/38 S0.2).
+
+    Checked here (config-shape only): every entry's "axis" is a key of
+    search_space, and every entry's "cheapest" is "first" or "last".
+    NOT checked here (checked per-record, only once actual trial results
+    exist): whether any given trial's params dict actually carries a value
+    for that axis, or whether that value is a member of the axis's
+    search_space list -- select_best_tie_aware raises ValueError for those,
+    naming the trial (specs/37 S3.4).
+
+    Shared, single-source validation: called by both
+    src.model.tuner.resolve_selection_settings (config-load-time, before
+    any GPU work) and select_best_tie_aware (defense-in-depth on every
+    call) -- one axis-validity check, not two independently-maintained
+    copies.
+
+    Args:
+        tie_break_axes: [{"axis": str, "cheapest": "first" | "last"}, ...].
+        search_space: axis_name -> value list (grid_cfg["search_space"]).
+
+    Raises:
+        ValueError: naming the offending axis or cheapest value.
+    """
+    if not isinstance(tie_break_axes, list):
+        raise ValueError(
+            f"tie_break_axes must be a list, got "
+            f"{type(tie_break_axes).__name__}: {tie_break_axes!r}"
+        )
+    for entry in tie_break_axes:
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"tie_break_axes entries must be dicts with 'axis'/"
+                f"'cheapest' keys, got {type(entry).__name__}: {entry!r}"
+            )
+        axis = entry.get("axis")
+        cheapest = entry.get("cheapest")
+        if axis not in search_space:
+            raise ValueError(
+                f"tie_break_axes names unknown axis {axis!r} — not present "
+                f"in the live search_space. Valid axes: {sorted(search_space)}."
+            )
+        if cheapest not in ("first", "last"):
+            raise ValueError(
+                f"tie_break_axes entry for axis {axis!r} has "
+                f"cheapest={cheapest!r} — must be 'first' or 'last'."
+            )
+
+
+def select_best_tie_aware(
+    results: list[dict],
+    tie_band_pp: float,
+    tie_break_axes: list[dict],
+    search_space: dict,
+) -> dict:
+    """Select the tie-band winner via a config-driven axis-priority
+    tie-break (specs/36 D2, specs/37 S3, specs/38 S1.2).
+
+    Returns a dict:
+      "winner":         the selected record (what best_params.json is built from)
+      "argmax":         the plain strict-argmax record (today's select_best result)
+      "tie_band_pp":    the threshold used
+      "tie_break_axes": the ordering used
+      "tie_set_trials": sorted list of every "trial" index within the band
+      "tie_set_size":   len(tie_set_trials)
+
+    ``tie_band_pp=0.0`` with an EMPTY ``tie_break_axes`` degenerates to
+    ``winner == argmax == select_best(results)``, byte-for-byte, for every
+    input (specs/37 S3.1's regression property) -- at band 0.0 the tie set
+    is every record within 0 percentage points of the max score, and with
+    no configured tie-break axes the only discriminator left is the final
+    ``min(candidates, key=lambda r: r["trial"])`` fallback, which is
+    exactly ``select_best``'s own tie-break direction.
+
+    This guarantee does NOT extend to ``tie_band_pp=0.0`` with a
+    NON-EMPTY ``tie_break_axes`` when two or more records share the exact
+    max score: the axis-priority loop runs on that tie set before the
+    trial-index fallback is ever reached, and a configured axis can
+    legitimately pick a different winner than the lowest trial index
+    (e.g. two trials tied at the max score but differing on
+    ``batch_size``, with ``tie_break_axes=[{"axis": "batch_size",
+    "cheapest": "last"}]``, picks the larger-``batch_size`` trial, not
+    necessarily the lower-index one). Do not assume ``winner == argmax``
+    at ``tie_band_pp=0.0`` in general -- it is guaranteed only when
+    ``tie_break_axes == []`` or the top score is unique across ``results``.
+
+    Raises:
+        ValueError: if tie_band_pp < 0; if any tie_break_axes entry names
+            an axis not in search_space or a cheapest value other than
+            "first"/"last" (via validate_tie_break_axes); if results is
+            empty; if a tie-set member's "params" dict is missing an axis
+            named in tie_break_axes, or holds a value not present in that
+            axis's search_space list (naming the trial and the axis —
+            never silently skipped or treated as maximally cheap/expensive).
+    """
+    if tie_band_pp < 0:
+        raise ValueError(f"tie_band_pp must be >= 0, got {tie_band_pp!r}")
+    validate_tie_break_axes(tie_break_axes, search_space)
+
+    argmax = select_best(results)
+    if argmax is None:
+        raise ValueError("select_best_tie_aware: no trial results to select from")
+
+    max_score = argmax["best_val_macro_f1"]
+    band = tie_band_pp / 100.0
+    tie_set = [r for r in results if max_score - r["best_val_macro_f1"] <= band]
+
+    candidates = tie_set
+    for entry in tie_break_axes:
+        axis, cheapest = entry["axis"], entry["cheapest"]
+        values = search_space[axis]
+        ranks = []
+        for r in candidates:
+            if axis not in r["params"]:
+                raise ValueError(
+                    f"trial {r['trial']}: params is missing tie_break_axes "
+                    f"axis {axis!r}"
+                )
+            v = r["params"][axis]
+            if v not in values:
+                raise ValueError(
+                    f"trial {r['trial']}: params[{axis!r}]={v!r} is not a "
+                    f"member of search_space[{axis!r}]={values!r}"
+                )
+            ranks.append(values.index(v))
+        target_rank = min(ranks) if cheapest == "first" else max(ranks)
+        candidates = [r for r, rk in zip(candidates, ranks) if rk == target_rank]
+        if len(candidates) == 1:
+            break
+
+    winner = min(candidates, key=lambda r: r["trial"])
+    tie_set_trials = sorted(r["trial"] for r in tie_set)
+    return {
+        "winner": winner,
+        "argmax": argmax,
+        "tie_band_pp": tie_band_pp,
+        "tie_break_axes": tie_break_axes,
+        "tie_set_trials": tie_set_trials,
+        "tie_set_size": len(tie_set_trials),
+    }
 
 
 def compute_grid_fingerprint(
@@ -231,7 +374,7 @@ def build_shard_header(
 ) -> dict:
     """Build the on-disk shard-file header dict (specs/35 §III.5).
 
-    Single source of truth for the 12-key header schema written by
+    Single source of truth for the 15-key header schema written by
     ``HyperparameterTuner.run()`` in shard mode. Both the tuner's real
     write path and any test fixture that needs to fabricate a shard file
     (e.g. ``tests/test_promote_best.py``) call this function instead of
@@ -242,7 +385,9 @@ def build_shard_header(
     Args:
         shard: shard spec from :func:`resolve_shard`, plus a
             ``"grid_fingerprint"`` key attached by the caller (e.g.
-            ``scripts/03_tune.py``'s ``compute_grid_fingerprint`` call).
+            ``scripts/03_tune.py``'s ``compute_grid_fingerprint`` call),
+            and the ``"tie_band_pp"``/``"tie_break_axes"``/``"search_space"``
+            selection-policy keys (specs/38 §1.3) attached the same way.
         selection_metric_used: the training-curve key this shard's trials
             are selected on (a ``SELECTION_METRIC_CURVE_KEY`` lookup
             result).
@@ -271,6 +416,9 @@ def build_shard_header(
         "owned_indices": shard["owned_indices"],
         "selection_metric_used": selection_metric_used,
         "grid_fingerprint": shard["grid_fingerprint"],
+        "tie_band_pp":      shard["tie_band_pp"],
+        "tie_break_axes":   shard["tie_break_axes"],
+        "search_space":     shard["search_space"],
         "pbs_jobid": pbs_jobid,
         "started_at": started_at,
     }
@@ -332,6 +480,9 @@ _AGREEMENT_FIELDS: tuple[str, ...] = (
     "shard_axes",
     "selection_metric_used",
     "grid_fingerprint",
+    "tie_band_pp",
+    "tie_break_axes",
+    "search_space",
 )
 
 #: Of _AGREEMENT_FIELDS, the subset the shard-index-cover check (3) and the

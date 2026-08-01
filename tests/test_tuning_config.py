@@ -45,6 +45,13 @@ Tests:
   18 — ``run()`` records ``selection_metric_used`` in the trial result and in
        the ``best_params.json`` payload.
   19 — the resume path still subscripts only ``best_val_macro_f1``.
+  20-29 — ``resolve_selection_settings`` (specs/37, specs/38 §2.3): YAML
+       value resolution, missing-block/missing-key/invalid-value fail-fast,
+       and the shipped ``configs/tuning_grid.yaml``'s ``selection:`` block.
+  30-32 — ``HyperparameterTuner._check_shard_resume_header`` covers the
+       three new selection-policy header fields identically to the
+       pre-existing identity fields (specs/38 §2.7) — net-new coverage,
+       this static method had no test anywhere before this fix.
 """
 
 import inspect
@@ -61,6 +68,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.model.tuner import (  # noqa: E402
     SELECTION_METRIC_CURVE_KEY,
     HyperparameterTuner,
+    resolve_selection_settings,
     resolve_trial_settings,
 )
 from src.utils.config import load_config  # noqa: E402
@@ -74,13 +82,16 @@ _MINIMAL_SEARCH_SPACE: dict = {"hidden_size": [64], "dropout": [0.1]}
 
 
 def _write_grid(tmp_path: Path, trial: dict | None,
-                search_space: dict | None = None) -> Path:
+                search_space: dict | None = None,
+                selection: dict | None = None) -> Path:
     """Write a throwaway ``tuning_grid.yaml`` and return its path.
 
     Args:
         tmp_path: pytest ``tmp_path`` fixture directory.
         trial: value for the ``trial:`` block; ``None`` omits the block entirely.
         search_space: value for ``search_space:``; defaults to a minimal grid.
+        selection: value for ``selection:``; ``None`` omits the block entirely
+            (specs/38 §8.3's ``resolve_selection_settings`` tests).
 
     Returns:
         Path to the written YAML file.
@@ -88,13 +99,16 @@ def _write_grid(tmp_path: Path, trial: dict | None,
     doc: dict = {"search_space": search_space or _MINIMAL_SEARCH_SPACE}
     if trial is not None:
         doc["trial"] = trial
+    if selection is not None:
+        doc["selection"] = selection
     path = tmp_path / "tuning_grid.yaml"
     path.write_text(yaml.safe_dump(doc), encoding="utf-8")
     return path
 
 
 def _load_grid(tmp_path: Path, trial: dict | None,
-               search_space: dict | None = None) -> dict:
+               search_space: dict | None = None,
+               selection: dict | None = None) -> dict:
     """Write and load a throwaway grid config, merged against the real defaults.
 
     ``default_path`` is passed explicitly: without it ``load_config`` would look
@@ -107,11 +121,12 @@ def _load_grid(tmp_path: Path, trial: dict | None,
         tmp_path: pytest ``tmp_path`` fixture directory.
         trial: value for the ``trial:`` block; ``None`` omits the block.
         search_space: value for ``search_space:``; defaults to a minimal grid.
+        selection: value for ``selection:``; ``None`` omits the block entirely.
 
     Returns:
         The merged config dict.
     """
-    return load_config(_write_grid(tmp_path, trial, search_space),
+    return load_config(_write_grid(tmp_path, trial, search_space, selection),
                        default_path=DEFAULT_PATH)
 
 
@@ -225,6 +240,7 @@ def test_resolved_settings_reach_the_tuner(tmp_path: Path) -> None:
     tuner = HyperparameterTuner(
         search_space=_MINIMAL_SEARCH_SPACE,
         fixed_params={},
+        tie_band_pp=0.0, tie_break_axes=[],
         **resolve_trial_settings(grid_cfg),
     )
     assert tuner.max_epochs_per_trial == 7
@@ -284,6 +300,7 @@ def test_shipped_search_space_still_yields_108_configs() -> None:
     tuner = HyperparameterTuner(
         search_space=grid_cfg["search_space"],
         fixed_params=grid_cfg.get("fixed", {}),
+        tie_band_pp=0.0, tie_break_axes=[],
         **resolve_trial_settings(grid_cfg),
     )
     assert len(tuner._configs()) == 108
@@ -327,6 +344,7 @@ def test_selection_metric_kwarg_is_rejected() -> None:
             fixed_params={},
             max_epochs_per_trial=7,
             patience=3,
+            tie_band_pp=0.0, tie_break_axes=[],
             selection_metric="val_macro_f1",
         )
     assert "selection_metric" in str(excinfo.value)
@@ -339,6 +357,7 @@ def test_tuner_has_no_selection_metric_attribute() -> None:
         fixed_params={},
         max_epochs_per_trial=7,
         patience=3,
+        tie_band_pp=0.0, tie_break_axes=[],
     )
     assert not hasattr(tuner, "selection_metric")
 
@@ -386,11 +405,12 @@ def test_run_records_selection_metric_used() -> None:
     run_src = inspect.getsource(HyperparameterTuner.run)
     # Added to each trial result dict...
     assert '"selection_metric_used": metric_key,' in run_src
-    # ...and to the best_params.json payload. (Pin updated for the specs/35
-    # sharding build: best_idx ceased to exist — selection now goes through
-    # src.model.selection.select_best, which returns the winning RECORD, and
-    # the payload reads the field off that record. Same property, new source.)
-    assert '"selection_metric_used": best.get("selection_metric_used")' in run_src
+    # ...and to the best_params.json payload. (Pin updated for the specs/38
+    # selection-noise-fix build: selection now goes through
+    # src.model.selection.select_best_tie_aware, which returns a dict with
+    # a "winner" record, and the payload reads the field off that record.
+    # Same property, new source.)
+    assert '"selection_metric_used": result["winner"].get("selection_metric_used")' in run_src
     # The resume-compatible field name is retained alongside it.
     assert '"best_val_macro_f1": best_val_f1,' in run_src
 
@@ -412,3 +432,253 @@ def test_resume_path_only_reads_best_val_macro_f1() -> None:
                           "best_epoch": 3, "elapsed_s": 1.0}
     assert legacy_entry["best_val_macro_f1"] == 0.9
     assert "selection_metric_used" not in legacy_entry
+
+
+# ---------------------------------------------------------------------------
+# 20-29 — resolve_selection_settings (specs/37, specs/38 §2.3)
+# ---------------------------------------------------------------------------
+
+def test_resolve_selection_settings_returns_yaml_value(tmp_path: Path) -> None:
+    """T20 — the resolver returns the fixture's OWN values, not a default."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={
+            "tie_band_pp": 3.5,
+            "tie_break_axes": [{"axis": "hidden_size", "cheapest": "first"}],
+        },
+    )
+    assert resolve_selection_settings(grid_cfg) == {
+        "tie_band_pp": 3.5,
+        "tie_break_axes": [{"axis": "hidden_size", "cheapest": "first"}],
+    }
+
+
+def test_missing_selection_block_raises(tmp_path: Path) -> None:
+    """T21 — no ``selection:`` block at all is a hard error naming the file."""
+    grid_cfg = _load_grid(tmp_path, {"max_epochs": 7, "patience": 3})
+    with pytest.raises(KeyError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    message = excinfo.value.args[0]
+    assert "configs/tuning_grid.yaml" in message
+    assert "'selection:'" in message
+
+
+def test_missing_tie_band_pp_key_raises(tmp_path: Path) -> None:
+    """T22 — ``selection.tie_band_pp`` absent is a hard error naming the key."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={"tie_break_axes": []},
+    )
+    with pytest.raises(KeyError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    message = excinfo.value.args[0]
+    assert "selection.tie_band_pp" in message
+
+
+def test_missing_tie_break_axes_key_raises(tmp_path: Path) -> None:
+    """T23 — ``selection.tie_break_axes`` absent is a hard error naming the key."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={"tie_band_pp": 2.0},
+    )
+    with pytest.raises(KeyError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    message = excinfo.value.args[0]
+    assert "selection.tie_break_axes" in message
+
+
+def test_resolve_selection_settings_rejects_unknown_axis_against_search_space(
+    tmp_path: Path,
+) -> None:
+    """T24 — an axis name absent from the live ``search_space`` is rejected,
+    naming the axis."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={
+            "tie_band_pp": 2.0,
+            "tie_break_axes": [{"axis": "nonexistent_axis", "cheapest": "first"}],
+        },
+    )
+    with pytest.raises(ValueError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    assert "nonexistent_axis" in str(excinfo.value)
+
+
+def test_resolve_selection_settings_rejects_invalid_cheapest_value(
+    tmp_path: Path,
+) -> None:
+    """T25 — a ``cheapest`` value other than ``first``/``last`` is rejected."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={
+            "tie_band_pp": 2.0,
+            "tie_break_axes": [{"axis": "hidden_size", "cheapest": "middle"}],
+        },
+    )
+    with pytest.raises(ValueError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    assert "middle" in str(excinfo.value)
+
+
+def test_resolve_selection_settings_rejects_negative_tie_band_pp(
+    tmp_path: Path,
+) -> None:
+    """T26 — a negative ``tie_band_pp`` is rejected."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={"tie_band_pp": -1.0, "tie_break_axes": []},
+    )
+    with pytest.raises(ValueError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    assert "must be >= 0" in str(excinfo.value)
+
+
+def test_resolve_selection_settings_rejects_non_numeric_tie_band_pp(
+    tmp_path: Path,
+) -> None:
+    """T27 — an empty ``tie_band_pp:`` value (parses to YAML ``null``/``None``)
+    must raise ``ValueError``, never a bare ``TypeError`` from an unguarded
+    ``float(None)``."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={"tie_band_pp": None, "tie_break_axes": []},
+    )
+    with pytest.raises(ValueError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    assert "must be a number" in str(excinfo.value)
+
+
+def test_resolve_selection_settings_rejects_non_list_tie_break_axes(
+    tmp_path: Path,
+) -> None:
+    """T28 — an empty ``tie_break_axes:`` value (parses to ``None``) must raise
+    ``ValueError`` (via ``validate_tie_break_axes``'s ``isinstance`` guard),
+    never a bare ``TypeError`` from ``for entry in None``."""
+    grid_cfg = _load_grid(
+        tmp_path, {"max_epochs": 7, "patience": 3},
+        selection={"tie_band_pp": 2.0, "tie_break_axes": None},
+    )
+    with pytest.raises(ValueError) as excinfo:
+        resolve_selection_settings(grid_cfg)
+    assert "must be a list" in str(excinfo.value)
+
+
+def test_run_writes_the_same_11_key_payload_as_promote() -> None:
+    """specs/38 §6.1's claim that best_params.json is "identical shape from
+    both call sites" is only half-proved by P11 (tests/test_promote_best.py,
+    which proves promote()'s behavior) and T18 (which pins exactly one
+    key's substring) unless HyperparameterTuner.run's OWN write path is
+    also pinned. Source-level assertion (specs/33 §IV.3's sanctioned
+    fallback: run() needs a real graph/FeatureStore/Trainer, unavailable in
+    the artifact-free gate) that run() uses select_best_tie_aware (never
+    the legacy select_best) and writes all 11 best_params.json keys.
+
+    `"select_best("` is deliberately checked as NOT a substring of the
+    source: it is not a substring of `"select_best_tie_aware("` either (the
+    next characters are `_tie_aware(`), so this negative assertion has
+    real teeth against a partial revert that reintroduces the old
+    argmax-only call alongside the new one.
+    """
+    run_src = inspect.getsource(HyperparameterTuner.run)
+    assert "select_best_tie_aware(" in run_src
+    assert "select_best(" not in run_src
+    for key in (
+        "best_params", "best_val_macro_f1", "selection_metric_used",
+        "best_trial", "argmax_trial", "argmax_val_macro_f1",
+        "tie_band_pp", "tie_break_axes", "tie_set_trials",
+        "tie_set_size", "selection_method",
+    ):
+        assert f'"{key}":' in run_src
+    assert '"selection_method":      "tie_band_axis_priority"' in run_src
+
+
+def test_shipped_tuning_grid_selection_resolves() -> None:
+    """T29 — the real, shipped ``configs/tuning_grid.yaml`` parses via
+    ``resolve_selection_settings``, and its default ``tie_break_axes``
+    matches specs/38 §5's documented ordering verbatim."""
+    grid_cfg = load_config(GRID_PATH, default_path=DEFAULT_PATH)
+    result = resolve_selection_settings(grid_cfg)
+    assert result["tie_band_pp"] == 2.0
+    assert result["tie_break_axes"] == [
+        {"axis": "batch_size", "cheapest": "last"},
+        {"axis": "fanouts", "cheapest": "first"},
+        {"axis": "hidden_size", "cheapest": "first"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 30-32 — HyperparameterTuner._check_shard_resume_header covers the three
+# new selection-policy fields (specs/38 §2.7). This static method had NO
+# existing test anywhere in the suite before this fix (verified: `grep -rln
+# "_check_shard_resume_header" tests/*.py` matched nothing pre-fix) — net-new
+# coverage, not an extension of something that already existed.
+# ---------------------------------------------------------------------------
+
+def _base_resume_header(**overrides) -> dict:
+    """A minimal, internally-consistent header-shaped dict covering every
+    field ``_check_shard_resume_header`` iterates, so a single-field
+    override in ``stored`` is the only difference from ``current``."""
+    base = {
+        "shard_index": 0,
+        "num_shards": 3,
+        "n_total": 12,
+        "partition_scheme": "beta",
+        "shard_axes": ["beta"],
+        "owned_values": {"beta": "x"},
+        "grid_fingerprint": "deadbeef" * 8,
+        "tie_band_pp": 2.0,
+        "tie_break_axes": [{"axis": "batch_size", "cheapest": "last"}],
+        "search_space": {"batch_size": [512, 1024, 2048]},
+        "pbs_jobid": "1.testhost",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_resume_guard_agrees_when_identical() -> None:
+    """Sanity check for the fixture itself: identical stored/current headers
+    (pbs_jobid may legitimately differ — that is a warning, not a failure)
+    must NOT raise. Without this, a bug in ``_base_resume_header`` could
+    make every T30-T32 test below pass for the wrong reason."""
+    current = _base_resume_header()
+    stored = _base_resume_header(pbs_jobid="999.other")
+    HyperparameterTuner._check_shard_resume_header(
+        stored, current, Path("/tmp/dummy_shard.json")
+    )
+
+
+def test_resume_guard_covers_tie_band_pp() -> None:
+    """T30 — a stored shard header with a different ``tie_band_pp`` than
+    the current invocation fails closed on resume, exactly like the
+    pre-existing identity fields."""
+    current = _base_resume_header()
+    stored = _base_resume_header(tie_band_pp=5.0)
+    with pytest.raises(RuntimeError) as excinfo:
+        HyperparameterTuner._check_shard_resume_header(
+            stored, current, Path("/tmp/dummy_shard.json")
+        )
+    assert "tie_band_pp" in str(excinfo.value)
+
+
+def test_resume_guard_covers_tie_break_axes() -> None:
+    """T31 — same, for ``tie_break_axes``."""
+    current = _base_resume_header()
+    stored = _base_resume_header(
+        tie_break_axes=[{"axis": "fanouts", "cheapest": "first"}]
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        HyperparameterTuner._check_shard_resume_header(
+            stored, current, Path("/tmp/dummy_shard.json")
+        )
+    assert "tie_break_axes" in str(excinfo.value)
+
+
+def test_resume_guard_covers_search_space() -> None:
+    """T32 — same, for ``search_space``."""
+    current = _base_resume_header()
+    stored = _base_resume_header(search_space={"batch_size": [512, 1024]})
+    with pytest.raises(RuntimeError) as excinfo:
+        HyperparameterTuner._check_shard_resume_header(
+            stored, current, Path("/tmp/dummy_shard.json")
+        )
+    assert "search_space" in str(excinfo.value)

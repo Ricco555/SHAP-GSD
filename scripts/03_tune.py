@@ -43,7 +43,11 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.data.feature_store import FeatureStore
 from src.model.node_state import NodeStateManager
 from src.model.selection import compute_grid_fingerprint, resolve_shard
-from src.model.tuner import HyperparameterTuner, resolve_trial_settings
+from src.model.tuner import (
+    HyperparameterTuner,
+    resolve_selection_settings,
+    resolve_trial_settings,
+)
 from src.utils.config import load_config
 
 logging.basicConfig(
@@ -168,7 +172,8 @@ def main(
         "node_state_dim": cfg["model"]["node_state_dim"],
     })
 
-    trial_settings = resolve_trial_settings(grid_cfg)
+    trial_settings     = resolve_trial_settings(grid_cfg)
+    selection_settings = resolve_selection_settings(grid_cfg)
 
     # ── 5b. Resolve shard ownership + grid fingerprint (shard mode only) ───────
     # Placed after the search_space fail-fast, the fixed: overwrite and the
@@ -186,11 +191,15 @@ def main(
                 "patience":   trial_settings["patience"],
             },
         )
+        shard_spec["tie_band_pp"]    = selection_settings["tie_band_pp"]
+        shard_spec["tie_break_axes"] = selection_settings["tie_break_axes"]
+        shard_spec["search_space"]   = tuning_ss
 
     tuner = HyperparameterTuner(
         search_space=tuning_ss,
         fixed_params=tuning_fix,
         **trial_settings,
+        **selection_settings,
     )
 
     # ── 6. Run tuning ──────────────────────────────────────────────────────────
