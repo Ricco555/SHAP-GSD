@@ -61,9 +61,18 @@ trial:
 # search_space; an unknown axis, or a cheapest value other than
 # "first"/"last", is a hard error (specs/37 S3.2).
 #
-# Defaults below are PENDING OWNER CONFIRMATION (specs/37 S5, Q1/Q2) --
-# adopted as the shipped default for this held branch; revisit before the
-# hold lifts if the owner directs otherwise (zero cost to change while held).
+# tie_band_pp: 2.0 CONFIRMED by the project owner (2026-08-01, specs/37 S5
+# Q2) -- sits inside the measured sigma range (1.5-2.3pp), deliberately
+# leaning toward the inclusive end since sigma is likely a floor at
+# production scale (largest directly measured: 1.5M edges/12 epochs, vs
+# real UNSW trials at 2.6M edges/40 epochs -- specs/36 S7.1).
+#
+# tie_break_axes ordering (specs/37 S5 Q1) is STILL PENDING -- the shipped
+# batch_size-first ordering best matches the measured per-epoch cost spread
+# but, because learning_rate is fixed across the grid, systematically
+# prefers fewer optimizer steps/epoch on a 50-row minority class -- a
+# training-dynamics confound specs/36 S6.2's literal fanouts-first/
+# hidden_size-first wording avoids. Revisit before the hold lifts.
 selection:
   tie_band_pp: 2.0
   tie_break_axes:
