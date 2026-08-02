@@ -160,6 +160,7 @@ def main(cfg: dict, label_map_path: Path) -> None:
     balancer = TemporalBalancer()
     weights_tensor = balancer.get_class_weights(
         train_labels,
+        num_classes=n_classes,
         method=bal_cfg.get("class_weight_method", "effective_num"),
         beta=bal_cfg.get("effective_num_beta", 0.9999),
         max_clamp=bal_cfg.get("class_weight_max_clamp", None),

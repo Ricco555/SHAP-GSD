@@ -9,6 +9,15 @@ Tests:
   3 — Class distribution meets min_class_ratio after balancing.
   4 — Val/test unchanged: balancing only touches what is passed; external data unmodified.
   5 — Duplicate EIDs:   duplicate entries map to identical feature values (index equality).
+  6 — Shape: get_class_weights returns exactly num_classes entries, not
+      len(np.unique(original_labels)) entries.
+  7 — A zero-training-support class's weight slot is exactly 0.0.
+  8 — No NaN/inf anywhere in the output, for each of the three weighting
+      methods, when a zero-support class is present.
+  9 — Normalization sums supported weights to n_supported, not num_classes.
+  10 — No-op regression: weights are numerically unchanged (vs. the pre-fix
+       formula) when every class already has nonzero support.
+  11 — A label index >= num_classes raises ValueError.
 """
 
 import sys
@@ -16,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -165,3 +175,137 @@ def test_duplicates_map_to_same_features():
         assert len(set(vals)) == 1, (
             f"Duplicate EID {eid} maps to multiple feature values: {vals}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests 6-11: get_class_weights zero-support-class handling (specs/39, specs/40)
+# ---------------------------------------------------------------------------
+
+def test_get_class_weights_shape_matches_num_classes_not_unique_count():
+    """Output shape must be (num_classes,), not len(np.unique(labels)).
+
+    Only classes {0, 1} are present but num_classes=3 -- this is the exact
+    mismatch specs/39 S1 identifies as the root cause. This would have
+    failed on the pre-fix code (returned shape (2,)).
+    """
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+    assert weights.shape == (3,)
+
+
+def test_get_class_weights_zero_support_slot_is_exactly_zero():
+    """A class with zero training rows gets an exact 0.0 weight slot."""
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+    assert weights[2].item() == 0.0
+
+
+def test_get_class_weights_zero_support_no_nan_or_inf_effective_num():
+    """No NaN/inf in output for method='effective_num' with a zero-support class."""
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(
+        original_labels, num_classes=3, method="effective_num", log_weights=False
+    )
+    assert np.isfinite(weights.numpy()).all()
+    assert weights[2].item() == 0.0
+
+
+def test_get_class_weights_zero_support_no_nan_or_inf_sqrt_inverse_freq():
+    """No NaN/inf in output for method='sqrt_inverse_freq' with a zero-support class."""
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(
+        original_labels, num_classes=3, method="sqrt_inverse_freq", log_weights=False
+    )
+    assert np.isfinite(weights.numpy()).all()
+    assert weights[2].item() == 0.0
+
+
+def test_get_class_weights_zero_support_no_nan_or_inf_inverse_freq():
+    """No NaN/inf in output for method='inverse_freq' with a zero-support class."""
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(
+        original_labels, num_classes=3, method="inverse_freq", log_weights=False
+    )
+    assert np.isfinite(weights.numpy()).all()
+    assert weights[2].item() == 0.0
+
+
+def test_get_class_weights_normalization_excludes_zero_support_classes():
+    """Supported weights sum to n_supported (2), not num_classes (3)."""
+    original_labels = np.array([0] * 900 + [1] * 100)
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+    assert weights[:2].sum().item() == pytest.approx(2.0)
+    assert weights[2].item() == 0.0
+
+
+def test_get_class_weights_no_op_on_fully_supported_labels():
+    """When every class has nonzero support, weights match the pre-fix formula
+    exactly (hand-computed expected values) -- proof the fix changes nothing
+    on a fully-supported dataset (specs/39 S5's no-op-when-fully-supported
+    regression-safety property).
+    """
+    n = [900, 60, 40]
+    original_labels = np.concatenate(
+        [np.full(count, cls, dtype=np.int64) for cls, count in enumerate(n)]
+    )
+    beta = 0.9999
+    class_counts = np.array(n, dtype=np.float64)
+    effective_num = (1.0 - np.power(beta, class_counts)) / (1.0 - beta)
+    expected = 1.0 / effective_num
+    expected = expected / expected.sum() * len(n)
+
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(
+        original_labels, num_classes=3, method="effective_num", beta=beta, log_weights=False
+    )
+    np.testing.assert_allclose(weights.numpy(), expected, rtol=1e-6)
+
+
+def test_get_class_weights_label_index_exceeding_num_classes_raises():
+    """A label value >= num_classes raises ValueError naming the offender."""
+    original_labels = np.array([0, 1, 2, 3])
+    balancer = TemporalBalancer()
+    with pytest.raises(ValueError, match="num_classes"):
+        balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+
+
+def test_get_class_weights_max_clamp_still_applies_to_supported_only():
+    """max_clamp still bounds supported weights; the zero-support slot stays
+    0.0, unaffected by clamping (specs/39 S3.2's explicit non-scope note).
+    """
+    original_labels = np.array([0] * 9990 + [1] * 10)
+    balancer = TemporalBalancer()
+
+    unclamped = balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+    rarest_weight = unclamped[1].item()
+    assert rarest_weight > 1.0  # sanity: rare class weight is indeed large pre-clamp
+
+    max_clamp = rarest_weight - 0.5
+    clamped = balancer.get_class_weights(
+        original_labels, num_classes=3, max_clamp=max_clamp, log_weights=False
+    )
+    assert clamped[1].item() == pytest.approx(max_clamp)
+    assert clamped[2].item() == 0.0
+
+
+def test_class_weights_zero_support_class_does_not_crash_crossentropyloss():
+    """End-to-end smoke test: a weight vector with a zero-support slot works
+    correctly inside nn.CrossEntropyLoss (forward + backward, finite loss).
+    """
+    original_labels = np.array([0, 0, 0, 1, 1])
+    balancer = TemporalBalancer()
+    weights = balancer.get_class_weights(original_labels, num_classes=3, log_weights=False)
+
+    criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    logits = torch.randn(4, 3, requires_grad=True)
+    targets = torch.tensor([0, 1, 0, 1])
+
+    loss = criterion(logits, targets)
+    assert torch.isfinite(loss)
+    loss.backward()

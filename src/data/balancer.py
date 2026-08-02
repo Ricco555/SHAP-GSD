@@ -96,6 +96,7 @@ class TemporalBalancer:
     def get_class_weights(
         self,
         original_labels: np.ndarray,
+        num_classes: int,
         method: str = "effective_num",
         beta: float = 0.9999,
         max_clamp: float | None = None,
@@ -117,6 +118,23 @@ class TemporalBalancer:
         ----------
         original_labels : int labels from the ORIGINAL unbalanced training split.
                           Never pass balanced/resampled labels.
+        num_classes :     the FULL class-index space (len(label_map), built
+                          over the entire dataset before splitting —
+                          Preprocessor.num_classes / len(label_map.json)).
+                          MUST be >= the number of distinct values in
+                          original_labels. A class with zero rows in
+                          original_labels still gets a slot in the returned
+                          vector, at index `c`, holding weight 0.0 (inert in
+                          nn.CrossEntropyLoss — a class absent from training
+                          never appears as a loss target). Required, no
+                          default: the caller must supply the value it
+                          already has in scope (preprocessor.num_classes at
+                          the 01_preprocess.py call site; len(attack_to_int)
+                          at the fix_labels.py call site) rather than have
+                          this method infer a possibly-too-small value from
+                          original_labels alone — that inference is exactly
+                          the defect this parameter exists to close
+                          (specs/39 §1).
         method :          weighting method (default "effective_num").
         beta :            effective number β for method="effective_num".
                           β=0 → uniform; β→1 → inverse frequency.
@@ -128,13 +146,27 @@ class TemporalBalancer:
 
         Returns
         -------
-        torch.Tensor of shape (num_classes,), float32, on CPU.
+        torch.Tensor of shape (num_classes,), float32, on CPU. Always has
+        EXACTLY `num_classes` entries regardless of how many distinct
+        classes appear in original_labels — a class with zero rows gets an
+        explicit 0.0 slot at its correct index, never an omitted slot
+        (specs/39 §3, specs/40 §1).
         """
-        classes = np.unique(original_labels)
-        num_classes = len(classes)
-        class_counts = np.array(
-            [np.sum(original_labels == c) for c in classes], dtype=np.float64
-        )
+        full_counts = np.bincount(
+            original_labels.astype(np.int64), minlength=num_classes
+        ).astype(np.float64)
+        if full_counts.shape[0] > num_classes:
+            raise ValueError(
+                f"original_labels contains class index "
+                f"{int(original_labels.max())}, which is >= num_classes "
+                f"({num_classes}). num_classes must be the FULL class-index "
+                "space from label_map.json — large enough to cover every "
+                "label value that appears in original_labels."
+            )
+
+        supported = full_counts > 0
+        n_supported = int(supported.sum())
+        class_counts = full_counts[supported]   # nonzero-support classes only
 
         if method == "effective_num":
             # Cui et al., CVPR 2019: E_n = (1 - β^n) / (1 - β)
@@ -144,30 +176,61 @@ class TemporalBalancer:
                     "Use beta=0.9999 or switch to inverse_freq."
                 )
             effective_num = (1.0 - np.power(beta, class_counts)) / (1.0 - beta)
-            weights = 1.0 / effective_num
+            weights_supported = 1.0 / effective_num
         elif method == "sqrt_inverse_freq":
-            weights = 1.0 / np.sqrt(class_counts)
+            weights_supported = 1.0 / np.sqrt(class_counts)
         elif method == "inverse_freq":
-            weights = 1.0 / class_counts
+            weights_supported = 1.0 / class_counts
         else:
             raise ValueError(
                 f"Unknown class_weight_method '{method}'. "
                 "Choose: 'effective_num', 'sqrt_inverse_freq', 'inverse_freq'."
             )
 
-        # Normalize so weights sum to num_classes (keeps loss magnitude stable)
-        weights = weights / weights.sum() * num_classes
+        # Normalize so SUPPORTED weights sum to n_supported (keeps loss
+        # magnitude stable) -- computed over the supported subset only, so a
+        # zero-support class's presence never perturbs the relative
+        # weighting the supported classes receive. When every class has
+        # support, n_supported == num_classes and this line is
+        # byte-identical to the pre-fix `weights / weights.sum() *
+        # num_classes` (specs/39 S3's no-op-when-fully-supported property).
+        weights_supported = (
+            weights_supported / weights_supported.sum() * n_supported
+        )
 
         if max_clamp is not None:
-            weights = np.clip(weights, a_min=None, a_max=float(max_clamp))
+            weights_supported = np.clip(
+                weights_supported, a_min=None, a_max=float(max_clamp)
+            )
+
+        # Scatter supported weights back into the full num_classes-length
+        # vector; zero-support slots keep their zero-initialized value
+        # (specs/39 S3's "safe constant" == 0.0).
+        weights = np.zeros(num_classes, dtype=np.float64)
+        weights[supported] = weights_supported
 
         if log_weights:
             logger.info("Class weights (%s, beta=%s):", method, beta)
-            for c, w, n in zip(classes, weights, class_counts):
-                logger.info("  class %d: weight=%.4f  n=%d", int(c), w, int(n))
-            logger.info(
-                "  weight ratio max/min: %.1f", weights.max() / weights.min()
-            )
+            for c in range(num_classes):
+                n = int(full_counts[c])
+                if n == 0:
+                    logger.info(
+                        "  class %d: weight=0.0000  n=0  (zero training "
+                        "support -- inert in CrossEntropyLoss)", c
+                    )
+                else:
+                    logger.info("  class %d: weight=%.4f  n=%d", c, weights[c], n)
+            if n_supported > 0:
+                logger.info(
+                    "  weight ratio max/min (supported classes only): %.1f",
+                    weights_supported.max() / weights_supported.min(),
+                )
+            if n_supported < num_classes:
+                logger.info(
+                    "  %d/%d classes have zero training-split support: %s",
+                    num_classes - n_supported, num_classes,
+                    sorted(int(c) for c in range(num_classes) if not supported[c]),
+                )
 
         return torch.tensor(weights, dtype=torch.float32)
 

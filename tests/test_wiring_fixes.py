@@ -283,8 +283,8 @@ def test_get_class_weights_uses_whatever_labels_it_is_given() -> None:
     original_labels = np.array([0] * 90 + [1] * 10)
     balanced_labels = np.array([0] * 50 + [1] * 50)
 
-    w_original = balancer.get_class_weights(original_labels, log_weights=False)
-    w_balanced = balancer.get_class_weights(balanced_labels, log_weights=False)
+    w_original = balancer.get_class_weights(original_labels, num_classes=2, log_weights=False)
+    w_balanced = balancer.get_class_weights(balanced_labels, num_classes=2, log_weights=False)
 
     # Weights differ depending on which distribution is passed in -- proving
     # the method has no hidden config-driven override forcing one or the other.
