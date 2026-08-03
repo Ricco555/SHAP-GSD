@@ -37,6 +37,69 @@ if TYPE_CHECKING:
     from src.baselines.adapter import FlowContext
     from src.explainer.background import BackgroundDistributions
 
+
+def _ensure_pyg_gnnexplainer_compat() -> None:
+    """Monkey-patch ``torch_geometric.nn.GNNExplainer`` back into existence
+    if a newer torch_geometric relocated it, so the vendored GraphSVX
+    checkout's module-level ``from torch_geometric.nn import GNNExplainer
+    as GNNE`` (its src/explainers.py, line 23) succeeds unmodified.
+
+    Why this is safe: SHAP-GSD's own usage of the vendored module only ever
+    instantiates its ``GraphSVX`` class and calls ``.explain(...)`` on it.
+    The failing import's ``GNNE`` alias is referenced solely inside a
+    DIFFERENT class in the same vendored file (also confusingly named
+    ``GNNExplainer`` -- GraphSVX's own, unrelated to PyG's), inside that
+    class's own ``explain()`` method -- a code path SHAP-GSD's wrapper never
+    reaches. The shim therefore only needs the NAME to resolve at import
+    time, not the class to be genuinely exercised.
+
+    Must run before every ``from src.explainers import GraphSVX`` in
+    ``run_graphsvx_with_model`` -- called once here, at this module's own
+    import time, because the monkey-patch target (``torch_geometric.nn``,
+    a long-lived module object) is never touched by that function's
+    per-flow ``sys.modules`` cache-clearing (which only evicts keys
+    ``"src"``/``"src.*"``), so a single application here covers every
+    later per-flow re-import.
+
+    Raises:
+        RuntimeError: if ``torch_geometric.nn.GNNExplainer`` is absent AND
+            ``torch_geometric.explain.algorithm.GNNExplainer`` (the known,
+            confirmed relocation target as of torch_geometric >= 2.x) is
+            ALSO absent. Deliberately not caught here and not swallowed by
+            ``run_graphsvx_with_model``'s broad ``except Exception`` around
+            the vendored import: a version of torch_geometric where
+            GNNExplainer has moved AGAIN (or been removed outright) must
+            fail loudly and immediately, not silently degrade into another
+            uniform ``internal_exception:ImportError``-style all-zero
+            fallback across every flow -- the exact failure mode this fix
+            exists to eliminate. See specs/43 sec 4.2.
+    """
+    import torch_geometric.nn as pyg_nn
+
+    if hasattr(pyg_nn, "GNNExplainer"):
+        return  # Nothing to patch -- vendored import would already succeed.
+
+    try:
+        from torch_geometric.explain.algorithm import GNNExplainer as _PyGGNNExplainer
+    except ImportError as exc:
+        raise RuntimeError(
+            "GraphSVX compat shim: torch_geometric.nn.GNNExplainer is "
+            "absent, and the known relocation target "
+            "torch_geometric.explain.algorithm.GNNExplainer is ALSO "
+            "absent (torch_geometric version: "
+            f"{getattr(__import__('torch_geometric'), '__version__', 'unknown')}). "
+            "The vendored GraphSVX checkout's module-level "
+            "'from torch_geometric.nn import GNNExplainer as GNNE' "
+            "(src/explainers.py) cannot be made to succeed by this shim. "
+            "This requires a code change to graphsvx_wrapper.py's compat "
+            "shim, not a silent fallback -- refusing to proceed."
+        ) from exc
+
+    pyg_nn.GNNExplainer = _PyGGNNExplainer
+
+
+_ensure_pyg_gnnexplainer_compat()
+
 logger = logging.getLogger(__name__)
 
 GRAPHSVX_DIR = resolve_baseline_dir("SHAP_GSD_GRAPHSVX_DIR", "graphsvx")
