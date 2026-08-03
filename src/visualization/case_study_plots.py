@@ -5,7 +5,9 @@ Panel layout (2×2):
   (a) top-left  — Feature-group SHAP bar chart (top 20 by |φ|)
   (b) top-right — 2-hop neighbourhood topology (role-coloured, IP-labelled)
   (c) bot-left  — Node SHAP bar chart (src/dst novelty + non-target nodes)
-  (d) bot-right — Temporal gap distribution (shows WHY temporal SHAP = 0)
+  (d) bot-right — Temporal gap distribution, annotated with the real
+                  signed Σφ_T for in-window neighbours when available
+                  (not assumed to be ≈0 — see `_align_neighbor_phi`)
 
 Usage::
     fig = make_case_study_figure(explanation, topo, id2ip, class_name, cfg)
@@ -225,14 +227,56 @@ def plot_node_shap(
 
 # ── Panel D: temporal gap distribution ────────────────────────────────────────
 
+def _align_neighbor_phi(topo: dict, explanation: dict) -> np.ndarray | None:
+    """Align Phase-6 per-neighbour φ_T onto `topo["all_neighbor_gaps_s"]`'s order.
+
+    `topo["all_neighbor_gaps_s"]` (built by `explore/case_studies.py`'s
+    `_build_topo`) is a FRESH re-sample of every neighbour edge across the
+    2-hop DGL block subgraph, regardless of whether it falls inside the
+    temporal window W. `explanation["neighbor_shap"]` (from the original
+    Phase-6 `TemporalNeighborhoodSHAP` run) only covers edges that were
+    inside W at explanation time, in `neighbor_edge_ids` order — a
+    different set, different order, and not automatically the same length.
+    Matching by position would silently pair unrelated edges. Match by
+    global edge ID instead; any `topo` edge with no corresponding entry in
+    `neighbor_shap` gets 0.0 (edges outside the original coalition, e.g.
+    genuinely out-of-window or multi-hop-only edges never scored for φ_T).
+
+    Returns:
+        Array aligned with `topo["all_neighbor_geids"]`/`all_neighbor_gaps_s`,
+        or None if `topo` doesn't carry geids (older topo dict) or
+        `explanation` has no `neighbor_shap`/`neighbor_edge_ids` at all.
+    """
+    geids = topo.get("all_neighbor_geids")
+    if geids is None:
+        return None
+    neighbor_edge_ids = explanation.get("neighbor_edge_ids")
+    neighbor_shap = explanation.get("neighbor_shap")
+    if not neighbor_edge_ids or not neighbor_shap:
+        return None
+    phi_by_geid = dict(zip(neighbor_edge_ids, neighbor_shap))
+    return np.array([phi_by_geid.get(geid, 0.0) for geid in geids], dtype=np.float64)
+
+
 def plot_temporal_gaps(
     ax: plt.Axes,
     neighbor_gap_seconds: np.ndarray,
     W_seconds: float,
     class_name: str = "",
     caption: bool = True,
+    neighbor_phi: np.ndarray | None = None,
 ) -> None:
-    """Histogram of (target_ts − neighbor_ts) with W-second cutoff marked."""
+    """Histogram of (target_ts − neighbor_ts) with W-second cutoff marked.
+
+    Args:
+        neighbor_phi: per-edge φ_T aligned index-for-index with
+            neighbor_gap_seconds (see `_align_neighbor_phi` in this module —
+            the raw Phase-6 `neighbor_shap` array is NOT already in this
+            order: it only covers in-window edges, in a different order
+            than the freshly re-sampled `neighbor_gap_seconds`). When
+            provided, the title reports the real signed sum of in-window
+            φ_T instead of an unconditional, data-independent claim.
+    """
     if len(neighbor_gap_seconds) == 0:
         ax.text(0.5, 0.5, "No neighbour edges sampled",
                 ha="center", va="center", transform=ax.transAxes, fontsize=9)
@@ -259,9 +303,19 @@ def plot_temporal_gaps(
     ax.axvline(W_seconds / 60, color="red", linestyle="--", linewidth=1.2,
                label=f"W = {W_seconds:.0f} s")
     ax.set_xscale("log")
-    ax.set_title(f"φ_T ≈ 0: {len(in_window)}/{len(neighbor_gap_seconds)} "
-                 f"neighbours within W={W_seconds:.0f} s",
-                 fontsize=10)
+
+    if neighbor_phi is not None and len(neighbor_phi) == len(neighbor_gap_seconds):
+        in_mask = neighbor_gap_seconds <= W_seconds
+        sum_phi_t = float(neighbor_phi[in_mask].sum())
+        title = (f"Σφ_T = {sum_phi_t:+.4f}: {len(in_window)}/{len(neighbor_gap_seconds)} "
+                 f"neighbours within W={W_seconds:.0f} s")
+    else:
+        # neighbor_phi not supplied by the caller -- do not assert a value
+        # we did not compute (this branch replaces a previous hardcoded,
+        # data-independent "φ_T ≈ 0" title).
+        title = (f"{len(in_window)}/{len(neighbor_gap_seconds)} "
+                 f"neighbours within W={W_seconds:.0f} s")
+    ax.set_title(title, fontsize=10)
     ax.set_xlabel("Gap to target edge (minutes, log scale)", fontsize=10)
     ax.set_ylabel("Edge count", fontsize=10)
     ax.tick_params(labelsize=10)
@@ -339,7 +393,9 @@ def make_case_study_figure(
 
     # Panel (d): temporal gap histogram
     gaps = np.array(topo.get("all_neighbor_gaps_s", []))
-    plot_temporal_gaps(ax_temp, gaps, W_seconds=W_seconds, class_name=class_name)
+    neighbor_phi = _align_neighbor_phi(topo, explanation)
+    plot_temporal_gaps(ax_temp, gaps, W_seconds=W_seconds, class_name=class_name,
+                        neighbor_phi=neighbor_phi)
 
     plt.tight_layout(h_pad=3.5)
     return fig
@@ -423,8 +479,9 @@ def make_panel_figures(
     panels[slugs["c"]] = fig_c
 
     fig_d, ax_d = plt.subplots(1, 1, figsize=(7, 5))
+    neighbor_phi = _align_neighbor_phi(topo, explanation)
     plot_temporal_gaps(ax_d, gaps, W_seconds=W_seconds, class_name=class_name,
-                       caption=False)
+                       caption=False, neighbor_phi=neighbor_phi)
     plt.tight_layout()
     panels[slugs["d"]] = fig_d
 

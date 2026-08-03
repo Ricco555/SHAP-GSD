@@ -19,7 +19,7 @@ Selected flows:
     Generic   2247735
     Worms     2310720
   Model/reference case (regenerated for consistency):
-    Recon     2232037
+    Reconnaissance 2232037
 
 Outputs:
   outputs/figures/case_studies/<Class>/<Class>_<EID>.{pdf,png}      (composite)
@@ -67,14 +67,14 @@ logger = logging.getLogger(__name__)
 # (class_name, global_eid, has_temporal_nbrs)
 CANDIDATES = [
     ("Fuzzers",   2117155, True),
-    ("Shellcode", 2117054, True),
+    ("Shellcode", 1929451, True),  # armRb+S2 EID (armRb used 2117054 — EIDs are split-specific, not portable across runs)
     ("Exploits",  2117278, True),
     ("Analysis",  2117614, True),
     ("DoS",       2117597, True),
     ("Backdoor",  2174974, False),
     ("Generic",   2247735, False),
     ("Worms",     2310720, False),
-    ("Recon",     2232037, False),   # model case, regenerated for consistency
+    ("Reconnaissance", 2232037, False),   # model case, regenerated for consistency; class name must match the outputs/explanations/<Class>/ directory name exactly, not an abbreviation
 ]
 
 EXPL_DIR = _P["explanations"]
@@ -129,6 +129,7 @@ def _build_topo(
 
     seen: set[int] = set()
     gaps: list[float] = []
+    geids: list[int] = []
     for block in blocks:
         if dgl.EID not in block.edata:
             continue
@@ -138,11 +139,13 @@ def _build_topo(
             seen.add(leid)
             ts = float(g.edata["timestamp"][leid].item())
             gaps.append(max((target_ts_ms - ts) / 1000.0, 0.0))
+            geids.append(int(g.edata[dgl.EID][leid].item()))
 
     return {
         "hop1_nodes":          hop1_nodes,
         "hop2_nodes":          hop2_nodes,
         "all_neighbor_gaps_s": np.array(gaps, dtype=np.float64),
+        "all_neighbor_geids":  geids,
     }
 
 
