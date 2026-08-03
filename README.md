@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.10**
+**Version 2.2.12**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -67,6 +67,29 @@ predates the orchestrator and used a working local configuration directly —
 but both matter for any NEW run through `scripts/run_dataset.py` (including
 future Paper 3 dataset runs), which previously risked silently training
 under the wrong settings with no error.
+
+As of `v2.2.12`, `main` fixes a SHAP attribution-truncation defect: all
+three explainer granularities (feature-group, temporal-neighbourhood,
+node-novelty) called `shap.KernelExplainer.shap_values(...)` without an
+explicit `l1_reg` argument, and the installed `shap` library's actual
+default (`"num_features(10)"`, not `"auto"`) silently capped every
+explanation to exactly 10 nonzero contributors regardless of the true
+underlying attribution spread — confirmed to fire on every explained flow
+in the adopted UNSW run. This inflates the retained contributors'
+magnitudes, not only their count, so it affects any concentration,
+sparsity, or per-flow attribution-magnitude statistic derived from SHAP-GSD's
+own explanations. All three granularities now pass `l1_reg=False` explicitly,
+with the KernelSHAP sample count raised accordingly. `main` also fixes a
+GraphSVX baseline-wrapper defect (an import path the installed
+`torch_geometric` version had relocated; the failure was silently caught
+per-flow and reported as plausible-looking zero-attribution results
+instead of failing loudly) and a class-weight construction defect that
+crashed training outright on any dataset with a class entirely absent from
+the training split (does not affect NF-UNSW-NB15-v3, where every class has
+training-split support; affects the other NetFlow datasets used in
+follow-up work). Any SHAP-GSD explanation-derived number — feature-group
+concentration, per-flow attribution magnitude, or the GraphSVX column of
+Table 2 — should be regenerated from current `main` before being cited.
 
 ---
 
