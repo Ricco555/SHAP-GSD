@@ -437,6 +437,59 @@ def _run_baseline(
     return results
 
 
+# ── partial-rerun aggregate reload ─────────────────────────────────────────────
+
+def _reload_baseline_csv(
+    baseline_name: str,
+    output_dir: Path,
+) -> list[dict] | None:
+    """Reload a baseline's previously-written per-flow CSV, if it exists.
+
+    Used when ``--baselines <subset>`` reruns only some baselines: any
+    baseline NOT rerun this invocation still has its own
+    ``{baseline_name}_results.csv`` sitting untouched on disk from a prior
+    run (``_run_baseline`` never touches another baseline's CSV). This
+    reconstructs that baseline's records into the same shape
+    ``_build_comparison_table`` expects from a freshly-computed run, so a
+    partial rerun's ``summary.json``/``comparison_table.txt`` do not
+    silently drop every other baseline's aggregate results (specs/41).
+
+    Args:
+        baseline_name: one of ``BASELINE_NAMES``.
+        output_dir: the Phase-10 output directory (``outputs/baselines/``)
+            containing ``{baseline_name}_results.csv``.
+
+    Returns:
+        A list of record dicts with ``_class_name`` (str),
+        ``fidelity_plus``/``fidelity_minus``/``runtime_s`` (float, cast back
+        from the CSV's string representation) present on every record, or
+        ``None`` if no CSV exists for this baseline (never run against this
+        ``output_dir`` at all — the caller must treat this as "absent",
+        matching a baseline that fails outright during a full run).
+    """
+    csv_path = output_dir / f"{baseline_name}_results.csv"
+    if not csv_path.exists():
+        return None
+
+    records: list[dict] = []
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row["fidelity_plus"] = float(row["fidelity_plus"])
+            row["fidelity_minus"] = float(row["fidelity_minus"])
+            row["runtime_s"] = float(row["runtime_s"])
+            records.append(row)
+
+    if not records:
+        # Header-only or empty file. _run_baseline never writes a CSV for
+        # zero results (`if results:` guard at :426), so this branch should
+        # be unreachable in practice; treated as "nothing to reload" rather
+        # than an empty-but-present entry, matching the "absent CSV" case.
+        return None
+
+    return records
+
+
 # ── comparison table ──────────────────────────────────────────────────────────
 
 def _build_comparison_table(
@@ -692,6 +745,23 @@ def main():
             **kwargs,
         )
         all_results[bl_name] = results
+
+    # ── reload untouched baselines' prior results (partial-rerun merge) ──
+    # Any baseline not rerun this invocation still has its own CSV on disk
+    # from a prior run -- _run_baseline never touches another baseline's
+    # CSV (specs/41). Without this, --baselines <subset> would silently
+    # drop every other baseline from summary.json/comparison_table.txt.
+    for bl_name in BASELINE_NAMES:
+        if bl_name in run_names:
+            continue
+        reloaded = _reload_baseline_csv(bl_name, output_dir)
+        if reloaded is not None:
+            all_results[bl_name] = reloaded
+            logger.info(
+                f"Reloaded {len(reloaded)} previously-computed {bl_name} "
+                f"results from {output_dir / f'{bl_name}_results.csv'} "
+                f"(not rerun this invocation)."
+            )
 
     # ── comparison table ──
     summary = _build_comparison_table(
