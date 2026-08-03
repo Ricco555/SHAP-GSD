@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# See feature_shap.py's _L1_REG for the shared rationale (specs/45 sec 1-2,
+# 3.2). Kept as a per-file constant, not a shared import, matching this
+# module's existing convention of no cross-file explainer constants.
+_L1_REG: bool = False
+
 
 @dataclass
 class _NeighborEdge:
@@ -278,6 +283,7 @@ class TemporalNeighborhoodSHAP:
         phi_raw = explainer.shap_values(
             foreground_data,
             nsamples=nsamples,
+            l1_reg=_L1_REG,
             silent=True,
         )
         phi = np.array(phi_raw).squeeze()

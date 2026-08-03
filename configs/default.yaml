@@ -102,3 +102,20 @@ reproducibility:
   model_seed: 42
   coalition_seed: 123
   background_seed: 456
+
+explainer:
+  # KernelSHAP l1_reg is fixed False in code (not a key here — see
+  # feature_shap.py/temporal_shap.py/node_shap.py's _L1_REG, specs/45
+  # sec 3.2). nsamples IS a tunable config value (specs/45 sec 3.1):
+  # raised from the prior 512/1024/512 code fallbacks to 2048 uniformly
+  # once l1_reg=False stopped masking Monte Carlo sampling noise behind
+  # forced zeros. Projected wall-clock impact per flow, measured against
+  # the pre-fix runtime_{feature,temporal,node}_s fields on disk:
+  # ~0.816s -> ~3.07s (specs/45 sec 3.1's table); ~+70min over 1846 flows.
+  feature_nsamples: 2048
+  temporal_nsamples: 2048
+  node_nsamples: 2048
+  # subgraph_k is also read from this namespace (shap_gsd.py:125,
+  # cfg.get("explainer", {}).get("subgraph_k", 10)) but is intentionally
+  # left at its code default here -- this fix does not touch the
+  # explanatory-subgraph top-K selection, only l1_reg and nsamples.

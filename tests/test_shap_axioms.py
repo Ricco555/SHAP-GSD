@@ -14,6 +14,8 @@ predict_fn patterns used in feature_shap.py, temporal_shap.py, and
 node_shap.py — not the full GNN (which requires GPU + loaded graphs).
 """
 
+import inspect
+
 import numpy as np
 import pytest
 import shap
@@ -28,13 +30,27 @@ EFFICIENCY_TOL = 0.05   # 5% of |f(x) - f(bg)| tolerance for KernelSHAP
 DUMMY_TOL = 0.05        # absolute tolerance for dummy φ
 
 
-def _kernel_shap(predict_fn, n_coalition: int, nsamples: int = 4096) -> np.ndarray:
-    """Run KernelSHAP with all-zeros background, all-ones foreground."""
+def _kernel_shap(
+    predict_fn,
+    n_coalition: int,
+    nsamples: int = 4096,
+    l1_reg: "bool | str" = False,
+) -> np.ndarray:
+    """Run KernelSHAP with all-zeros background, all-ones foreground.
+
+    l1_reg defaults to False to match production (specs/45, specs/46 sec
+    0.3/1-3): shap>=0.47's own default, "num_features(10)", silently
+    L1-truncates attributions to at most 10 nonzero players, which none of
+    this file's existing <=10-player toy coalitions ever exercised. Callers
+    that specifically want to reproduce the pre-fix truncated behavior (see
+    TestNoL1RegTruncation) pass l1_reg="num_features(10)" explicitly.
+    """
     bg = np.zeros((1, n_coalition), dtype=np.float64)
     explainer = shap.KernelExplainer(predict_fn, bg)
     phi = explainer.shap_values(
         np.ones((1, n_coalition), dtype=np.float64),
         nsamples=nsamples,
+        l1_reg=l1_reg,
         silent=True,
     )
     return np.array(phi).squeeze()
@@ -245,4 +261,139 @@ class TestNodeNoveltySHAPAxioms:
         phi = _kernel_shap(predict_fn_sym, self.COALITION_SIZE)
         assert abs(phi[2] - phi[3]) < DUMMY_TOL, (
             f"Node SHAP symmetry failed: φ[2]={phi[2]:.4f}, φ[3]={phi[3]:.4f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression pin: l1_reg=False must not artificially cap nonzero players
+# at 10 when the true signal is spread across more than 10 (specs/45,
+# specs/46). None of the classes above ever exercises a coalition size
+# > 10, so none of them would have failed against the pre-fix code (shap's
+# default l1_reg="num_features(10)" silently zeros all but 10 players
+# regardless of true signal spread) -- this class is the dedicated check.
+# ---------------------------------------------------------------------------
+
+class TestNoL1RegTruncation:
+    """l1_reg=False must recover genuine attribution spread beyond 10 players."""
+
+    # 15 players, each with a distinct nonzero weight -> every player has
+    # genuine nonzero marginal contribution. A correct, unregularized fit
+    # must report all 15 nonzero; "num_features(10)" would cap at 10.
+    #
+    # |contrib[i]| >= 1.0 for every i by construction (not by two
+    # independent draws that could cancel near zero): sign(z) * (1 + |z|)
+    # is bounded away from zero regardless of how small |z| happens to
+    # land, so no player's true contribution can coincide with ordinary
+    # KernelSHAP Monte Carlo noise at nsamples=4096 -- this test targets
+    # artificial capping at exactly 10, not estimator noise near zero.
+    P = 15
+    _z = RNG.standard_normal(P)
+    _contrib = np.sign(_z) * (1.0 + np.abs(_z))
+
+    def _predict_fn(self, coalition_matrix: np.ndarray) -> np.ndarray:
+        return coalition_matrix @ self._contrib
+
+    def test_l1_reg_false_recovers_all_nonzero_players(self):
+        """With l1_reg=False, all 15 genuinely-contributing players are
+        nonzero -- not capped at 10."""
+        phi = _kernel_shap(self._predict_fn, self.P, nsamples=4096, l1_reg=False)
+        nonzero = np.sum(np.abs(phi) > DUMMY_TOL)
+        assert nonzero > 10, (
+            f"Expected > 10 nonzero of {self.P} players under l1_reg=False, "
+            f"got {nonzero} -- looks truncated. phi={phi}"
+        )
+        assert nonzero == self.P, (
+            f"Expected all {self.P} players nonzero (every player has "
+            f"genuine nonzero contribution), got {nonzero}. phi={phi}"
+        )
+
+    def test_l1_reg_num_features_10_does_truncate(self):
+        """Contrast case, pins the pre-fix defect's actual shape: shap's
+        own 'num_features(10)' default caps nonzero players at 10 on this
+        exact toy setup, confirming the truncation this fix removes is
+        real and reproducible, not a misreading of the shap docstring."""
+        phi = _kernel_shap(
+            self._predict_fn, self.P, nsamples=4096, l1_reg="num_features(10)"
+        )
+        nonzero = np.sum(np.abs(phi) > DUMMY_TOL)
+        assert nonzero <= 10, (
+            f"Expected <= 10 nonzero of {self.P} players under "
+            f"l1_reg='num_features(10)' (this shap version's actual "
+            f"default), got {nonzero} -- if this now fails, shap's default "
+            f"truncation behavior may have changed upstream; re-verify "
+            f"specs/45's root-cause citation against the installed shap "
+            f"version before treating this as a real regression. phi={phi}"
+        )
+
+    def test_efficiency_holds_under_l1_reg_false_at_p_gt_10(self):
+        """Efficiency axiom is not affected by disabling l1_reg, including
+        at coalition sizes above the truncation threshold (specs/45 sec 2:
+        'efficiency axiom ... holds to float precision ... same as today')."""
+        phi = _kernel_shap(self._predict_fn, self.P, nsamples=4096, l1_reg=False)
+        f_x = self._predict_fn(np.ones((1, self.P)))[0]
+        f_bg = self._predict_fn(np.zeros((1, self.P)))[0]
+        gap = f_x - f_bg
+        err = abs(phi.sum() - gap)
+        tol = max(EFFICIENCY_TOL * abs(gap), 1e-6)
+        assert err < tol, (
+            f"Efficiency failed at P=15 under l1_reg=False: "
+            f"sum(φ)={phi.sum():.5f}, f(x)-f(bg)={gap:.5f}, err={err:.5f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Production wiring pin: TestNoL1RegTruncation above only exercises this
+# file's own _kernel_shap helper -- it never imports feature_shap.py /
+# temporal_shap.py / node_shap.py, so it would keep passing even if a
+# future edit dropped `l1_reg=_L1_REG` from one of those three
+# `explainer.shap_values(...)` call sites or flipped its `_L1_REG` constant
+# back to a truthy value (verified empirically this session: deleting the
+# `l1_reg=_L1_REG` line from feature_shap.py left all other tests green).
+# This class pins the actual production wiring, mirroring
+# test_wiring_fixes.py's source/config-pinning convention (its
+# not-referenced-anywhere balancer-key guard,
+# test_tune_script_never_mentions_selection_metric).
+# ---------------------------------------------------------------------------
+
+class TestL1RegProductionWiring:
+    """Each granularity module must define _L1_REG=False and actually pass
+    it (by name) into its explain()'s shap_values(...) call."""
+
+    def test_feature_shap_l1_reg_constant_is_false(self):
+        import src.explainer.feature_shap as mod
+        assert mod._L1_REG is False
+
+    def test_temporal_shap_l1_reg_constant_is_false(self):
+        import src.explainer.temporal_shap as mod
+        assert mod._L1_REG is False
+
+    def test_node_shap_l1_reg_constant_is_false(self):
+        import src.explainer.node_shap as mod
+        assert mod._L1_REG is False
+
+    def test_feature_shap_explain_passes_l1_reg_by_name(self):
+        import src.explainer.feature_shap as mod
+        src_text = inspect.getsource(mod.FeatureGroupSHAP.explain)
+        assert "l1_reg=_L1_REG" in src_text, (
+            "feature_shap.py's explain() no longer passes l1_reg=_L1_REG "
+            "into shap_values(...) -- this would silently re-enable shap's "
+            "default 'num_features(10)' truncation."
+        )
+
+    def test_temporal_shap_explain_passes_l1_reg_by_name(self):
+        import src.explainer.temporal_shap as mod
+        src_text = inspect.getsource(mod.TemporalNeighborhoodSHAP.explain)
+        assert "l1_reg=_L1_REG" in src_text, (
+            "temporal_shap.py's explain() no longer passes l1_reg=_L1_REG "
+            "into shap_values(...) -- this would silently re-enable shap's "
+            "default 'num_features(10)' truncation."
+        )
+
+    def test_node_shap_explain_passes_l1_reg_by_name(self):
+        import src.explainer.node_shap as mod
+        src_text = inspect.getsource(mod.NodeNoveltySHAP.explain)
+        assert "l1_reg=_L1_REG" in src_text, (
+            "node_shap.py's explain() no longer passes l1_reg=_L1_REG "
+            "into shap_values(...) -- this would silently re-enable shap's "
+            "default 'num_features(10)' truncation."
         )

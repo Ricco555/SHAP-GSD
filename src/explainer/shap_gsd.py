@@ -129,9 +129,14 @@ class SHAPGSDExplainer:
         self.temp_shap = TemporalNeighborhoodSHAP(background, nsm, g_split, device)
         self.node_shap = NodeNoveltySHAP(background, device)
 
-        feat_nsamples = cfg.get("explainer", {}).get("feature_nsamples", 512)
-        temp_nsamples = cfg.get("explainer", {}).get("temporal_nsamples", 1024)
-        node_nsamples = cfg.get("explainer", {}).get("node_nsamples", 512)
+        # Defaults raised 512/1024/512 -> 2048/2048/2048 alongside the
+        # l1_reg=False fix (specs/45 sec 3.1, specs/46 sec 0.2): disabling
+        # L1 truncation surfaces real KernelSHAP Monte Carlo noise across
+        # all 48 (or per-flow N/2+M) coalition players that the prior
+        # regularized default was masking by forcing most of them to zero.
+        feat_nsamples = cfg.get("explainer", {}).get("feature_nsamples", 2048)
+        temp_nsamples = cfg.get("explainer", {}).get("temporal_nsamples", 2048)
+        node_nsamples = cfg.get("explainer", {}).get("node_nsamples", 2048)
         self._feat_nsamples = feat_nsamples
         self._temp_nsamples = temp_nsamples
         self._node_nsamples = node_nsamples

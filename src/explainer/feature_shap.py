@@ -23,6 +23,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# shap>=0.47 defaults l1_reg to "num_features(10)", silently L1-truncating
+# attributions to at most 10 nonzero coalition players. SHAP-GSD needs the
+# genuine, unregularized attribution spread for its concentration
+# statistics (specs/45 sec 1-2) -- must stay False, not a config key
+# (specs/45 sec 3.2).
+_L1_REG: bool = False
+
 
 class FeatureGroupSHAP:
     """KernelSHAP over semantic feature groups for a single target edge."""
@@ -113,6 +120,7 @@ class FeatureGroupSHAP:
         phi_raw = explainer.shap_values(
             foreground_data,
             nsamples=nsamples,
+            l1_reg=_L1_REG,
             silent=True,
         )
         phi = np.array(phi_raw).squeeze()  # (K,)

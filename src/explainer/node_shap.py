@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 _NOVELTY_DIM = 1
 _NEVER_MASK_DIMS = (11, 12)  # time_sin, time_cos
+# See feature_shap.py's _L1_REG for the shared rationale (specs/45 sec 1-2,
+# 3.2).
+_L1_REG: bool = False
 
 
 def build_non_target_ids(
@@ -245,6 +248,7 @@ class NodeNoveltySHAP:
         phi_raw = explainer.shap_values(
             foreground_data,
             nsamples=nsamples,
+            l1_reg=_L1_REG,
             silent=True,
         )
         phi = np.array(phi_raw).squeeze()
