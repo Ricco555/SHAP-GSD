@@ -14,21 +14,29 @@ What it shows:
   uniform node sizes; amber warning box listing what flat SHAP cannot see.
 
 Candidates (n_nbr = in-window temporal neighbours):
-  Fuzzers   2117155  n_nbr=28
-  Shellcode 2117054  n_nbr=25
-  Exploits  2117278  n_nbr=25
-  Analysis  2116629  n_nbr=25
-  DoS       2117597  n_nbr=13
-  Recon     2116715  n_nbr=12
-  Backdoor  2348527  n_nbr=0   max|φ_N|=1.438
-  Generic   2280979  n_nbr=0   max|φ_N|=1.293
-  Worms     2267785  n_nbr=0   max|φ_N|=1.614
+  Fuzzers        1931492  n_nbr=28
+  Shellcode      1929451  n_nbr=19
+  Exploits       1945754  n_nbr=15
+  Analysis       2099455  n_nbr=5
+  DoS            1942014  n_nbr=9
+  Reconnaissance 1929497  n_nbr=30
+  Backdoor       2348527  n_nbr=0   (STALE — pending editorial decision, see below)
+  Generic        2176183  n_nbr=0   max|φ_N|=0.3985
+  Worms          2052764  n_nbr=0   max|φ_N|=0.1623
+
+All non-Backdoor EIDs were reselected against the current run's explanation
+set (each verified present, correctly classified, and its annotated numbers
+re-read from the JSON). Backdoor is intentionally left at its historical EID:
+0 of the run's explained Backdoor flows are correctly classified, so there is
+no valid replacement to pick — its panel simply SKIPs, pending an explicit
+editorial decision about that slot.
 
 Files read (all resolved via explore._paths.paths(), run.dir-aware):
   outputs/explanations/<Class>/<EID>.json
   graphs/test.bin
   graphs/node_id_map.json
-  node_state_snapshots/snapshots.pkl  (optional — empty when snapshots disabled)
+  node_state_snapshots/  (via NodeStateManager.load — per-node edge histories;
+                          the periodic-snapshot cache is disabled by design)
 
 Files output:
   outputs/figures/graph/topology_<Class>_<EID>.{pdf,png,txt}
@@ -37,9 +45,7 @@ Files output:
 import matplotlib
 matplotlib.use("Agg")
 
-import bisect
 import json
-import pickle
 import sys
 from pathlib import Path
 from typing import Optional
@@ -55,6 +61,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from src.model.node_state import NodeStateManager  # noqa: E402
 _P = paths()
 OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -68,15 +75,19 @@ _GHOST = "#cccccc"
 
 # Best EID per class: (class_name, eid, n_nbr, selection_note)
 CANDIDATES = [
-    ("Fuzzers",   2117155, 28, "richest temporal context"),
-    ("Shellcode", 2117054, 25, "temporal + strong node shap"),
-    ("Exploits",  2117278, 25, "temporal (1 computation node)"),
-    ("Analysis",  2116629, 25, "temporal (1 computation node)"),
-    ("DoS",       2117597, 13, "moderate temporal context"),
-    ("Recon",     2116715, 12, "temporal + balanced node shap"),
-    ("Backdoor",  2348527,  0, "no temporal; max |phi_N|=1.438"),
-    ("Generic",   2280979,  0, "no temporal; max |phi_N|=1.293"),
-    ("Worms",     2267785,  0, "no temporal; max |phi_N|=1.614"),
+    ("Fuzzers",        1931492, 28, "richest temporal context (28 neighbours, 3 nodes)"),
+    ("Shellcode",      1929451, 19, "temporal context (19 neighbours, 4 nodes)"),
+    ("Exploits",       1945754, 15, "temporal context (15 neighbours, 3 nodes)"),
+    ("Analysis",       2099455,  5, "class-max temporal context (5 neighbours, 7 nodes)"),
+    ("DoS",            1942014,  9, "moderate temporal context (9 neighbours, 4 nodes)"),
+    ("Reconnaissance", 1929497, 30, "richest temporal context (30 neighbours, 4 nodes); p(y_hat)=0.994"),
+    # STALE / PENDING DECISION — kept deliberately, do not silently replace.
+    # Unlike every other row this EID was NOT reselected: 0 of the run's
+    # explained Backdoor flows are correctly classified, so there is no valid
+    # substitute. The JSON is absent, so this row SKIPs (no figure emitted).
+    ("Backdoor",       2348527,  0, "no temporal; max |phi_N|=1.438"),
+    ("Generic",        2176183,  0, "no temporal; max |phi_N|=0.3985 (5 nodes)"),
+    ("Worms",          2052764,  0, "no temporal; max |phi_N|=0.1623 (7 nodes)"),
 ]
 
 # Distinct colour per class (IEEE-safe)
@@ -87,7 +98,7 @@ _CLASS_COLORS = {
     "Exploits":  "#457b9d",
     "Fuzzers":   "#2d6a4f",
     "Generic":   "#52b788",
-    "Recon":     "#8ecae6",
+    "Reconnaissance": "#8ecae6",
     "Shellcode": "#c77dff",
     "Worms":     "#f4a261",
 }
@@ -113,21 +124,33 @@ def load_graph() -> tuple[dict, dict]:
     return eid_to_edge, inv_map
 
 
-def load_snapshots() -> dict:
-    """Load node-state snapshot pickle (optional — empty when snapshots disabled)."""
-    p = _P["node_state"] / "snapshots.pkl"
-    if not p.exists():
-        return {"times": [], "states": []}
-    with open(p, "rb") as f:
-        return pickle.load(f)
+def load_node_state() -> Optional[NodeStateManager]:
+    """Load the run's NodeStateManager, or None if its directory is absent.
 
-
-def get_node_state(snaps: dict, nid: int, ts_ms: int) -> Optional[np.ndarray]:
-    """Return the 15-dim state vector for nid at ts_ms, or None."""
-    idx = bisect.bisect_right(snaps["times"], ts_ms) - 1
-    if idx < 0:
+    Node state is queried through the manager's real runtime path
+    (``get_state_at_time``), which recomputes from the persisted per-node edge
+    histories.  The periodic-snapshot cache (``snapshots.pkl``) is disabled by
+    design and is always empty — it must not be read directly.
+    """
+    ns_dir = _P["node_state"]
+    if not (ns_dir / "histories.pkl").exists():
+        print(f"  WARNING: no node state at {ns_dir} — deg/H annotations disabled")
         return None
-    return snaps["states"][idx].get(nid)
+    print(f"  NodeStateManager ← {ns_dir}")
+    return NodeStateManager.load(ns_dir)
+
+
+def get_node_state(nsm: Optional[NodeStateManager],
+                   nid: int,
+                   ts_ms: int) -> Optional[np.ndarray]:
+    """Return the 15-dim state vector for nid at ts_ms, or None if unavailable."""
+    if nsm is None:
+        return None
+    try:
+        return nsm.get_state_at_time(int(nid), float(ts_ms))
+    except Exception as exc:  # degrade to "no annotation", as before
+        print(f"  WARNING: node state unavailable for node {nid}: {exc}")
+        return None
 
 
 def short_ip(ip: str) -> str:
@@ -143,7 +166,7 @@ def draw_shap_gsd_panel(
     d: dict,
     eid_to_edge: dict,
     inv_map: dict,
-    snaps: dict,
+    nsm: Optional[NodeStateManager],
     class_color: str,
 ) -> dict:
     """
@@ -205,7 +228,7 @@ def draw_shap_gsd_panel(
 
     # Node-state annotation on src / dst
     for nid in [src_nid, dst_nid]:
-        sv = get_node_state(snaps, nid, target_ts)
+        sv = get_node_state(nsm, nid, target_ts)
         if sv is not None:
             out_deg   = sv[4]
             port_entr = sv[8]
@@ -338,7 +361,7 @@ def make_class_figure(
     note: str,
     eid_to_edge: dict,
     inv_map: dict,
-    snaps: dict,
+    nsm: Optional[NodeStateManager],
 ) -> None:
     """Produce topology_<cls_name>_<eid>.{pdf,png,txt} for one class."""
     json_path = _P["explanations"] / cls_name / f"{eid}.json"
@@ -357,7 +380,7 @@ def make_class_figure(
     axes[1].set_title(f"Flat KernelSHAP  |  {cls_name}",
                       fontsize=LABEL_FS + 1, pad=6)
 
-    pos = draw_shap_gsd_panel(axes[0], d, eid_to_edge, inv_map, snaps, cls_color)
+    pos = draw_shap_gsd_panel(axes[0], d, eid_to_edge, inv_map, nsm, cls_color)
     draw_flat_shap_panel(axes[1], d, eid_to_edge, inv_map, pos, cls_color)
 
     # Below-panel captions (IEEE style)
@@ -435,13 +458,13 @@ def make_class_figure(
 # ─────────────────────────── main ───────────────────────────────────────────
 
 def main() -> None:
-    print("Loading graph and snapshots …")
+    print("Loading graph and node state …")
     eid_to_edge, inv_map = load_graph()
-    snaps = load_snapshots()
+    nsm = load_node_state()
 
     for cls_name, eid, n_nbr, note in CANDIDATES:
         print(f"Processing {cls_name} EID={eid} …")
-        make_class_figure(cls_name, eid, n_nbr, note, eid_to_edge, inv_map, snaps)
+        make_class_figure(cls_name, eid, n_nbr, note, eid_to_edge, inv_map, nsm)
 
     print(f"\nAll topology panels saved to {OUT_DIR}")
 
