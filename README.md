@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.12**
+**Version 2.2.13**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -90,6 +90,38 @@ training-split support; affects the other NetFlow datasets used in
 follow-up work). Any SHAP-GSD explanation-derived number — feature-group
 concentration, per-flow attribution magnitude, or the GraphSVX column of
 Table 2 — should be regenerated from current `main` before being cited.
+
+As of `v2.2.13`, `main` fixes a class of hardcoded-narrative defects across
+roughly a dozen `explore/` figure and `scripts/` metric generators: numeric
+literals, class-name abbreviations, and qualitative claims that were
+written by hand when a script was first authored and never re-derived from
+the run being rendered, so several no longer matched their own file's
+computed output after the `v2.2.12` fix above changed the underlying
+attribution magnitudes. Fixes include: correcting a `"Recon"`/`"Reconnaissance"`
+class-key mismatch that silently dropped or mis-mapped that class's data in
+six scripts; replacing stale `d_e`/coalition-space literals and a
+contradicted Spearman-ρ claim with values read live from the run;
+populating two previously-unfilled narrative templates
+(`class_time_distribution.py`) with computed criteria instead of a
+placeholder; fixing a hardcoded temporal-neighbour count and a top-k
+membership-counting defect (`11_efficiency.py`, `node_fidelity.py`);
+locking and applying one primary convention (with the alternative kept as
+a labelled secondary) for four statistics that previously had more than
+one silently-chosen definition in play (feature-group concentration,
+node-novelty nonzero rate, φ_T attribution share, per-flow explanation
+cost); regenerating the Backdoor case-study/topology-panel candidates to
+reflect that 0 of that class's explained flows are correctly classified in
+this run (no attribution panel is emitted for it; its one valid,
+prediction-independent artifact — the 2-hop topology panel — now is);
+aligning the case-study and topology-panel generators onto a single shared
+candidate list (they previously sampled independently and disagreed on
+four classes' example flows); and replacing `node_shap_convergence.py`'s
+reported convergence slope — which measured the KernelSHAP solver's
+efficiency-axiom residual, satisfied exactly by construction at any sample
+count — with a verified exact-vs-sampled coalition-enumeration measurement
+instead. None of these affect model training, evaluation, or the
+underlying SHAP values themselves; they affect only how existing numbers
+are selected, labelled, and narrated in generated figures and reports.
 
 ---
 
