@@ -339,7 +339,7 @@ def draw_flat_shap_panel(
         ns_str += ", ..."
     warn = (
         "Flat KernelSHAP sees:\n"
-        "  ✓ 218 edge features\n"
+        "  ✓ 212 encoded edge features\n"
         f"  ✗ {n_nbr} temporal neighbors (ghosted)\n"
         f"  ✗ {n_nids} node states (φ_N=[{ns_str}])\n"
         "  ✗ Rolling behaviour context"
