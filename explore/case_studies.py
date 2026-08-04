@@ -1,5 +1,5 @@
 """
-Case study figures for all 9 attack classes.
+Case study figures for 8 attack classes (all except Backdoor — see below).
 
 Produces a 4-panel figure per class:
   (a) Feature-group SHAP bar chart (top 20 by |φ|)
@@ -7,46 +7,29 @@ Produces a 4-panel figure per class:
   (c) Node SHAP bar chart
   (d) Temporal neighbour gap histogram
 
-Selected flows:
-  Classes with temporal neighbours (prioritised):
-    Fuzzers   1931492  (28 temporal neighbours)  highest-neighbour, correctly
-                             classified, confident (p=0.83) Fuzzers flow in the
-                             R3-S2 explanation set. Replaces 2117155, which is
-                             not in that set. (1926865 has 29 neighbours but
-                             p=0.29 — fails the high-confidence criterion.)
-    Shellcode 1929451  (19)
-    Exploits  1945754  (15)  highest-neighbour correctly-classified, confident
-                             (p=0.62) Exploits flow. Replaces 2117278, which is
-                             not in the R3-S2 explanation set.
-    Analysis  2099604  (4)   flagship three-layer case: feature-group,
-                             temporal-neighbourhood AND node-novelty
-                             attribution are all simultaneously nonzero and
-                             reinforcing (all positive) — the property the
-                             Abstract's "all three attribution layers" claim
-                             rests on. Replaces 2117614, which is not in the
-                             R3-S2 explanation set.
-    DoS       1942014  (9)   highest-neighbour correctly-classified, confident
-                             (p=0.52) DoS flow. Replaces 2117597, which is not
-                             in the R3-S2 explanation set. (DoS flows with more
-                             neighbours — up to 53 — are all misclassified.)
-  Classes without temporal neighbours (best by proba × phi_N_frac):
-    Backdoor  2174974        (no correctly-classified Backdoor flow exists in
-                             this run; retained as the documented fallback)
-    Generic   2250911        replaces 2247735 (not in the R3-S2 explanation
-                             set); top correctly-classified flow by
-                             proba × phi_N_frac (0.997 × 0.0686)
-    Worms     2310720        (0.595 × 0.1458)
-  Model/reference case:
-    Reconnaissance 2274081   replaces 2232037 (not in the R3-S2 explanation
-                             set). The original had no reproducible numeric
-                             criterion, so the same proba × phi_N_frac rule as
-                             the no-neighbour classes is applied: 0.996 × 0.100.
+Selected flows: see explore/_case_candidates.py, the single shared source of
+truth for both this script and explore/graph/topology_panel.py (previously
+they sampled independently and disagreed on 4 classes — Analysis, Generic,
+Reconnaissance, Worms — see final/review01/coder_instructions_figure_determinism.md
+S4). No neighbour count, correctness, or magnitude is hardcoded here; every
+number in the generated `.txt`/summary output is read from the run's own
+explanation JSON at render time.
+
+Backdoor is not in the candidate list and produces no output from this
+script. 0 of 200 explained Backdoor flows in this run are correctly
+classified (max p(Backdoor)=0.0520, zero flows predicted Backdoor anywhere)
+so panels (a)/(c)/(d) would be explaining a prediction the model never
+makes. Backdoor's one valid artifact — the 2-hop topology panel, which does
+not depend on the prediction — is produced by
+explore/graph/topology_panel.py instead. See
+final/review01/coder_instructions_figure_determinism.md S3 and
+final/review01/backdoor_writer_briefing.md for the full rationale.
 
 Outputs:
   outputs/figures/case_studies/<Class>/<Class>_<EID>.{pdf,png}      (composite)
   outputs/figures/case_studies/<Class>/<Class>_<EID>_{a,b,c,d}.png  (individual panels)
   outputs/figures/case_studies/<Class>/<Class>_<EID>_summary.json
-  outputs/figures/case_studies/quality_report.txt                    (all 9 cases)
+  outputs/figures/case_studies/quality_report.txt                    (all classes)
 
 Reads:
   outputs/explanations/<Class>/<EID>.json
@@ -71,6 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore._case_candidates import CANDIDATES  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.model.temporal_sampler import TemporalNeighborSampler  # noqa: E402
 from src.visualization.case_study_plots import make_case_study_figure, make_panel_figures  # noqa: E402
@@ -83,20 +67,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# ── Candidate flows ────────────────────────────────────────────────────────────
-# (class_name, global_eid, has_temporal_nbrs)
-CANDIDATES = [
-    ("Fuzzers",   1931492, True),  # R3-S2 EID; most temporal neighbours (28) among correctly-classified, confident Fuzzers flows (2117155 is absent from this run's explanation set)
-    ("Shellcode", 1929451, True),  # armRb+S2 EID (armRb used 2117054 — EIDs are split-specific, not portable across runs)
-    ("Exploits",  1945754, True),  # R3-S2 EID; most temporal neighbours (15) among correctly-classified Exploits flows (2117278 is absent from this run's explanation set)
-    ("Analysis",  2099604, True),  # armRb+S2 EID; flagship case with all three attribution layers nonzero and reinforcing (2117614 is absent from this run's explanation set)
-    ("DoS",       1942014, True),  # R3-S2 EID; most temporal neighbours (9) among correctly-classified DoS flows (2117597 is absent from this run's explanation set)
-    ("Backdoor",  2174974, False),
-    ("Generic",   2250911, False),  # R3-S2 EID; best correctly-classified flow by proba × phi_N_frac (2247735 is absent from this run's explanation set)
-    ("Worms",     2310720, False),
-    ("Reconnaissance", 2274081, False),   # R3-S2 EID; best correctly-classified flow by proba × phi_N_frac (2232037 is absent from this run's explanation set). Class name must match the outputs/explanations/<Class>/ directory name exactly, not an abbreviation
-]
 
 EXPL_DIR = _P["explanations"]
 OUT_DIR  = _P["figures"] / "case_studies"
@@ -261,28 +231,27 @@ def main() -> None:
     if args.stratified:
         out_dir = STRATIFIED_OUT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        sampled = _select_stratified_sample(seed=args.stratified_seed)
-        candidates = [(c, e, None) for c, e in sampled]
+        candidates = _select_stratified_sample(seed=args.stratified_seed)
         if args.filter_class:
-            candidates = [(c, e, h) for c, e, h in candidates if c == args.filter_class]
+            candidates = [(c, e) for c, e in candidates if c == args.filter_class]
         if not candidates:
             logger.error(f"No stratified sample found for class '{args.filter_class}'.")
             return
         logger.info(
             f"Stratified sample (seed={args.stratified_seed}, no filtering on "
-            f"correctness/confidence/attribution): {[(c, e) for c, e, _ in candidates]}"
+            f"correctness/confidence/attribution): {candidates}"
         )
     else:
         out_dir = OUT_DIR
         candidates = CANDIDATES
         if args.filter_class:
-            candidates = [(c, e, h) for c, e, h in CANDIDATES if c == args.filter_class]
+            candidates = [(c, e) for c, e in CANDIDATES if c == args.filter_class]
             if not candidates:
                 logger.error(f"No candidate found for class '{args.filter_class}'. "
-                             f"Valid classes: {[c for c,_,_ in CANDIDATES]}")
+                             f"Valid classes: {[c for c, _ in CANDIDATES]}")
                 return
 
-    for class_name, global_eid, has_nbrs in candidates:
+    for class_name, global_eid in candidates:
         logger.info(f"Processing {class_name} EID={global_eid} …")
 
         json_path = EXPL_DIR / class_name / f"{global_eid}.json"
@@ -368,7 +337,7 @@ def main() -> None:
             float(np.abs(fg).max() - np.abs(fg).min()),
             len(topo["hop1_nodes"]) + len(topo["hop2_nodes"]),
             float(np.abs(ns).max()) if len(ns) > 0 else 0.0,
-            len(gaps), in_W, proba, in_W > 0 if has_nbrs is None else has_nbrs,
+            len(gaps), in_W, proba, in_W > 0,
         ))
 
         if args.stratified:

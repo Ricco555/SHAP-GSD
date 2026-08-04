@@ -13,23 +13,19 @@ What it shows:
   Right (Flat KernelSHAP): same node positions; temporal edges ghosted;
   uniform node sizes; amber warning box listing what flat SHAP cannot see.
 
-Candidates (n_nbr = in-window temporal neighbours):
-  Fuzzers        1931492  n_nbr=28
-  Shellcode      1929451  n_nbr=19
-  Exploits       1945754  n_nbr=15
-  Analysis       2099455  n_nbr=5
-  DoS            1942014  n_nbr=9
-  Reconnaissance 1929497  n_nbr=30
-  Backdoor       2348527  n_nbr=0   (STALE — pending editorial decision, see below)
-  Generic        2176183  n_nbr=0   max|φ_N|=0.3985
-  Worms          2052764  n_nbr=0   max|φ_N|=0.1623
+Candidates: see explore/_case_candidates.py, the single shared source of
+truth for both this script and explore/case_studies.py (previously they
+sampled independently and disagreed on 4 classes — see
+final/review01/coder_instructions_figure_determinism.md S4). No neighbour
+count or magnitude is hardcoded here — the per-class "Reason" line in each
+`.txt` output is built from that flow's own JSON at render time.
 
-All non-Backdoor EIDs were reselected against the current run's explanation
-set (each verified present, correctly classified, and its annotated numbers
-re-read from the JSON). Backdoor is intentionally left at its historical EID:
-0 of the run's explained Backdoor flows are correctly classified, so there is
-no valid replacement to pick — its panel simply SKIPs, pending an explicit
-editorial decision about that slot.
+Backdoor is not in the shared CANDIDATES list — no correctly-classified
+Backdoor flow exists in this run, so it cannot appear in an attribution
+case study (explore/case_studies.py excludes it entirely for that reason).
+This script renders it anyway from `BACKDOOR_TOPOLOGY_EID`, because the
+2-hop topology panel is structural and does not depend on the prediction
+being correct — it is Backdoor's one valid artifact in this figure set.
 
 Files read (all resolved via explore._paths.paths(), run.dir-aware):
   outputs/explanations/<Class>/<EID>.json
@@ -61,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore._case_candidates import CANDIDATES, BACKDOOR_TOPOLOGY_EID  # noqa: E402
 from src.model.node_state import NodeStateManager  # noqa: E402
 _P = paths()
 OUT_DIR = _P["figures"] / "graph"
@@ -72,23 +69,6 @@ _TEAL  = "#2a9d8f"
 _AMBER = "#e9c46a"
 _GRAY  = "#888888"
 _GHOST = "#cccccc"
-
-# Best EID per class: (class_name, eid, n_nbr, selection_note)
-CANDIDATES = [
-    ("Fuzzers",        1931492, 28, "richest temporal context (28 neighbours, 3 nodes)"),
-    ("Shellcode",      1929451, 19, "temporal context (19 neighbours, 4 nodes)"),
-    ("Exploits",       1945754, 15, "temporal context (15 neighbours, 3 nodes)"),
-    ("Analysis",       2099455,  5, "class-max temporal context (5 neighbours, 7 nodes)"),
-    ("DoS",            1942014,  9, "moderate temporal context (9 neighbours, 4 nodes)"),
-    ("Reconnaissance", 1929497, 30, "richest temporal context (30 neighbours, 4 nodes); p(y_hat)=0.994"),
-    # STALE / PENDING DECISION — kept deliberately, do not silently replace.
-    # Unlike every other row this EID was NOT reselected: 0 of the run's
-    # explained Backdoor flows are correctly classified, so there is no valid
-    # substitute. The JSON is absent, so this row SKIPs (no figure emitted).
-    ("Backdoor",       2348527,  0, "no temporal; max |phi_N|=1.438"),
-    ("Generic",        2176183,  0, "no temporal; max |phi_N|=0.3985 (5 nodes)"),
-    ("Worms",          2052764,  0, "no temporal; max |phi_N|=0.1623 (7 nodes)"),
-]
 
 # Distinct colour per class (IEEE-safe)
 _CLASS_COLORS = {
@@ -357,8 +337,6 @@ def draw_flat_shap_panel(
 def make_class_figure(
     cls_name: str,
     eid: int,
-    n_nbr_expected: int,
-    note: str,
     eid_to_edge: dict,
     inv_map: dict,
     nsm: Optional[NodeStateManager],
@@ -415,6 +393,13 @@ def make_class_figure(
     ns     = d.get("node_shap", [])
     max_ns = max(abs(float(v)) for v in ns) if ns else 0.0
     te     = eid_to_edge.get(eid, (0, 1, 0))
+    correct = d.get("true_label") == d.get("predicted_label")
+
+    if n_nbr > 0:
+        reason = f"{n_nbr} in-window temporal neighbours, {n_nids} computation nodes"
+    else:
+        reason = f"0 in-window temporal neighbours; max|φ_N|={max_ns:.4f} over {n_nids} computation nodes"
+    reason += ", correctly classified" if correct else ", misclassified (no correctly-classified flow exists for this class)"
 
     lines = [
         f"Figure reasoning — topology_{cls_name}_{eid}",
@@ -422,7 +407,7 @@ def make_class_figure(
         "SELECTION",
         f"  Class   : {cls_name}",
         f"  EID     : {eid}",
-        f"  Reason  : {note}",
+        f"  Reason  : {reason}",
         f"  src→dst : {te[0]} → {te[1]}",
         f"  n_nbr   : {n_nbr}  (in-window temporal neighbours)",
         f"  n_nids  : {n_nids} (GNN computation nodes)",
@@ -462,9 +447,15 @@ def main() -> None:
     eid_to_edge, inv_map = load_graph()
     nsm = load_node_state()
 
-    for cls_name, eid, n_nbr, note in CANDIDATES:
+    # Backdoor is not in the shared attribution-case CANDIDATES list (no
+    # correctly-classified Backdoor flow exists), but the topology panel is
+    # structural and does not depend on prediction correctness, so it is
+    # rendered here from its own dedicated EID.
+    all_candidates = list(CANDIDATES) + [("Backdoor", BACKDOOR_TOPOLOGY_EID)]
+
+    for cls_name, eid in all_candidates:
         print(f"Processing {cls_name} EID={eid} …")
-        make_class_figure(cls_name, eid, n_nbr, note, eid_to_edge, inv_map, nsm)
+        make_class_figure(cls_name, eid, eid_to_edge, inv_map, nsm)
 
     print(f"\nAll topology panels saved to {OUT_DIR}")
 
