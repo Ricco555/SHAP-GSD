@@ -9,9 +9,15 @@ Produces a 4-panel figure per class:
 
 Selected flows:
   Classes with temporal neighbours (prioritised):
-    Fuzzers   2117155  (28 in-window neighbours)
-    Shellcode 2117054  (25)
-    Exploits  2117278  (25)
+    Fuzzers   1931492  (28 temporal neighbours)  highest-neighbour, correctly
+                             classified, confident (p=0.83) Fuzzers flow in the
+                             R3-S2 explanation set. Replaces 2117155, which is
+                             not in that set. (1926865 has 29 neighbours but
+                             p=0.29 — fails the high-confidence criterion.)
+    Shellcode 1929451  (19)
+    Exploits  1945754  (15)  highest-neighbour correctly-classified, confident
+                             (p=0.62) Exploits flow. Replaces 2117278, which is
+                             not in the R3-S2 explanation set.
     Analysis  2099604  (4)   flagship three-layer case: feature-group,
                              temporal-neighbourhood AND node-novelty
                              attribution are all simultaneously nonzero and
@@ -19,13 +25,22 @@ Selected flows:
                              Abstract's "all three attribution layers" claim
                              rests on. Replaces 2117614, which is not in the
                              R3-S2 explanation set.
-    DoS       2117597  (13)
+    DoS       1942014  (9)   highest-neighbour correctly-classified, confident
+                             (p=0.52) DoS flow. Replaces 2117597, which is not
+                             in the R3-S2 explanation set. (DoS flows with more
+                             neighbours — up to 53 — are all misclassified.)
   Classes without temporal neighbours (best by proba × phi_N_frac):
-    Backdoor  2174974
-    Generic   2247735
-    Worms     2310720
-  Model/reference case (regenerated for consistency):
-    Reconnaissance 2232037
+    Backdoor  2174974        (no correctly-classified Backdoor flow exists in
+                             this run; retained as the documented fallback)
+    Generic   2250911        replaces 2247735 (not in the R3-S2 explanation
+                             set); top correctly-classified flow by
+                             proba × phi_N_frac (0.997 × 0.0686)
+    Worms     2310720        (0.595 × 0.1458)
+  Model/reference case:
+    Reconnaissance 2274081   replaces 2232037 (not in the R3-S2 explanation
+                             set). The original had no reproducible numeric
+                             criterion, so the same proba × phi_N_frac rule as
+                             the no-neighbour classes is applied: 0.996 × 0.100.
 
 Outputs:
   outputs/figures/case_studies/<Class>/<Class>_<EID>.{pdf,png}      (composite)
@@ -72,15 +87,15 @@ logger = logging.getLogger(__name__)
 # ── Candidate flows ────────────────────────────────────────────────────────────
 # (class_name, global_eid, has_temporal_nbrs)
 CANDIDATES = [
-    ("Fuzzers",   2117155, True),
+    ("Fuzzers",   1931492, True),  # R3-S2 EID; most temporal neighbours (28) among correctly-classified, confident Fuzzers flows (2117155 is absent from this run's explanation set)
     ("Shellcode", 1929451, True),  # armRb+S2 EID (armRb used 2117054 — EIDs are split-specific, not portable across runs)
-    ("Exploits",  2117278, True),
+    ("Exploits",  1945754, True),  # R3-S2 EID; most temporal neighbours (15) among correctly-classified Exploits flows (2117278 is absent from this run's explanation set)
     ("Analysis",  2099604, True),  # armRb+S2 EID; flagship case with all three attribution layers nonzero and reinforcing (2117614 is absent from this run's explanation set)
-    ("DoS",       2117597, True),
+    ("DoS",       1942014, True),  # R3-S2 EID; most temporal neighbours (9) among correctly-classified DoS flows (2117597 is absent from this run's explanation set)
     ("Backdoor",  2174974, False),
-    ("Generic",   2247735, False),
+    ("Generic",   2250911, False),  # R3-S2 EID; best correctly-classified flow by proba × phi_N_frac (2247735 is absent from this run's explanation set)
     ("Worms",     2310720, False),
-    ("Reconnaissance", 2232037, False),   # model case, regenerated for consistency; class name must match the outputs/explanations/<Class>/ directory name exactly, not an abbreviation
+    ("Reconnaissance", 2274081, False),   # R3-S2 EID; best correctly-classified flow by proba × phi_N_frac (2232037 is absent from this run's explanation set). Class name must match the outputs/explanations/<Class>/ directory name exactly, not an abbreviation
 ]
 
 EXPL_DIR = _P["explanations"]
@@ -170,7 +185,7 @@ def _adapt_explanation(plain: dict, src_nid: int, dst_nid: int) -> dict:
     return adapted
 
 
-def _summary(plain: dict, topo: dict, W_seconds: float) -> dict:
+def _summary(plain: dict, topo: dict, W_seconds: float, class_name: str) -> dict:
     """Build numeric summary JSON for manuscript/audit use."""
     fg   = np.array(plain["feature_group_shap"])
     ns   = np.array(plain.get("node_shap", []))
@@ -206,7 +221,8 @@ def _summary(plain: dict, topo: dict, W_seconds: float) -> dict:
         "sum_phi_N":          ns_abs,
         "phi_N_fraction":     round(phi_n_frac, 4),
         "runtime_s":          plain.get("runtime_s"),
-        "json_path":          str(EXPL_DIR / str(plain.get("true_label", "?")) / f"{plain['edge_id']}.json"),
+        # Explanation dirs are named by class STRING, not by integer label.
+        "json_path":          str(EXPL_DIR / class_name / f"{plain['edge_id']}.json"),
     }
 
 
@@ -235,11 +251,6 @@ def main() -> None:
     with open(graphs_dir / "node_id_map.json") as f:
         ip_to_id: dict[str, int] = json.load(f)
     id2ip: dict[int, str] = {v: k for k, v in ip_to_id.items()}
-
-    # Label map to resolve class name → int for json path
-    artifacts_dir = Path(cfg["output"]["artifacts_dir"])
-    with open(artifacts_dir / "label_map.json") as f:
-        label_map: dict[str, int] = json.load(f)
 
     sampler   = TemporalNeighborSampler(fanouts=fanouts)
     geid_to_local = {int(g): i for i, g in enumerate(g_test.edata[dgl.EID].numpy())}
@@ -339,7 +350,7 @@ def main() -> None:
         logger.info(f"  Saved 4 individual panels → {class_name}/")
 
         # Summary JSON
-        summ = _summary(explanation, topo, W_seconds)
+        summ = _summary(explanation, topo, W_seconds, class_name)
         summ_path = class_dir / f"{stem}_summary.json"
         with open(summ_path, "w") as f:
             json.dump(summ, f, indent=2)
