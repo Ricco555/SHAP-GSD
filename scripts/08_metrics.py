@@ -884,7 +884,7 @@ def _build_summary(
     return {"top_k": top_k, "per_class": per_class, "overall": overall}
 
 
-def _format_table(summary: dict) -> str:
+def _format_table(summary: dict, runtime_by_layer: dict | None = None) -> str:
     """ASCII table for paper Table 2 (SHAP-GSD row)."""
     k = summary["top_k"]
     ov = summary["overall"]
@@ -920,6 +920,33 @@ def _format_table(summary: dict) -> str:
     lines.append(
         "Stability: mean per-group φ std across 3 coalition seeds (lower = more stable)"
     )
+
+    # LOCKED 2026-08-04 (coder_instructions_figure_determinism.md S2): per-flow
+    # explanation cost is reported end-to-end as the PRIMARY figure, because
+    # that is the number that is like-for-like against the baseline explainers'
+    # own `runtime_s` column (they report a single per-flow wall-clock total,
+    # not a per-layer breakdown). The per-layer breakdown (feature/temporal/
+    # node) is kept as a secondary row so the whole-method cost stays
+    # decomposable, sourced from runtime_by_layer.json (written by
+    # 06_explain.py from each explanation's runtime_feature_s/
+    # runtime_temporal_s/runtime_node_s/runtime_s fields).
+    if ov.get("runtime_mean_s") is not None:
+        lines.append("")
+        lines.append(
+            f"Per-flow explanation cost (PRIMARY, end-to-end, n={ov['n_flows']} flows, "
+            f"like-for-like against baselines): {ov['runtime_mean_s']:.3f} s/flow"
+        )
+        if runtime_by_layer:
+            feat = runtime_by_layer.get("feature_group", {}).get("mean_s")
+            temp = runtime_by_layer.get("temporal_neighborhood", {}).get("mean_s")
+            node = runtime_by_layer.get("node_novelty", {}).get("mean_s")
+            n_rt = runtime_by_layer.get("n_flows")
+            if None not in (feat, temp, node):
+                lines.append(
+                    f"  Secondary — per-layer breakdown (n={n_rt} flows, sums to the "
+                    f"end-to-end total): feature={feat:.4f}s + temporal={temp:.4f}s + "
+                    f"node={node:.4f}s = {feat + temp + node:.4f}s"
+                )
     return "\n".join(lines)
 
 
@@ -1469,7 +1496,18 @@ def main() -> None:
         json.dump(summary, f, indent=2)
     logger.info(f"Summary JSON → {summary_path}")
 
-    table_str = _format_table(summary)
+    runtime_by_layer_path = out_dir / "runtime_by_layer.json"
+    runtime_by_layer = None
+    if runtime_by_layer_path.exists():
+        with open(runtime_by_layer_path) as f:
+            runtime_by_layer = json.load(f)
+    else:
+        logger.warning(
+            f"{runtime_by_layer_path} not found — Table 2 will omit the "
+            f"per-layer explanation-cost secondary (06_explain.py writes it)."
+        )
+
+    table_str = _format_table(summary, runtime_by_layer)
     table_path = out_dir / "table2.txt"
     with open(table_path, "w") as f:
         f.write(table_str)

@@ -184,10 +184,40 @@ def main() -> None:
 
     overall_ft = frac_t.mean()
     overall_fn = frac_n.mean()
-    pct_zero = 100.0 * float((np.concatenate(phi_t_per_class) == 0).mean())
+
+    # LOCKED 2026-08-04 (coder_instructions_figure_determinism.md S2): phi_T
+    # share of total attribution has three defensible denominators. PRIMARY
+    # convention (locked): the conditional mean over only the phi_T-bearing
+    # flows (nonzero phi_T) — this is the number that describes what phi_T's
+    # magnitude looks like *when it fires*. Two secondaries are kept,
+    # explicitly labelled: the flow-level mean over ALL explained flows
+    # (dilutes the conditional mean by the zero-phi_T flows), and the
+    # unweighted per-class mean (gives every class equal weight regardless of
+    # its own flow count). Every emission of the two conditional statistics
+    # carries its denominator in the same sentence, per the locked convention.
+    all_phi_t_flat  = np.concatenate(phi_t_per_class)
+    all_frac_t_flat = np.concatenate([
+        class_data[cls]["phi_t"] / np.where(
+            (class_data[cls]["phi_f"] + class_data[cls]["phi_t"] + class_data[cls]["phi_n"]) > 0,
+            (class_data[cls]["phi_f"] + class_data[cls]["phi_t"] + class_data[cls]["phi_n"]),
+            1.0,
+        )
+        for cls in classes
+    ])
+    n_flows_total = len(all_frac_t_flat)
+    bearing_mask = all_phi_t_flat > 0
+    n_bearing = int(bearing_mask.sum())
+    conditional_ft_pct = (float(all_frac_t_flat[bearing_mask].mean()) * 100
+                          if n_bearing > 0 else 0.0)
+    flow_level_ft_pct = float(all_frac_t_flat.mean()) * 100
+
+    pct_zero = 100.0 * float((all_phi_t_flat == 0).mean())
     lines += [
         "",
-        f"phi_T: mean fraction across classes = {overall_ft*100:.4f}% (range {frac_t.min()*100:.3f}-{frac_t.max()*100:.3f}%).",
+        f"phi_T share of total attribution (PRIMARY, conditional on the {n_bearing} "
+        f"phi_T-bearing flows of {n_flows_total} total): {conditional_ft_pct:.2f}%.",
+        f"  Secondary — flow-level mean over all {n_flows_total} flows: {flow_level_ft_pct:.3f}%.",
+        f"  Secondary — unweighted mean of the {len(classes)} per-class means: {overall_ft*100:.3f}%.",
         f"phi_N: mean fraction across classes = {overall_fn*100:.1f}% (range {frac_n.min()*100:.0f}-{frac_n.max()*100:.0f}%).",
         f"phi_T == 0 for {pct_zero:.1f}% of all explained flows (no in-window temporal neighbors).",
         "phi_N measures GNN computation subgraph node contribution (masking computation",
