@@ -21,6 +21,7 @@ Files output:
 import matplotlib
 matplotlib.use("Agg")
 
+import json
 import sys
 import numpy as np
 import pandas as pd
@@ -34,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 from explore._paths import paths  # noqa: E402
 from explore.arguments._paper_notes import load_paper_notes  # noqa: E402
 _P = paths()
+EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -43,13 +45,29 @@ _TEAL    = "#2a9d8f"
 _CORAL   = "#e76f51"
 _GRAY    = "#888888"
 
-DOMINANT_NEG_GROUPS = {
-    "Analysis":  "SRC_PORT_IS_EPHEMERAL",
-    "Backdoor":  "L7_PROTO",
-    "Fuzzers":   "L7_PROTO",
-    "Recon":     "MIN_TTL / MAX_TTL",
-    "Benign":    "SERVER_TCP_FLAGS",
-}
+
+def dominant_negative_group(cls: str) -> str:
+    """Feature group with the most negative mean signed phi for this class.
+
+    Computed fresh from the explanation JSONs rather than hardcoded, so it
+    always reflects whichever explainer run's outputs are currently loaded.
+    """
+    cls_dir = EXP_DIR / cls
+    if not cls_dir.is_dir():
+        return "—"
+    sums, counts = {}, {}
+    for jf in cls_dir.glob("*.json"):
+        try:
+            rec = json.loads(jf.read_text())
+        except Exception:
+            continue
+        for name, phi in zip(rec["feature_group_names"], rec["feature_group_shap"]):
+            sums[name] = sums.get(name, 0.0) + phi
+            counts[name] = counts.get(name, 0) + 1
+    if not sums:
+        return "—"
+    means = {name: sums[name] / counts[name] for name in sums}
+    return min(means, key=means.get)
 
 
 def main() -> None:
@@ -159,14 +177,21 @@ def main() -> None:
         "  Absence-dominant classes (>50% flows with Fid+ ≤ 0):",
     ]
     for cls, ap in absence_dominant:
-        neg_grp = DOMINANT_NEG_GROUPS.get(cls, "—")
+        neg_grp = dominant_negative_group(cls)
         lines.append(f"    {cls:12s}: {ap:.1f}% absence-driven  |  dominant neg group: {neg_grp}")
+
+    n_attack   = sum(1 for cls, _ in absence_dominant if cls != "Benign")
+    has_benign = any(cls == "Benign" for cls, _ in absence_dominant)
+    breakdown  = f"{n_attack} attack class{'es' if n_attack != 1 else ''}"
+    if has_benign:
+        breakdown += " and Benign normal traffic"
+
     lines += [
         "",
         "PAPER FRAMING",
         "-------------",
         f"SHAP-GSD identifies {len(absence_dominant)} absence-dominant classes",
-        "(two attack classes and Benign normal traffic):",
+        f"({breakdown}):",
         ", ".join(cls for cls, _ in absence_dominant) + ".",
         "For these classes, the model's confidence drops when groups representing",
         "normal traffic signatures (e.g., ephemeral source ports, normal TTL variation)",

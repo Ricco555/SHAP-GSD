@@ -1,9 +1,9 @@
 """
-arg1_semantic_grouping.py — Argument 1: "48 Groups vs 218 Dims"
+arg1_semantic_grouping.py — Argument 1: "48 Groups vs 212 Dims"
 ================================================================
 What it shows:
-  Claim: Semantic grouping to K=48 reduces coalition space from 2^218 to 2^48
-  (×10^51). Attributions are concentrated: top-N groups cover 80% of total |φ|.
+  Claim: Semantic grouping to K=48 reduces coalition space from 2^212 to 2^48
+  (×10^49). Attributions are concentrated: top-N groups cover 80% of total |φ|.
 
 Panels:
   Left  (ax1) — per-class mean number of groups to reach 80% of total |φ|
@@ -196,8 +196,8 @@ def main() -> None:
 
     # Coalition space textbox
     ax2.text(0.97, 0.04,
-             "$2^{48}$ groups vs $2^{218}$ raw dims\n"
-             r"$\approx \times 10^{51}$ reduction in coalition space",
+             "$2^{48}$ groups vs $2^{212}$ encoded dims\n"
+             r"$\approx \times 10^{49}$ reduction in coalition space",
              transform=ax2.transAxes, fontsize=8, ha="right", va="bottom",
              bbox=dict(boxstyle="round,pad=0.35", fc="#f0fff4", ec=_TEAL, alpha=0.92))
 
@@ -208,7 +208,10 @@ def main() -> None:
     print(f"Saved {OUT_DIR / STEM}.{{pdf,png}}")
 
     # --- txt argument card ---
-    overall_mean_score = np.mean(scores_m)
+    overall_mean_score = np.mean(scores_m)   # unweighted mean of per-class means
+    overall_pct = overall_mean_score / 48.0 * 100.0
+    all_flow_scores = [s for scores in class_scores.values() for s in scores]
+    flow_level_mean_score = float(np.mean(all_flow_scores))
     top_cat = cat_sorted[0][0]
 
     lines = [
@@ -216,10 +219,14 @@ def main() -> None:
         "=" * 48, "",
         "WHAT",
         "----",
-        "Semantic grouping of 218 raw NetFlow dimensions into K=48 named feature groups",
-        "reduces the SHAP coalition space from 2^218 to 2^48 (×10^51). Attribution is",
-        "concentrated: per-class concentration scores show how many groups account for",
-        "80% of total |φ|. A per-category bar shows which functional group dominates.",
+        "Semantic grouping of 212 encoded NetFlow dimensions into K=48 named feature",
+        "groups reduces the SHAP coalition space from 2^212 to 2^48 (×10^49).",
+        "Attribution concentration: per-class concentration scores show how many groups",
+        "account for 80% of total |φ|. A per-category bar shows which functional group",
+        "dominates. Note: the class-level scores below are averaged UNWEIGHTED across",
+        "classes (each class contributes one mean regardless of its own flow count,",
+        "which ranges 46-200) — this differs slightly from a flow-level mean over all",
+        "1,846 explained flows.",
         "",
         "KEY FINDINGS",
         "------------",
@@ -230,7 +237,8 @@ def main() -> None:
                      f"top-1 group = {t1}  ({sign}-driven)")
     lines += [
         "",
-        f"  Overall mean concentration score: {overall_mean_score:.2f} groups",
+        f"  Overall mean concentration score (unweighted per-class mean): {overall_mean_score:.2f} groups",
+        f"  Overall mean concentration score (flow-level mean, n=1846): {flow_level_mean_score:.2f} groups",
         f"  Most attributed category overall: {top_cat}",
         "",
         "  Per-category mean |φ|:",
@@ -239,16 +247,18 @@ def main() -> None:
         lines.append(f"    {cat:15s}: {val:.5f}")
     lines += [
         "",
-        f"  Coalition space: 2^48 ≈ 2.81×10^14  vs  2^218 ≈ 4.21×10^65",
-        f"  Reduction factor: ≈ 10^51",
+        f"  Coalition space: 2^48 ≈ 2.81×10^14  vs  2^212 ≈ 6.58×10^63",
+        f"  Reduction factor: ≈ 10^49",
         "",
         "PAPER FRAMING",
         "-------------",
         "Treating the 48 semantic groups as atomic coalition players preserves the four",
         "Shapley axioms (Dummy, Efficiency, Symmetry, Additivity) while compressing the",
-        "sampling space by a factor of ~10^51. Attributions are sparse: the mean class",
-        f"needs only {overall_mean_score:.1f} groups to capture 80% of total |φ|, confirming",
-        "that SHAP-GSD explanations are both theoretically sound and practically concise.",
+        "sampling space by a factor of ~10^49. Attribution shows moderate concentration:",
+        f"the mean class needs {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) to capture 80%",
+        "of total |φ| — fewer than the full group set, but not a small dominant subset",
+        "either. This confirms SHAP-GSD explanations remain theoretically sound while",
+        "still distributing attribution across a meaningful share of the group space.",
         f"The dominant category ({top_cat}) drives classification across all attack types,",
         "with each class showing a distinct concentration pattern.",
         "",
@@ -259,8 +269,9 @@ def main() -> None:
         "coloured by attribution sign (teal = presence-driven, coral = absence-driven);",
         "annotations show the top-1 attributed group per class. Right: mean |φ| per",
         "feature category across all flows and classes; the coalition space reduction",
-        f"(2^48 vs 2^218, ×10^51) is annotated. Attribution is concentrated: on average",
-        f"{overall_mean_score:.1f} groups suffice to explain 80% of each decision.",
+        f"(2^48 vs 2^212, ×10^49) is annotated. Attribution shows moderate concentration:",
+        f"on average {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) suffice to explain",
+        "80% of each decision.",
     ]
     notes = load_paper_notes(STEM)
     if notes:

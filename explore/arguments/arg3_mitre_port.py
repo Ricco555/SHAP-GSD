@@ -103,7 +103,7 @@ def main() -> None:
         "Exploits":  "HTTP",
         "Fuzzers":   "HTTP",
         "Generic":   "DNS",
-        "Recon":     "SNMP",
+        "Reconnaissance": "SNMP",
         "Shellcode": "HTTP",
         "Worms":     "NTP",
     }
@@ -117,11 +117,11 @@ def main() -> None:
     # Use known class-service affinity to weight columns
     AFFINITY = {
         "HTTP":       {"DoS":1.0,"Backdoor":0.8,"Shellcode":0.7,"Exploits":0.9,"Benign":0.6,"Fuzzers":0.5},
-        "DNS":        {"Generic":1.0,"Benign":0.5,"Recon":0.4},
+        "DNS":        {"Generic":1.0,"Benign":0.5,"Reconnaissance":0.4},
         "SSH":        {"Backdoor":0.6,"Exploits":0.5},
         "FTP":        {"Exploits":0.4,"Backdoor":0.3},
         "RDP":        {"Exploits":0.3,"Backdoor":0.2},
-        "SNMP":       {"Recon":0.9,"Analysis":0.8},
+        "SNMP":       {"Reconnaissance":0.9,"Analysis":0.8},
         "NTP":        {"Worms":0.9,"DoS":0.5},
         "BitTorrent": {"Generic":0.3,"Backdoor":0.2},
     }

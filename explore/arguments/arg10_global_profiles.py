@@ -63,7 +63,7 @@ LITERATURE_TOP_GROUPS = {
                   "NUM_PKTS_UP_TO_128_BYTES"],
     "Generic":   ["DST_PORT_GROUP","L7_PROTO","DNS_QUERY_TYPE","IN_PKTS",
                   "TCP_FLAGS"],
-    "Recon":     ["MIN_TTL","MAX_TTL","TCP_FLAGS","IN_PKTS",
+    "Reconnaissance": ["MIN_TTL","MAX_TTL","TCP_FLAGS","IN_PKTS",
                   "FLOW_DURATION_MILLISECONDS"],
     "Shellcode": ["NUM_PKTS_UP_TO_128_BYTES","IN_PKTS","TCP_FLAGS",
                   "SHORTEST_FLOW_PKT","DST_PORT_GROUP"],
@@ -259,16 +259,22 @@ def main() -> None:
         "PAPER FRAMING",
         "-------------",
         "The cross-source Spearman correlation between SHAP-GSD rankings and",
-        "Moustafa & Slay (2015) literature profiles provides independent validation",
-        "that global SHAP-GSD profiles are meaningful. For Recon, MIN_TTL ranks #1",
-        "in both SHAP-GSD and the literature; for DoS and Generic, volumetric and",
-        "DNS groups match expectations. The strongest agreement is Backdoor (ρ = 0.734);",
-        "the discrepancy at rank-1 — SHAP-GSD identifies MIN_IP_PKT_LEN while literature",
-        "lists L7_PROTO — is plausible given L7_PROTO's near-constant value for most",
-        "Backdoor flows (L7_PROTO = 1 throughout), which suppresses its variance-based",
-        "importance. The five classes below ρ = 0.4 reflect genuine distributional",
-        "differences between the 2015 raw-traffic characterisation and the NetFlow",
-        "feature set used here.",
+        "Moustafa & Slay (2015) literature profiles is a check on whether global",
+        "SHAP-GSD profiles align with literature-derived attack signatures, not a",
+        "validation that can be claimed uniformly across classes.",
+    ]
+    top_cls, top_rho = cls_sorted[0], rho_sorted[0]
+    top_strength = "strong" if top_rho >= 0.7 else ("moderate" if top_rho >= 0.4 else "weak")
+    overall_strength = "weak" if mean_rho < 0.4 else ("moderate" if mean_rho < 0.7 else "strong")
+    lines += [
+        f"The highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}); "
+        f"{len(strong)} of {len(classes)} classes",
+        f"reach the ρ ≥ 0.7 threshold. Mean ρ = {mean_rho:.3f} across all classes indicates",
+        f"{overall_strength} agreement overall — most classes' rankings diverge substantially",
+        "from the 2015 raw-traffic characterisation, plausibly reflecting real",
+        "distributional differences between that dataset's original feature set and the",
+        "NetFlow feature set used here, rather than an explainer failure specific to",
+        "any one class.",
         "",
         "CAPTION",
         "-------",

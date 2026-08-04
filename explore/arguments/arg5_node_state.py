@@ -49,7 +49,7 @@ CLASS_COLORS = {
     "Generic":   "#4e79a7",
     "Benign":    "#59a14f",
     "Exploits":  "#f28e2b",
-    "Recon":     "#b07aa1",
+    "Reconnaissance": "#b07aa1",
     "DoS":       "#e15759",
     "Analysis":  "#76b7b2",
     "Backdoor":  "#ff9da7",
@@ -76,6 +76,14 @@ def load_eid_to_hour() -> dict:
     except Exception as e:
         print(f"Warning: could not load DGL graph: {e}")
         return {}
+
+
+def load_novelty_audit() -> dict:
+    """Read Phase 12's canonical novelty non-zero audit (>1e-6 threshold)."""
+    audit_path = _P["metrics"] / "novelty_audit.json"
+    if not audit_path.exists():
+        return {}
+    return json.loads(audit_path.read_text()).get("explanation_json_audit", {})
 
 
 def main() -> None:
@@ -213,6 +221,23 @@ def main() -> None:
     plt.close(fig)
     print(f"Saved {OUT_DIR / STEM}.{{pdf,png}}")
 
+    # --- novelty non-zero rates (from Phase 12's canonical audit, >1e-6) ---
+    novelty_audit = load_novelty_audit()
+    nov_n_total    = novelty_audit.get("n_total", 0)
+    nov_n_nonzero  = novelty_audit.get("n_nonzero_either", 0)
+    nov_frac       = novelty_audit.get("frac_nonzero_either", 0.0) * 100
+    nov_by_class   = novelty_audit.get("by_class", {})
+    nov_class_pct  = {
+        c: (v["n_nonzero"] / v["n_total"] * 100 if v.get("n_total") else 0.0)
+        for c, v in nov_by_class.items()
+    }
+    nov_ranked = sorted(nov_class_pct.items(), key=lambda kv: kv[1], reverse=True)
+    nov_top2_str = ", ".join(f"{c} {p:.1f}%" for c, p in nov_ranked[:2])
+    nov_attack_mean = (
+        np.mean([p for c, p in nov_class_pct.items() if c != "Benign"])
+        if nov_class_pct else 0.0
+    )
+
     # ------------------------------------------------------------------ txt
     lines = [
         f"Figure reasoning — {STEM}",
@@ -236,8 +261,9 @@ def main() -> None:
         "",
         f"  φ_N fraction range: {frac_min:.1f}% – {frac_max:.1f}% of total |φ|",
         "  Flat KernelSHAP: φ_N ≡ 0 (computation subgraph not in coalition space)",
-        "  src/dst novelty SHAP non-zero in 34.7% of flows (612/1,764);",
-        "  Backdoor 48.5%, Analysis 46.2% highest (mixed-IP topology: 9 RFC1918/loopback)",
+        f"  src/dst novelty SHAP non-zero in {nov_frac:.1f}% of flows "
+        f"({nov_n_nonzero}/{nov_n_total}, >1e-6 threshold, per novelty_audit.json);",
+        f"  {nov_top2_str} highest (mixed-IP topology: 9 RFC1918/loopback)",
         "",
         "PAPER FRAMING",
         "-------------",
@@ -248,10 +274,11 @@ def main() -> None:
         "state (out-degree, port entropy, rolling byte count, novelty) causally",
         "affects the prediction. Flat KernelSHAP treats all flows as independent",
         "and cannot recover this neighbourhood context. The src/dst novelty components",
-        "are non-zero in 34.7% of explained flows (612/1,764), with attack classes",
-        "averaging 36.7% and Backdoor reaching 48.5%. The dataset contains a mixed-IP",
-        "topology (9 RFC1918/loopback endpoints alongside 34 public IPs), so novelty",
-        "is a live signal. Full per-class rates are in §4.5 and novelty_audit.txt.",
+        f"are non-zero in {nov_frac:.1f}% of explained flows ({nov_n_nonzero}/{nov_n_total}),",
+        f"with attack classes averaging {nov_attack_mean:.1f}% and {nov_top2_str} reaching",
+        "the highest rates. The dataset contains a mixed-IP topology (9 RFC1918/loopback",
+        "endpoints alongside 34 public IPs), so novelty is a live signal. Full per-class",
+        "rates are in §4.5 and novelty_audit.txt.",
         "",
         "CAPTION",
         "-------",
