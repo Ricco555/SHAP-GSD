@@ -95,6 +95,8 @@ def main() -> None:
     class_hours: dict[str, list[int]]   = {}
     class_totals: dict[str, list[float]] = {}
 
+    n_flows_total = 0
+    n_novelty_exact_nonzero = 0
     for cls_dir in sorted(EXP_DIR.iterdir()):
         if not cls_dir.is_dir():
             continue
@@ -105,9 +107,10 @@ def main() -> None:
                 rec = json.loads(jf.read_text())
             except Exception:
                 continue
+            src_nov = rec.get("src_novelty_shap", 0.0)
+            dst_nov = rec.get("dst_novelty_shap", 0.0)
             phi_n = (np.sum(np.abs(rec.get("node_shap", [])))
-                     + abs(rec.get("src_novelty_shap", 0.0))
-                     + abs(rec.get("dst_novelty_shap", 0.0)))
+                     + abs(src_nov) + abs(dst_nov))
             phi_f = sum(abs(v) for v in rec.get("feature_group_shap", []))
             phi_t = sum(abs(v) for v in rec.get("neighbor_shap", []))
             total = phi_f + phi_t + phi_n
@@ -115,6 +118,9 @@ def main() -> None:
             total_list.append(total)
             eid = rec.get("edge_id", -1)
             hour_list.append(eid_to_hour.get(int(eid), -1) if has_timestamps else -1)
+            n_flows_total += 1
+            if src_nov != 0.0 or dst_nov != 0.0:
+                n_novelty_exact_nonzero += 1
         class_phi_n[cls]   = phi_n_list
         class_hours[cls]   = hour_list
         class_totals[cls]  = total_list
@@ -262,7 +268,9 @@ def main() -> None:
         f"  φ_N fraction range: {frac_min:.1f}% – {frac_max:.1f}% of total |φ|",
         "  Flat KernelSHAP: φ_N ≡ 0 (computation subgraph not in coalition space)",
         f"  src/dst novelty SHAP non-zero in {nov_frac:.1f}% of flows "
-        f"({nov_n_nonzero}/{nov_n_total}, >1e-6 threshold, per novelty_audit.json);",
+        f"({nov_n_nonzero}/{nov_n_total}, PRIMARY, >1e-6 threshold, per novelty_audit.json);",
+        f"  Secondary — exact-zero threshold: {n_novelty_exact_nonzero}/{n_flows_total} "
+        f"({n_novelty_exact_nonzero / n_flows_total * 100:.2f}%)",
         f"  {nov_top2_str} highest (mixed-IP topology: 9 RFC1918/loopback)",
         "",
         "PAPER FRAMING",
@@ -274,8 +282,9 @@ def main() -> None:
         "state (out-degree, port entropy, rolling byte count, novelty) causally",
         "affects the prediction. Flat KernelSHAP treats all flows as independent",
         "and cannot recover this neighbourhood context. The src/dst novelty components",
-        f"are non-zero in {nov_frac:.1f}% of explained flows ({nov_n_nonzero}/{nov_n_total}),",
-        f"with attack classes averaging {nov_attack_mean:.1f}% and {nov_top2_str} reaching",
+        f"are non-zero in {nov_frac:.1f}% of explained flows ({nov_n_nonzero}/{nov_n_total},",
+        f"PRIMARY convention, >1e-6 threshold; {n_novelty_exact_nonzero}/{n_flows_total} at exact",
+        f"zero, secondary), with attack classes averaging {nov_attack_mean:.1f}% and {nov_top2_str} reaching",
         "the highest rates. The dataset contains a mixed-IP topology (9 RFC1918/loopback",
         "endpoints alongside 34 public IPs), so novelty is a live signal. Full per-class",
         "rates are in §4.5 and novelty_audit.txt.",

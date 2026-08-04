@@ -224,10 +224,17 @@ def main() -> None:
     print(f"Saved {OUT_DIR / STEM}.{{pdf,png}}")
 
     # --- txt argument card ---
-    overall_mean_score = np.mean(scores_m)   # unweighted mean of per-class means
-    overall_pct = overall_mean_score / 48.0 * 100.0
+    # LOCKED 2026-08-04 (coder_instructions_figure_determinism.md S2): the
+    # flow-level mean is the PRIMARY concentration figure, matching main.tex's
+    # "averaged across all 1,846 explained flows" convention. The unweighted
+    # per-class mean is kept as a secondary, explicitly labelled.
     all_flow_scores = [s for scores in class_scores.values() for s in scores]
     flow_level_mean_score = float(np.mean(all_flow_scores))
+    n_flows_total = len(all_flow_scores)
+    overall_mean_score = np.mean(scores_m)   # secondary: unweighted mean of per-class means
+    n_groups_total = 48
+    uniform_ref = 0.80 * n_groups_total
+    concentration_ratio = uniform_ref / flow_level_mean_score
     top_cat = cat_sorted[0][0]
 
     lines = [
@@ -239,10 +246,10 @@ def main() -> None:
         f"groups reduces the SHAP coalition space from 2^{d_e} to 2^48 ({reduction_str}).",
         "Attribution concentration: per-class concentration scores show how many groups",
         "account for 80% of total |φ|. A per-category bar shows which functional group",
-        "dominates. Note: the class-level scores below are averaged UNWEIGHTED across",
-        "classes (each class contributes one mean regardless of its own flow count,",
-        "which ranges 46-200) — this differs slightly from a flow-level mean over all",
-        "1,846 explained flows.",
+        "dominates. PRIMARY convention (locked): the flow-level mean over all explained",
+        "flows. A secondary, unweighted mean of the per-class means is also reported —",
+        "it differs slightly because it gives equal weight to every class regardless of",
+        "its own flow count (which ranges 46-200 in this run).",
         "",
         "KEY FINDINGS",
         "------------",
@@ -253,8 +260,10 @@ def main() -> None:
                      f"top-1 group = {t1}  ({sign}-driven)")
     lines += [
         "",
-        f"  Overall mean concentration score (unweighted per-class mean): {overall_mean_score:.2f} groups",
-        f"  Overall mean concentration score (flow-level mean, n=1846): {flow_level_mean_score:.2f} groups",
+        f"  Concentration to 80% of Σ|φ| (PRIMARY, flow-level, n={n_flows_total}): {flow_level_mean_score:.2f} of {n_groups_total} groups",
+        f"  Uniform-attribution reference (0.8 × {n_groups_total} groups): {uniform_ref:.2f} of {n_groups_total} groups",
+        f"  Concentration relative to uniform: {concentration_ratio:.2f}x",
+        f"  Secondary — unweighted mean of the {len(scores_m)} per-class means: {overall_mean_score:.2f} groups",
         f"  Most attributed category overall: {top_cat}",
         "",
         "  Per-category mean |φ|:",
@@ -270,11 +279,11 @@ def main() -> None:
         "-------------",
         "Treating the 48 semantic groups as atomic coalition players preserves the four",
         "Shapley axioms (Dummy, Efficiency, Symmetry, Additivity) while compressing the",
-        f"sampling space by a factor of ~{reduction_str}. Attribution shows moderate concentration:",
-        f"the mean class needs {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) to capture 80%",
-        "of total |φ| — fewer than the full group set, but not a small dominant subset",
-        "either. This confirms SHAP-GSD explanations remain theoretically sound while",
-        "still distributing attribution across a meaningful share of the group space.",
+        f"sampling space by a factor of ~{reduction_str}. Attribution concentration is",
+        f"reported as a measured ratio, not an adjective: {flow_level_mean_score:.2f} of "
+        f"{n_groups_total} groups reach 80% of Σ|φ| (flow-level mean, n={n_flows_total}), against a",
+        f"{uniform_ref:.2f}-group uniform-attribution reference (0.8 × {n_groups_total}) —",
+        f"{concentration_ratio:.2f}x more concentrated than uniform attribution would be.",
         f"The dominant category ({top_cat}) drives classification across all attack types,",
         "with each class showing a distinct concentration pattern.",
         "",
@@ -285,9 +294,9 @@ def main() -> None:
         "coloured by attribution sign (teal = presence-driven, coral = absence-driven);",
         "annotations show the top-1 attributed group per class. Right: mean |φ| per",
         "feature category across all flows and classes; the coalition space reduction",
-        f"(2^48 vs 2^{d_e}, {reduction_str}) is annotated. Attribution shows moderate concentration:",
-        f"on average {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) suffice to explain",
-        "80% of each decision.",
+        f"(2^48 vs 2^{d_e}, {reduction_str}) is annotated. Flow-level mean concentration is",
+        f"{flow_level_mean_score:.2f} of {n_groups_total} groups to 80% of Σ|φ| — {concentration_ratio:.2f}x the",
+        f"{uniform_ref:.2f}-group uniform-attribution reference.",
     ]
     notes = load_paper_notes(STEM, d_e=d_e, reduction_str=reduction_str)
     if notes:
