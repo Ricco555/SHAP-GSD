@@ -164,7 +164,7 @@ to fine-grained discriminative signal within each semantic group. SHAP-GSD
 operates at the group level — masking a whole group may occlude both the
 useful and redundant features together.
 
-The gap is largest for Recon (Δ = {deltas['Recon']:+.3f}) and Shellcode
+The gap is largest for Reconnaissance (Δ = {deltas['Reconnaissance']:+.3f}) and Shellcode
 (Δ = {deltas['Shellcode']:+.3f}), where the top raw features (e.g. specific
 packet lengths, TTL values) provide more discriminative information than
 the group-level aggregation.

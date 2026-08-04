@@ -203,7 +203,7 @@ ABSENCE_DRIVERS = {
                   "Min IP pkt length (scaled; low=tiny packets, high=normal)"),
     "Fuzzers":   ("SHORTEST_FLOW_PKT",
                   "Shortest flow packet (scaled; low=minimal probe, high=richer probe)"),
-    "Recon":     ("MIN_TTL",
+    "Reconnaissance": ("MIN_TTL",
                   "Min TTL (scaled; low=crafted/short TTL, high=standard TTL)"),
 }
 
@@ -215,7 +215,7 @@ _COLORS = {
     "Analysis": "#e76f51",
     "Backdoor": "#2a9d8f",
     "Fuzzers":  "#e9c46a",
-    "Recon":    "#264653",
+    "Reconnaissance": "#264653",
 }
 
 for ax, (cls, (gname, xlabel)) in zip(axes.flat, ABSENCE_DRIVERS.items()):
