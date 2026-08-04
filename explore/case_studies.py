@@ -12,7 +12,13 @@ Selected flows:
     Fuzzers   2117155  (28 in-window neighbours)
     Shellcode 2117054  (25)
     Exploits  2117278  (25)
-    Analysis  2117614  (25)
+    Analysis  2099604  (4)   flagship three-layer case: feature-group,
+                             temporal-neighbourhood AND node-novelty
+                             attribution are all simultaneously nonzero and
+                             reinforcing (all positive) — the property the
+                             Abstract's "all three attribution layers" claim
+                             rests on. Replaces 2117614, which is not in the
+                             R3-S2 explanation set.
     DoS       2117597  (13)
   Classes without temporal neighbours (best by proba × phi_N_frac):
     Backdoor  2174974
@@ -69,7 +75,7 @@ CANDIDATES = [
     ("Fuzzers",   2117155, True),
     ("Shellcode", 1929451, True),  # armRb+S2 EID (armRb used 2117054 — EIDs are split-specific, not portable across runs)
     ("Exploits",  2117278, True),
-    ("Analysis",  2117614, True),
+    ("Analysis",  2099604, True),  # armRb+S2 EID; flagship case with all three attribution layers nonzero and reinforcing (2117614 is absent from this run's explanation set)
     ("DoS",       2117597, True),
     ("Backdoor",  2174974, False),
     ("Generic",   2247735, False),
