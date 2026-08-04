@@ -53,6 +53,7 @@ Outputs:
   outputs/figures/explore/class_time_distribution.{pdf,png,txt}
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -230,32 +231,43 @@ plt.close(fig)
 # ── Reasoning file ───────────────────────────────────────────────────────────
 
 lines = []
+full_stats = {}
 for cls in classes:
     ct, frac = curves[cls]
     n_cls = len(ct)
     # time at which the class reaches 10%/50%/90% cumulative
-    def t_at(q):
+    def t_at(q, ct=ct, frac=frac):
         idx = int(np.searchsorted(frac, q))
         idx = min(idx, len(ct) - 1)
-        return ct[idx]
+        return float(ct[idx])
+    full_stats[cls] = {
+        "n": n_cls, "t10": t_at(0.10), "t50": t_at(0.50), "t90": t_at(0.90),
+    }
     lines.append(
         f"  {cls:<16} n={n_cls:>8,}  "
         f"t10%={t_at(0.10):>7.2f}h  t50%={t_at(0.50):>7.2f}h  t90%={t_at(0.90):>7.2f}h"
     )
 per_class_block = "\n".join(lines)
 
+zoom_span_h = total_span_hours - zoom_start_h
+
 zoom_lines = []
+zoom_stats = {}
 for cls in classes:
     ct_full, _ = curves[cls]
     ct_zoom = ct_full[ct_full >= zoom_start_h] - zoom_start_h
     n_zoom = len(ct_zoom)
     if n_zoom == 0:
+        zoom_stats[cls] = {"n": 0, "t10": None, "t50": None, "t90": None}
         zoom_lines.append(f"  {cls:<16} n=0 (no flows in the zoomed/dense region)")
         continue
     frac_zoom = np.arange(1, n_zoom + 1) / n_zoom
     def tz_at(q, ct=ct_zoom, frac=frac_zoom):
         idx = min(int(np.searchsorted(frac, q)), len(ct) - 1)
-        return ct[idx]
+        return float(ct[idx])
+    zoom_stats[cls] = {
+        "n": n_zoom, "t10": tz_at(0.10), "t50": tz_at(0.50), "t90": tz_at(0.90),
+    }
     zoom_lines.append(
         f"  {cls:<16} n={n_zoom:>8,}  "
         f"t10%={tz_at(0.10):>7.2f}h  t50%={tz_at(0.50):>7.2f}h  t90%={tz_at(0.90):>7.2f}h"
@@ -275,6 +287,279 @@ for cls in classes:
         f"median (non-zero bins)={median_count:>8.1f}/h"
     )
 count_block = "\n".join(count_lines)
+
+# ── Computed KEY FINDINGS ───────────────────────────────────────────────────
+# Every criterion below is evaluated against the per-class quantities already
+# computed above (full_stats / zoom_stats / the tau_* boundaries), with the
+# thresholds stated inline in the emitted text so a reader can audit them.
+# Nothing here names a class a priori: whichever classes trigger on THIS run
+# are the ones reported, and a criterion that nothing triggers says so.
+
+# Criterion A — sharp early burst followed by a long quiet tail, measured
+# WITHIN the dense/zoomed region (the full-span numbers are dominated by the
+# inter-session idle gap and cannot express burst shape).
+BURST_RATIO_MAX = 0.20      # (t50-t10) must be <= 20% of (t90-t50): the rise
+                            # to the class's own median is >= 5x faster than
+                            # the tail that follows it.
+BURST_T50_FRAC_MAX = 0.25   # and that median must land in the first 25% of
+                            # the dense region, i.e. the burst is EARLY.
+burst_hits = []
+for cls in classes:
+    s = zoom_stats[cls]
+    if s["n"] == 0:
+        continue
+    rise = s["t50"] - s["t10"]
+    tail = s["t90"] - s["t50"]
+    if tail <= 0.0:
+        continue  # degenerate: class ends at its own median, no tail to compare
+    ratio = rise / tail
+    t50_frac = s["t50"] / zoom_span_h if zoom_span_h > 0 else 1.0
+    if ratio <= BURST_RATIO_MAX and t50_frac <= BURST_T50_FRAC_MAX:
+        burst_hits.append((cls, s, ratio, t50_frac, tail))
+burst_hits.sort(key=lambda r: r[2])
+
+# Criterion B — a split boundary landing inside a class's steep-rise region.
+# "Steep" is local flow density: the fraction of a class's DENSE-REGION flows
+# falling in a narrow window centred on the boundary, compared with what a
+# class spread uniformly over the dense region would put there. Both the count
+# and its denominator are taken over the dense region so the printed uniform
+# expectation is exactly the reference the test uses; mixing in the pre-gap
+# session would silently make the test stricter than the number it prints.
+BOUNDARY_WIN_H = 0.01 * zoom_span_h          # half-width, 1% of the dense region
+BOUNDARY_DENSITY_MULT = 5.0                  # flag at >= 5x uniform expectation
+uniform_win_frac = (2.0 * BOUNDARY_WIN_H / zoom_span_h) if zoom_span_h > 0 else 0.0
+boundary_hits = []
+boundary_untestable = []
+for tau_name, tau_h in (("tau_train", tau_train_h), ("tau_val", tau_val_h)):
+    if tau_h < zoom_start_h:
+        boundary_untestable.append((tau_name, tau_h))
+        continue
+    for cls in classes:
+        ct_full, _ = curves[cls]
+        ct_zoom = ct_full[ct_full >= zoom_start_h]
+        n_zoom = len(ct_zoom)
+        if n_zoom == 0:
+            continue
+        n_in_win = int(np.sum(np.abs(ct_zoom - tau_h) <= BOUNDARY_WIN_H))
+        if n_in_win == 0:
+            continue
+        win_frac = n_in_win / n_zoom
+        if win_frac >= BOUNDARY_DENSITY_MULT * uniform_win_frac:
+            boundary_hits.append((tau_name, tau_h, cls, n_in_win, win_frac))
+boundary_hits.sort(key=lambda r: -r[4])
+
+# Criterion C — near-zero support on one side of a split boundary. Splits are
+# chronological ROW fractions, exactly as the pipeline cuts them.
+SUPPORT_FRAC_MIN = 0.01     # < 1% of the class's own flows in a split, or
+SUPPORT_ABS_MIN = 30        # < 30 rows outright, counts as near-zero support.
+split_of_row = np.full(n, 2, dtype=np.int8)
+split_of_row[: train_cut_idx + 1] = 0
+split_of_row[train_cut_idx + 1 : val_cut_idx + 1] = 1
+split_names = ("train", "val", "test")
+support_table = {}
+support_hits = []
+for cls in classes:
+    mask = (df["Attack"] == cls).to_numpy()
+    counts_split = [int(np.sum(split_of_row[mask] == k)) for k in range(3)]
+    support_table[cls] = counts_split
+    for k, c in enumerate(counts_split):
+        frac = c / full_stats[cls]["n"]
+        if c < SUPPORT_ABS_MIN or frac < SUPPORT_FRAC_MIN:
+            support_hits.append((cls, split_names[k], c, frac))
+
+# ── Render the findings ─────────────────────────────────────────────────────
+
+fnd = []
+fnd.append(
+    "All three checks below are computed from the per-class tables above; the\n"
+    "thresholds are stated with each check. Only classes that trigger a check\n"
+    "are listed, and a check that nothing triggers says so explicitly."
+)
+fnd.append("")
+fnd.append(
+    f"(A) SHARP EARLY BURST, THEN A QUIET TAIL  [within the {zoom_span_h:.2f}h dense region]\n"
+    f"    Criterion: (t50%-t10%) <= {BURST_RATIO_MAX:.2f} x (t90%-t50%)  AND  "
+    f"t50% <= {BURST_T50_FRAC_MAX:.0%} of the dense region ({BURST_T50_FRAC_MAX * zoom_span_h:.2f}h)."
+)
+if burst_hits:
+    for cls, s, ratio, t50_frac, tail in burst_hits:
+        fnd.append(
+            f"    {cls}: reaches 50% of its own {s['n']:,} dense-region flows "
+            f"{s['t50']:.2f}h in ({t50_frac:.1%} of the region), having reached 10% at "
+            f"{s['t10']:.2f}h -- a {s['t50'] - s['t10']:.2f}h rise -- then takes a further "
+            f"{tail:.2f}h to reach 90% (t90%={s['t90']:.2f}h). Rise/tail ratio "
+            f"{ratio:.4f}. Peak hourly volume {int(np.nanmax(hist_counts[cls])):,} flows/h at "
+            f"t={bin_centers_full[int(np.nanargmax(hist_counts[cls]))]:.2f}h (full-span axis)."
+        )
+else:
+    fnd.append("    No class met this criterion on this run.")
+fnd.append("")
+fnd.append(
+    f"(B) SPLIT BOUNDARY LANDING IN A CLASS'S STEEP RISE\n"
+    f"    Criterion: >= {BOUNDARY_DENSITY_MULT:.0f}x the uniform-density expectation of a class's\n"
+    f"    dense-region flows inside +/-{BOUNDARY_WIN_H:.3f}h of a boundary (window = 1% of the\n"
+    f"    dense region each side; uniform expectation = {uniform_win_frac:.2%} of a class's\n"
+    f"    dense-region flows, count and denominator both taken over the dense region)."
+)
+for tau_name, tau_h in boundary_untestable:
+    fnd.append(
+        f"    {tau_name}={tau_h:.2f}h falls before the dense region starts "
+        f"({zoom_start_h:.2f}h) and is not testable under this criterion."
+    )
+if boundary_hits:
+    for tau_name, tau_h, cls, n_in_win, win_frac in boundary_hits:
+        fnd.append(
+            f"    {cls} at {tau_name}={tau_h:.2f}h: {n_in_win:,} flows "
+            f"({win_frac:.2%} of the class's dense-region flows) inside the window, "
+            f"{win_frac / uniform_win_frac:.1f}x uniform -- a small shift of this boundary "
+            f"moves a disproportionate share of this class between splits."
+        )
+elif len(boundary_untestable) < 2:
+    tested = ", ".join(
+        f"{nm}={th:.2f}h" for nm, th in (("tau_train", tau_train_h), ("tau_val", tau_val_h))
+        if nm not in {u[0] for u in boundary_untestable}
+    )
+    fnd.append(
+        f"    No class met this criterion on this run: {tested} "
+        f"{'does' if len(boundary_untestable) == 1 else 'do'} not land\n"
+        f"    inside any class's steep-rise region."
+    )
+else:
+    fnd.append("    Not evaluated: both boundaries fall outside the dense region.")
+fnd.append("")
+fnd.append(
+    f"(C) NEAR-ZERO SUPPORT ON ONE SIDE OF A BOUNDARY\n"
+    f"    Criterion: a class holding < {SUPPORT_FRAC_MIN:.0%} of its own flows, or fewer than "
+    f"{SUPPORT_ABS_MIN} flows outright,\n    in one of the three chronological splits "
+    f"(train/val/test row cuts at {train_frac:.6f} / {train_frac + val_frac:.6f})."
+)
+if support_hits:
+    for cls, sname, c, frac in support_hits:
+        fnd.append(
+            f"    {cls}: {c:,} flows in {sname} ({frac:.2%} of its {full_stats[cls]['n']:,} "
+            f"total) -- too few to measure that class reliably on that split."
+        )
+else:
+    fnd.append(
+        f"    No class met this criterion on this run: every class holds at least "
+        f"{SUPPORT_FRAC_MIN:.0%} of its own\n    flows, and at least {SUPPORT_ABS_MIN} flows, "
+        f"in each of train, val and test."
+    )
+fnd.append("")
+fnd.append("    Per-class split support (chronological row cuts):")
+for cls in classes:
+    tr, va, te = support_table[cls]
+    fnd.append(
+        f"      {cls:<16} train={tr:>9,}  val={va:>9,}  test={te:>9,}"
+        f"   (total {full_stats[cls]['n']:>9,})"
+    )
+key_findings_block = "\n".join(fnd)
+
+# ── Computed PAPER FRAMING ──────────────────────────────────────────────────
+# Built strictly from what the checks above actually found on this run. The
+# paragraph is descriptive of the observed geometry only: it states where the
+# volume sits relative to the boundaries and does not assert that a different
+# cutoff would change any downstream result.
+
+frm = []
+if burst_hits:
+    burst_desc = "; ".join(
+        f"{cls} reaches half of its {s['n']:,} dense-region flows within {s['t50']:.2f}h "
+        f"of the region's start ({t50_frac:.1%} of the {zoom_span_h:.2f}h region) and then "
+        f"needs {tail:.2f}h more to reach 90%"
+        for cls, s, ratio, t50_frac, tail in burst_hits
+    )
+    burst_names = ", ".join(c for c, *_ in burst_hits)
+    frm.append(
+        f"The capture is not temporally homogeneous: {largest_gap_size / total_span_hours:.1%} "
+        f"of its {total_span_hours:.2f}h span is a single {largest_gap_size:.2f}h idle gap, and "
+        f"essentially all of the analysable traffic sits in the {zoom_span_h:.2f}h dense region "
+        f"that follows it. Within that region {len(burst_hits)} of {n_classes} classes "
+        f"{'is' if len(burst_hits) == 1 else 'are'} sharply front-loaded rather than spread "
+        f"across it ({burst_names}): {burst_desc}. "
+        f"The consequence for a chronological split is positional. "
+    )
+    tau_desc = []
+    for cls, s, ratio, t50_frac, tail in burst_hits:
+        for tau_name, tau_h in (("tau_train", tau_train_h), ("tau_val", tau_val_h)):
+            rel = tau_h - zoom_start_h
+            side = "after" if rel >= s["t50"] else "before"
+            tau_desc.append(
+                f"{tau_name} falls {rel:.2f}h into the dense region, "
+                f"{abs(rel - s['t50']):.2f}h {side} {cls}'s median"
+            )
+    frm.append(" ".join(
+        [f"{d}." for d in tau_desc[: 2 * len(burst_hits)]]
+    ))
+    dominant, dom_s = burst_hits[0][0], burst_hits[0][1]
+    tr, va, te = support_table[dominant]
+    dom_total = full_stats[dominant]["n"]
+    n_after = sum(
+        1 for _, th in (("tau_train", tau_train_h), ("tau_val", tau_val_h))
+        if (th - zoom_start_h) >= dom_s["t50"]
+    )
+    biggest = max(zip(("train", "val", "test"), (tr, va, te)), key=lambda kv: kv[1])
+    below = [
+        f"{nm} {c:,} ({c / dom_total:.1%})"
+        for nm, c in (("val", va), ("test", te)) if c / dom_total < SUPPORT_FRAC_MIN
+    ]
+    floor_clause = (
+        f"below the {SUPPORT_FRAC_MIN:.0%} floor used in check (C) on {' and '.join(below)}"
+        if below else
+        f"both above the {SUPPORT_FRAC_MIN:.0%} floor used in check (C)"
+    )
+    frm.append(
+        f" With {('neither boundary', 'one of the two boundaries', 'both boundaries')[n_after]} "
+        f"positioned after {dominant}'s dense-region median, "
+        f"the largest share of {dominant}'s volume lands in {biggest[0]} "
+        f"({biggest[1]:,} of {dom_total:,} flows, {biggest[1] / dom_total:.1%}); the split "
+        f"is train {tr:,} ({tr / dom_total:.1%}), val {va:,} ({va / dom_total:.1%}), test "
+        f"{te:,} ({te / dom_total:.1%}) -- {floor_clause}. "
+        f"This is a statement about where the volume sits, not an explanation of any "
+        f"downstream metric, and no claim that a different cutoff would improve any "
+        f"per-class result follows from this figure."
+    )
+else:
+    frm.append(
+        f"Across the {n_classes} classes present, none is sharply front-loaded within the "
+        f"{zoom_span_h:.2f}h dense region under the stated burst criterion: every class's rise "
+        f"to its own median takes more than {BURST_RATIO_MAX:.0%} of the time its subsequent "
+        f"tail takes, so class arrival is broadly spread rather than campaign-like. "
+    )
+if boundary_hits:
+    frm.append(
+        f" {len(boundary_hits)} class-boundary pairs place a split cut inside a steep rise, "
+        f"the strongest being {boundary_hits[0][2]} at {boundary_hits[0][0]} "
+        f"({boundary_hits[0][4] / uniform_win_frac:.1f}x uniform local density), so the "
+        f"train/val/test composition of those classes is sensitive to small movements of the cut."
+    )
+else:
+    tested_taus = [
+        (nm, th) for nm, th in (("tau_train", tau_train_h), ("tau_val", tau_val_h))
+        if nm not in {u[0] for u in boundary_untestable}
+    ]
+    if tested_taus:
+        frm.append(
+            f" No tested boundary ({', '.join(f'{nm}={th:.2f}h' for nm, th in tested_taus)}) "
+            f"lands inside any class's steep rise, so no class's split composition is "
+            f"knife-edge sensitive to a small movement of those cuts."
+        )
+    else:
+        frm.append(
+            " Both boundaries fall outside the dense region, so boundary-versus-steep-rise "
+            "sensitivity was not evaluated on this run."
+        )
+if support_hits:
+    frm.append(
+        f" {len({c for c, *_ in support_hits})} classes fall below the stated support floor "
+        f"on at least one split and cannot be evaluated reliably there."
+    )
+else:
+    frm.append(
+        " Every class retains usable support in all three splits, so no per-class result "
+        "reported elsewhere is attributable to a missing split population."
+    )
+paper_framing_block = "".join(frm)
 
 reasoning = f"""
 Figure reasoning — {STEM}
@@ -328,19 +613,11 @@ Split boundaries on this axis: tau_train={tau_train_h:.2f}h, tau_val={tau_val_h:
 
 KEY FINDINGS
 ------------
-<Fill in after visual inspection -- this is a data-characterization tool, not
- a hypothesis-confirming figure. Look for: (1) any class whose curve is nearly
- vertical near a split boundary (moving that boundary by a small amount would
- sharply change how much of that class lands in train vs val vs test), (2)
- classes concentrated entirely on one side of a boundary (near-zero support in
- val or test), (3) classes spread near-uniformly (curve close to the diagonal)
- -- these are insensitive to where the boundary falls.>
+{key_findings_block}
 
 PAPER FRAMING
 -------------
-<Draft paragraph once findings above are filled in -- likely candidate for the
- Discussion section's treatment of chronological-split sensitivity, alongside
- local/macro_f1_regression_investigation.md's R3 (split-cutoff) results.>
+{paper_framing_block}
 
 SUGGESTED FIGURE CAPTION
 -------------------------
@@ -353,6 +630,18 @@ count peaks indicate temporally concentrated ("bursty") class traffic;
 classes whose CDF curves track the diagonal / whose counts stay flat are
 spread evenly across the capture.
 """
+# Placeholder guard: no section of the emitted artifact may ship an unfilled
+# template. `<Fill in ...>` / `<Draft paragraph ...>`-style placeholders start
+# with an uppercase letter directly after "<", which prose like "< 5% threshold"
+# never does. Fail loudly rather than write a template that looks complete.
+_placeholder = re.search(r"<[A-Z][^<>]{15,}>", reasoning, re.S)
+if _placeholder is not None:
+    sys.stderr.write(
+        f"ERROR: {STEM} would emit an unfilled placeholder, refusing to write:\n"
+        f"  {_placeholder.group(0)[:120]}...\n"
+    )
+    sys.exit(1)
+
 (OUT_DIR / f"{STEM}.txt").write_text(reasoning)
 
 print(f"Wrote {OUT_DIR / f'{STEM}.pdf'}")
