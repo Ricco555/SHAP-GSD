@@ -1,28 +1,73 @@
 """
-Node SHAP KernelSHAP convergence experiment.
+Node-layer SHAP exactness audit.
 
-For each selected flow, rebuilds the GNN computation context from the test
-graph and re-runs NodeNoveltySHAP.explain() at
-nsamples ∈ {128, 256, 512, 1024, 2048}.  For each level the Shapley
-efficiency error (|Σφ − (f_logit − f_baseline)|) and wall-clock time are
-recorded.
+WHAT THIS REPLACED, AND WHY
+---------------------------
+This script previously reported the Shapley *efficiency residual*
+|Sigma phi - (f_logit - f_baseline)| as a function of ``nsamples`` and fitted
+a log-log slope to it, claiming an O(1/sqrt(n)) convergence rate.  That metric
+measured nothing: ``shap``'s solver eliminates one player and assigns it the
+residual by construction (``_kernel.py:737-786``, the ``phi[nonzero_inds[-1]] =
+(f(x) - f(null)) - sum(w)`` line), so efficiency holds exactly at every
+``nsamples``, independently of sampling error.  The slope, the plateau and the
+runtime reference line are all retired -- see review01
+``coder_instructions_figure_determinism.md`` sections 6 and 7.
 
-Expected convergence: efficiency error ∝ O(1/√n) → empirical log-log slope
-should be close to −0.50.
+WHAT IS REPORTED INSTEAD
+------------------------
+The fraction of explained flows whose node-layer attributions are *exact
+Shapley values* because ``shap``'s KernelExplainer enumerated the coalition
+space exhaustively rather than sampling it, plus the player-count
+distribution that determines it.  Every number below is computed from the run
+being rendered; ``nsamples`` is read from the run's config.
 
-Estimated runtime (200 flows, 5 nsamples levels):
-  ~5 min  on A100 GPU
-  ~90 min on CPU
+VERIFIED LIBRARY-INTERNALS CLAIM (blocking prerequisite, section 7)
+------------------------------------------------------------------
+Installed library: ``shap==0.51.0`` at
+``<venv>/lib/python3.12/site-packages/shap/explainers/_kernel.py``.
 
-For a quick local sanity-check, pass --n-per-class 2 (~2 min on CPU).
+1. Exhaustive-enumeration condition -- ``_kernel.py:407-411``::
+
+       self.max_samples = 2**30
+       if self.M <= 30:
+           self.max_samples = 2**self.M - 2
+           if self.nsamples > self.max_samples:
+               self.nsamples = self.max_samples
+
+   ``nsamples`` is clamped to ``2**M - 2``, the size of the full non-trivial
+   coalition space.  The subset-size enumeration loop at ``_kernel.py:434-471``
+   then fills every subset size completely (its per-size budget test is at
+   ``_kernel.py:451``) and the random-sampling block at ``_kernel.py:478-518``
+   is skipped entirely because ``num_full_subsets == num_subset_sizes``.
+   Replaying that loop numerically for M = 2..30 confirms the branch is
+   exactly equivalent to the closed form ``2**M - 2 <= nsamples`` -- no
+   off-by-one.  ``M <= 1`` is handled analytically before any sampling
+   (``_kernel.py:385-395``) and is likewise exact.
+
+2. M equals the node-game player count P -- ``_kernel.py:355-361`` sets
+   ``self.M`` from ``varying_groups()``, i.e. only columns that differ between
+   the instance and the background.  ``src/explainer/node_shap.py:243-244``
+   passes ``background_data = np.zeros((1, coalition_size))`` against
+   ``foreground_data = np.ones((1, coalition_size))``, so *every* column
+   varies and ``M == coalition_size == P`` for every flow.  P is recoverable
+   post hoc from the stored explanation as ``len(node_shap) + 2``
+   (``node_shap.py:258-260``: column 0 = src novelty, column 1 = dst novelty,
+   columns 2.. = non-target nodes).
+
+3. Exhaustive enumeration implies the *exact* Shapley value only if the solver
+   does no feature selection.  ``_kernel.py:699-733``: ``nonzero_inds =
+   np.arange(self.M)`` and the LARS/Lasso truncation branch is guarded by
+   ``if (self.l1_reg not in ["auto", False, 0]) or ...`` (``_kernel.py:703``).
+   ``node_shap.py:37`` sets ``_L1_REG = False``, so that branch is not taken
+   and the full-rank weighted least squares runs over all P players.
 
 Usage:
-  python explore/node_shap_convergence.py [--config ...] [--n-per-class 20] [--seed 42]
+  python explore/node_shap_convergence.py [--config ...]
 
 Reads:
-  outputs/explanations/<Class>/<EID>.json  (for EID selection only)
-  graphs/test.bin
-  configs/experiment_unsw.yaml
+  outputs/explanations/<Class>/<EID>.json   (all flows)
+  outputs/metrics/summary.json              (cross-referenced stability figure)
+  config: explainer.node_nsamples
 
 Outputs:
   outputs/figures/explore/node_shap_convergence.{pdf,png}
@@ -35,150 +80,191 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-import dgl
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.utils.config import load_config
-from src.data.feature_store import FeatureStore
-from src.model.node_state import NodeStateManager
-from src.model.sage_model import EdgeAwareGraphSAGE, build_src_dst_pos
-from src.explainer.background import BackgroundDistributions
-from src.explainer.node_shap import NodeNoveltySHAP
-from src.model.temporal_sampler import TemporalNeighborSampler
 
-NSAMPLES_LIST = [128, 256, 512, 1024, 2048]
+# Illustrative sensitivity levels. The CONFIGURED value is the operative one;
+# these exist only to show how the exact fraction moves with the budget.
+SENSITIVITY_NSAMPLES = [512, 1024, 2048]
+
+# shap clamps nsamples to 2**M - 2 only for M <= 30 (_kernel.py:408).
+_SHAP_MAX_ENUMERABLE_M = 30
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
-logging.getLogger("shap").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-def _load_model(cfg: dict, device: torch.device) -> EdgeAwareGraphSAGE:
-    m = cfg["model"]
-    artifacts_dir = Path(cfg["output"]["artifacts_dir"])
+def max_exhaustive_players(nsamples: int) -> int:
+    """Largest player count P for which shap enumerates all coalitions.
 
-    best_params_path = artifacts_dir / "best_params.json"
-    if best_params_path.exists():
-        with open(best_params_path) as f:
-            best_params = json.load(f)
-        hidden_size = best_params.get("hidden_size", m["hidden_size"])
-        num_layers  = best_params.get("num_layers",  m["num_layers"])
-        dropout     = best_params.get("dropout",     m["dropout"])
-        aggregator  = best_params.get("aggregator",  m["aggregator"])
-    else:
-        hidden_size = m["hidden_size"]
-        num_layers  = m["num_layers"]
-        dropout     = m["dropout"]
-        aggregator  = m["aggregator"]
+    Mirrors ``shap/explainers/_kernel.py:407-411`` (see module docstring):
+    the coalition space is enumerated in full iff ``2**P - 2 <= nsamples``
+    (for ``P <= 30``), and ``P <= 1`` is exact analytically.
 
-    fg_path = Path(cfg["output"]["feature_groups_path"])
-    with open(fg_path) as f:
-        fg = json.load(f)
-    d_e = fg["d_e"]
+    Args:
+        nsamples: KernelSHAP coalition budget passed to ``shap_values()``.
 
-    with open(artifacts_dir / "label_map.json") as f:
-        label_map = json.load(f)
-    num_classes = len(label_map)
-
-    model = EdgeAwareGraphSAGE(
-        node_in_dim=m["node_state_dim"],
-        edge_in_dim=d_e,
-        hidden_size=hidden_size,
-        num_classes=num_classes,
-        num_layers=num_layers,
-        dropout=dropout,
-        aggregator=aggregator,
-    ).to(device)
-
-    ckpt = artifacts_dir / "best_model.pt"
-    model.load_state_dict(torch.load(ckpt, map_location=device))
-    model.eval()
-    logger.info(f"Model loaded from {ckpt}")
-    return model
-
-
-def _build_flow_context(
-    g: dgl.DGLGraph,
-    fs: FeatureStore,
-    nsm: NodeStateManager,
-    geid_to_local: dict[int, int],
-    global_eid: int,
-    sampler: TemporalNeighborSampler,
-    device: torch.device,
-) -> dict | None:
-    """Build all tensors needed to call NodeNoveltySHAP.explain() for one edge.
-
-    Returns None if the global EID is not present in the graph.
+    Returns:
+        The largest P that is computed exhaustively at this budget.
     """
-    local_eid = geid_to_local.get(global_eid)
-    if local_eid is None:
+    p = 1
+    while p < _SHAP_MAX_ENUMERABLE_M and (2 ** (p + 1) - 2) <= nsamples:
+        p += 1
+    return p
+
+
+def is_exhaustive(n_players: int, nsamples: int) -> bool:
+    """True iff this flow's node game is solved by exhaustive enumeration.
+
+    Args:
+        n_players: node-game player count P (= ``len(node_shap) + 2``).
+        nsamples:  KernelSHAP coalition budget.
+
+    Returns:
+        Whether shap enumerates rather than samples the coalition space.
+    """
+    if n_players <= 1:
+        return True  # _kernel.py:385-395, analytic branch
+    return n_players <= _SHAP_MAX_ENUMERABLE_M and (2 ** n_players - 2) <= nsamples
+
+
+def collect_player_counts(
+    expl_dir: Path,
+) -> tuple[np.ndarray, dict[str, int], dict[int, int]]:
+    """Read the node-game player count P for every explained flow.
+
+    Args:
+        expl_dir: ``outputs/explanations`` directory.
+
+    Returns:
+        (array of P per flow, {class name: flow count}, {edge_id: P}).
+
+    Raises:
+        SystemExit: if no explanation JSONs are found.
+    """
+    players: list[int] = []
+    per_class: dict[str, int] = {}
+    by_eid: dict[int, int] = {}
+    for path in sorted(expl_dir.glob("*/*.json")):
+        with open(path) as f:
+            d = json.load(f)
+        node_shap = d["node_shap"]
+        node_ids = d["node_ids"]
+        if len(node_shap) != len(node_ids):
+            raise SystemExit(
+                f"{path}: node_shap ({len(node_shap)}) / node_ids "
+                f"({len(node_ids)}) length mismatch"
+            )
+        # +2 for the two target-endpoint novelty flags (node_shap.py:226).
+        players.append(len(node_shap) + 2)
+        by_eid[int(d["edge_id"])] = len(node_shap) + 2
+        per_class[path.parent.name] = per_class.get(path.parent.name, 0) + 1
+
+    if not players:
+        raise SystemExit(f"No explanation JSONs under {expl_dir}")
+    return np.asarray(players, dtype=int), per_class, by_eid
+
+
+def crosscheck_player_counts(metrics_dir: Path, players: dict[int, int]) -> str:
+    """Verify P = len(node_shap) + 2 against an independent runtime record.
+
+    ``scripts/08_metrics.py``'s novelty-fidelity pass writes an ``n_players``
+    column into ``fidelity_novelty.csv``, derived from the live coalition
+    layout rather than reconstructed from stored phi. Agreement makes the
+    player count observed rather than inferred.
+
+    Args:
+        metrics_dir: ``outputs/metrics`` directory.
+        players:     {edge_id: P} reconstructed from the explanation JSONs.
+
+    Returns:
+        Human-readable status string for the report header.
+
+    Raises:
+        SystemExit: on any disagreement — the exactness counts would be wrong.
+    """
+    csv_path = metrics_dir / "fidelity_novelty.csv"
+    if not csv_path.exists():
+        return f"{csv_path.name}: NOT PRESENT (cross-check skipped)"
+
+    import csv as _csv
+
+    n_checked = 0
+    mismatches: list[str] = []
+    with open(csv_path, newline="") as f:
+        for row in _csv.DictReader(f):
+            if "n_players" not in row or "edge_id" not in row:
+                return f"{csv_path.name}: no n_players column (cross-check skipped)"
+            eid = int(row["edge_id"])
+            if eid not in players:
+                continue
+            n_checked += 1
+            if int(row["n_players"]) != players[eid]:
+                mismatches.append(
+                    f"EID {eid}: csv {row['n_players']} != json {players[eid]}"
+                )
+    if mismatches:
+        raise SystemExit(
+            f"Player-count cross-check FAILED on {len(mismatches)} of "
+            f"{n_checked} flows: {mismatches[:5]}"
+        )
+    return f"{csv_path.name} n_players: {n_checked}/{n_checked} agree"
+
+
+def read_stability_crossref(metrics_dir: Path) -> dict | None:
+    """Existing seed-to-seed stability figure, with its own provenance.
+
+    This is the FEATURE-GROUP layer's figure (``scripts/08_metrics.py``'s
+    ``compute_stability`` re-runs ``FeatureGroupSHAP``); it is reported here
+    as a labelled cross-reference for the sampled tail, not as a node-layer
+    measurement. No node-layer seed-to-seed measurement exists in this run.
+
+    Args:
+        metrics_dir: ``outputs/metrics`` directory.
+
+    Returns:
+        dict with the value and its denominators, or None if unavailable.
+    """
+    summary_path = metrics_dir / "summary.json"
+    if not summary_path.exists():
         return None
-
-    seed_eid_t = torch.tensor([local_eid], dtype=torch.long)
-    input_nodes, _, blocks = sampler.sample_blocks(g, seed_eid_t)
-    blocks_dev = [b.to(device) for b in blocks]
-
-    target_ts = float(g.edata["timestamp"][local_eid].item())
-    src_t, dst_t = g.find_edges(seed_eid_t)
-    target_src = int(src_t[0])
-    target_dst = int(dst_t[0])
-
-    input_node_ids = input_nodes.cpu().numpy()
-    base_node_feats = np.stack([
-        nsm.get_state_at_time(int(nid), target_ts)
-        for nid in input_node_ids
-    ])
-
-    seed_nodes_final = blocks_dev[-1].dstdata[dgl.NID]
-    src_pos, dst_pos = build_src_dst_pos(g, seed_eid_t, seed_nodes_final)
-    src_pos = src_pos.to(device)
-    dst_pos = dst_pos.to(device)
-
-    actual_geid = int(g.edata[dgl.EID][local_eid])
-    x_e = fs[actual_geid].copy()
-    true_label = int(fs.labels[fs._pos_of(actual_geid)])
-
-    coalition_size = 2 + sum(
-        1 for nid in input_node_ids
-        if int(nid) != target_src and int(nid) != target_dst
-    )
-
+    with open(summary_path) as f:
+        summary = json.load(f)
+    overall = summary.get("overall", {})
+    if "stability" not in overall:
+        return None
     return {
-        "global_eid":      global_eid,
-        "true_label":      true_label,
-        "target_src":      target_src,
-        "target_dst":      target_dst,
-        "blocks":          blocks_dev,
-        "input_nodes":     input_nodes,
-        "base_node_feats": base_node_feats,
-        "src_pos":         src_pos,
-        "dst_pos":         dst_pos,
-        "x_e":             x_e,
-        "coalition_size":  coalition_size,
+        "value":       float(overall["stability"]),
+        "n_flows":     int(overall.get("n_stability", 0)),
+        "layer":       "feature_group",
+        "source":      str(summary_path.relative_to(metrics_dir.parent.parent)),
+        "provenance": (
+            "scripts/08_metrics.py compute_stability(); defaults "
+            "--stability-seeds 3, --stability-nsamples 512, "
+            "--stability-per-class 5"
+        ),
     }
 
 
 def main() -> None:
     _default_cfg = os.environ.get("SHAP_GSD_CONFIG", "configs/experiment_unsw.yaml")
-    parser = argparse.ArgumentParser(description="Node SHAP convergence experiment")
-    parser.add_argument("--config",       default=_default_cfg)
-    parser.add_argument("--n-per-class",  type=int, default=20,
-                        help="Flows to sample per class (default 20; use 2 for quick test)")
-    parser.add_argument("--seed",         type=int, default=42)
+    parser = argparse.ArgumentParser(
+        description="Node-layer SHAP exactness audit (exhaustive enumeration share)"
+    )
+    parser.add_argument("--config", default=_default_cfg)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -189,253 +275,249 @@ def main() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device(
-        cfg.get("compute", {}).get("device", "cuda")
-        if torch.cuda.is_available() else "cpu"
-    )
-    logger.info(f"Device: {device}")
-
-    artifacts_dir = Path(cfg["output"]["artifacts_dir"])
-    graphs_dir    = Path(cfg["graph"]["dir"])
-    nsm_dir       = Path(cfg["graph"]["node_state_dir"])
-
-    logger.info("Loading test graph …")
-    g_test, _ = dgl.load_graphs(str(graphs_dir / "test.bin"))
-    g_test = g_test[0]
-    geid_to_local = {int(g): i for i, g in enumerate(g_test.edata[dgl.EID].numpy())}
-
-    logger.info("Loading feature store …")
-    fs_test = FeatureStore(Path(cfg["output"]["feature_store_dir"]) / "test")
-
-    logger.info("Loading NodeStateManager …")
-    nsm = NodeStateManager.load(nsm_dir)
-
-    logger.info("Loading background distributions …")
-    background = BackgroundDistributions.load(artifacts_dir)
-
-    logger.info("Loading model …")
-    model = _load_model(cfg, device)
-
-    sampler = TemporalNeighborSampler(fanouts=cfg["model"]["fanouts"])
-    node_shap_inst = NodeNoveltySHAP(background=background, device=device)
-
-    # --- Select flows ---
-    with open(artifacts_dir / "label_map.json") as f:
-        label_map: dict[str, int] = json.load(f)
-    int_to_name = {v: k for k, v in label_map.items()}
-
-    rng = np.random.default_rng(args.seed)
-    selected: list[tuple[int, int]] = []  # (global_eid, class_int)
-
-    for c, class_name in sorted(int_to_name.items()):
-        cls_dir = EXPL_DIR / class_name
-        if not cls_dir.exists():
-            continue
-        eids = sorted(
-            int(p.stem) for p in cls_dir.glob("*.json")
-            if p.stem.lstrip("-").isdigit()
+    explainer_cfg = cfg.get("explainer", {})
+    if "node_nsamples" not in explainer_cfg:
+        raise SystemExit(
+            "explainer.node_nsamples missing from the resolved config — "
+            "refusing to assume a value."
         )
-        if not eids:
-            continue
-        n = min(args.n_per_class, len(eids))
-        chosen = rng.choice(eids, size=n, replace=False)
-        for eid in chosen:
-            selected.append((int(eid), c))
+    node_nsamples = int(explainer_cfg["node_nsamples"])
+    logger.info(f"Configured node_nsamples = {node_nsamples} (from {args.config})")
 
-    logger.info(f"Selected {len(selected)} flows across {len(int_to_name)} classes "
-                f"(n_per_class={args.n_per_class}, seed={args.seed})")
+    P, per_class, P_by_eid = collect_player_counts(EXPL_DIR)
+    n_flows = int(P.size)
+    logger.info(f"Read {n_flows} explanation JSONs across {len(per_class)} classes")
 
-    # records[nsamples] → list of (abs_err, rel_err, wall_time_s, coalition_size)
-    records: dict[int, list[tuple[float, float, float, int]]] = {n: [] for n in NSAMPLES_LIST}
+    xcheck = crosscheck_player_counts(METRICS_DIR, P_by_eid)
+    logger.info(f"Player-count cross-check: {xcheck}")
 
-    for idx, (global_eid, true_class) in enumerate(selected):
-        logger.info(
-            f"  [{idx+1}/{len(selected)}] EID={global_eid} "
-            f"class={int_to_name.get(true_class, str(true_class))}"
-        )
-        ctx = _build_flow_context(
-            g_test, fs_test, nsm, geid_to_local, global_eid, sampler, device
-        )
-        if ctx is None:
-            logger.warning(f"    EID {global_eid} not in test graph — skipping")
-            continue
+    p_max_exact = max_exhaustive_players(node_nsamples)
+    exact_mask = np.array([is_exhaustive(int(p), node_nsamples) for p in P])
+    n_exact = int(exact_mask.sum())
+    n_sampled = n_flows - n_exact
+    pct_exact = 100.0 * n_exact / n_flows
 
-        # f_logit and f_baseline are deterministic (independent of nsamples);
-        # capture them from the first explain() call to use as the reference gap.
-        gap_ref: float | None = None
+    dist = {
+        "min":    int(P.min()),
+        "median": float(np.median(P)),
+        "mean":   round(float(P.mean()), 2),
+        "max":    int(P.max()),
+    }
 
-        for n in NSAMPLES_LIST:
-            t0 = time.time()
-            try:
-                result = node_shap_inst.explain(
-                    true_class=ctx["true_label"],
-                    src_nid=ctx["target_src"],
-                    dst_nid=ctx["target_dst"],
-                    model=model,
-                    blocks=ctx["blocks"],
-                    input_nodes=ctx["input_nodes"].cpu(),
-                    base_node_feats=ctx["base_node_feats"],
-                    src_pos=ctx["src_pos"],
-                    dst_pos=ctx["dst_pos"],
-                    x_e=ctx["x_e"],
-                    nsamples=n,
-                )
-            except Exception:
-                logger.exception(f"    nsamples={n} failed — skipping this level")
-                continue
-            wall_s = time.time() - t0
+    sensitivity = []
+    for ns in sorted(set(SENSITIVITY_NSAMPLES) | {node_nsamples}):
+        thr = max_exhaustive_players(ns)
+        cnt = int(sum(1 for p in P if is_exhaustive(int(p), ns)))
+        sensitivity.append({
+            "nsamples":         ns,
+            "max_exact_P":      thr,
+            "n_exact":          cnt,
+            "pct_exact":        round(100.0 * cnt / n_flows, 1),
+            "is_configured":    ns == node_nsamples,
+        })
 
-            gap = result["f_logit"] - result["f_baseline"]
-            if gap_ref is None:
-                gap_ref = gap
+    histogram = {int(p): int(c) for p, c in zip(*np.unique(P, return_counts=True))}
+    stability = read_stability_crossref(METRICS_DIR)
 
-            phi_sum = (
-                result["src_novelty_shap"]
-                + result["dst_novelty_shap"]
-                + sum(result["node_shap"].values())
-            )
-            abs_err = abs(phi_sum - gap)
-            rel_err = abs_err / max(abs(gap_ref), 1e-3)
-
-            records[n].append((abs_err, rel_err, wall_s, ctx["coalition_size"]))
-            logger.debug(
-                f"    n={n:5d}  abs_err={abs_err:.4f}  rel_err={rel_err:.4f}  "
-                f"time={wall_s:.2f}s  coalition={ctx['coalition_size']}"
-            )
-
-    # --- Aggregate per nsamples level ---
-    agg: dict[int, dict] = {}
-    for n in NSAMPLES_LIST:
-        recs = np.array(records[n])
-        if len(recs) == 0:
-            continue
-        agg[n] = {
-            "n_flows":        int(len(recs)),
-            "mean_abs_err":   float(recs[:, 0].mean()),
-            "std_abs_err":    float(recs[:, 0].std()),
-            "median_abs_err": float(np.median(recs[:, 0])),
-            "p95_abs_err":    float(np.percentile(recs[:, 0], 95)),
-            "mean_rel_err":   float(recs[:, 1].mean()),
-            "std_rel_err":    float(recs[:, 1].std()),
-            "mean_time_s":    float(recs[:, 2].mean()),
-            "std_time_s":     float(recs[:, 2].std()),
-            "mean_coalition": float(recs[:, 3].mean()),
-        }
-
-    # --- Empirical log-log slope ---
-    ns_present = [n for n in NSAMPLES_LIST if n in agg]
-    if len(ns_present) >= 2:
-        log_ns  = np.log(np.array(ns_present, dtype=float))
-        log_err = np.log(np.clip(
-            [agg[n]["mean_abs_err"] for n in ns_present], 1e-10, None
-        ))
-        slope, _intercept = np.polyfit(log_ns, log_err, 1)
-    else:
-        slope = float("nan")
-
-    logger.info(f"Empirical log-log slope: {slope:.4f}  (expected −0.50)")
-
-    # --- Write JSON ---
+    # ── JSON ──────────────────────────────────────────────────────────────
     output_data = {
-        "seed":              args.seed,
-        "n_per_class":       args.n_per_class,
-        "n_total_selected":  len(selected),
-        "nsamples_list":     NSAMPLES_LIST,
-        "empirical_slope":   round(float(slope), 4),
-        "expected_slope":    -0.50,
-        "per_nsamples":      {str(n): agg[n] for n in ns_present},
-        "interpretation": (
-            f"Empirical slope {slope:.2f} vs expected −0.50. "
-            "A slope near −0.50 confirms O(1/√n) KernelSHAP convergence. "
-            "Node SHAP efficiency error is dominated by sampling variance, "
-            "not systematic bias; increasing nsamples predictably reduces error."
-        ),
+        "metric": "node_layer_exhaustive_enumeration_share",
+        "shap_version_verified": "0.51.0",
+        "exhaustive_condition": "2**P - 2 <= nsamples  (P <= 30)",
+        "exhaustive_condition_source":
+            "shap/explainers/_kernel.py:407-411 (clamp), :434-471 (enumeration "
+            "loop), :478 (sampling skipped), :699/:703 (l1_reg=False -> no "
+            "feature selection), :355-361 (M == P given zeros/ones background)",
+        "config_path":            str(args.config),
+        "node_nsamples":          node_nsamples,
+        "n_flows":                n_flows,
+        "n_classes":              len(per_class),
+        "flows_per_class":        per_class,
+        "max_exact_players":      p_max_exact,
+        "n_exact":                n_exact,
+        "pct_exact":              round(pct_exact, 1),
+        "n_sampled":              n_sampled,
+        "pct_sampled":            round(100.0 - pct_exact, 1),
+        "player_count_crosscheck":  xcheck,
+        "player_count_distribution": dist,
+        "player_count_histogram": histogram,
+        "nsamples_sensitivity":   sensitivity,
+        "sampled_tail_error_reference": stability,
     }
     json_path = METRICS_DIR / "node_shap_convergence.json"
     with open(json_path, "w") as f:
         json.dump(output_data, f, indent=2)
     logger.info(f"Metrics → {json_path}")
 
-    # --- Write text report ---
+    # ── Text report (explore/AGENT.md §3 block structure) ─────────────────
     lines = [
-        "Node SHAP KernelSHAP Convergence Experiment",
-        f"seed={args.seed}  n_per_class={args.n_per_class}  "
-        f"n_total={len(selected)}  W=60s",
+        "Figure reasoning — node_shap_convergence",
+        "========================================",
         "",
-        f"{'nsamples':>8s}  {'mean_abs_err':>12s}  {'std_abs_err':>11s}  "
-        f"{'mean_rel_err':>12s}  {'mean_time_s':>11s}  {'mean_coalition':>14s}",
-        "-" * 78,
+        f"config={args.config}",
+        f"configured explainer.node_nsamples = {node_nsamples}  "
+        f"(read from the resolved config; this run directory carries no "
+        f"separate effective-config dump)",
+        f"n_flows={n_flows} (all explanation JSONs under "
+        f"{EXPL_DIR.relative_to(outputs.parent)}), {len(per_class)} classes",
+        f"player-count formula P = len(node_shap) + 2 cross-checked against "
+        f"{xcheck}",
+        "",
+        "WHAT THE FIGURE SHOWS",
+        "----------------------",
+        "  Left panel: the distribution of node-game player counts P over every",
+        "  explained flow, split at the largest P that shap's KernelExplainer",
+        "  solves by exhaustive coalition enumeration at the configured budget.",
+        "  Right panel: the share of flows receiving exact Shapley values as a",
+        "  function of that budget.",
+        "",
+        "  shap's KernelExplainer clamps nsamples to 2**P - 2 and then",
+        "  enumerates every coalition, so a flow whose node game has",
+        f"  2**P - 2 <= {node_nsamples} receives the EXACT Shapley value, not a",
+        "  sampled estimate. Verified in shap 0.51.0 at",
+        "  shap/explainers/_kernel.py:407-411 and :434-471; l1_reg=False",
+        "  (node_shap.py:37) keeps the solver at :703 from truncating players.",
+        "",
+        "KEY FINDINGS",
+        "------------",
+        f"  * exhaustive when P <= {p_max_exact}  (at nsamples={node_nsamples})",
+        f"  * exact  (enumerated) {n_exact:>5d} of {n_flows}  ({pct_exact:.1f}%)",
+        f"  * sampled (estimated) {n_sampled:>5d} of {n_flows}  "
+        f"({100.0 - pct_exact:.1f}%)",
+        f"  * node-game players P = len(node_shap) + 2 novelty flags:",
+        f"    min {dist['min']}, median {dist['median']:.0f}, "
+        f"mean {dist['mean']:.2f}, max {dist['max']}",
+        f"  * sampled tail is exactly the P > {p_max_exact} flows: {n_sampled}",
+        "",
+        "  P : flows",
     ]
-    for n in ns_present:
-        a = agg[n]
-        lines.append(
-            f"{n:>8d}  {a['mean_abs_err']:>12.4f}  {a['std_abs_err']:>11.4f}  "
-            f"{a['mean_rel_err']:>12.4f}  {a['mean_time_s']:>11.3f}  "
-            f"{a['mean_coalition']:>14.1f}"
-        )
+    for p in sorted(histogram):
+        tag = "exact " if is_exhaustive(p, node_nsamples) else "sampled"
+        lines.append(f"  {p:>2d} : {histogram[p]:>5d}   {tag}")
+
     lines += [
-        "-" * 78,
-        f"Empirical log-log slope: {slope:.4f}  (expected: −0.50)",
         "",
-        "Reduction from n=512 to n=2048: "
-        f"expected ×{round(np.sqrt(2048/512), 2):.2f} lower error (O(1/√n)).",
-        "Reduction from n=512 to n=2048: "
-        f"expected ×{round(2048/512, 1):.1f} longer runtime (O(n)).",
+        "  Sensitivity to the coalition budget "
+        "(illustrative; the configured value is the operative one)",
+        f"  {'nsamples':>9s}  {'exhaustive when':>16s}  {'n exact':>8s}  "
+        f"{'pct':>6s}",
     ]
+    for s in sensitivity:
+        mark = "  <-- configured" if s["is_configured"] else ""
+        lines.append(
+            f"  {s['nsamples']:>9d}  {'P <= ' + str(s['max_exact_P']):>16s}  "
+            f"{s['n_exact']:>8d}  {s['pct_exact']:>5.1f}%{mark}"
+        )
+
+    lines += [
+        "",
+        "  Sampling error for the sampled tail",
+    ]
+    if stability is None:
+        lines.append(
+            "  UNAVAILABLE — outputs/metrics/summary.json carries no stability "
+            "figure for this run."
+        )
+    else:
+        lines += [
+            f"  Cross-reference (NOT a node-layer measurement): seed-to-seed "
+            f"stability = {stability['value']:.6f}",
+            f"    layer: {stability['layer']}   n_flows: {stability['n_flows']}"
+            f"   source: {stability['source']}",
+            f"    provenance: {stability['provenance']}",
+            "  No node-layer seed-to-seed measurement exists in this run. The",
+            f"  {n_sampled} sampled flows have no layer-specific sampling-error",
+            "  figure; the feature-group value above is the only seed-to-seed",
+            "  measurement the pipeline produces and is quoted with its own",
+            "  denominators rather than relabelled as a node-layer statistic.",
+        ]
+
+    lines += [
+        "",
+        "PAPER FRAMING",
+        "-------------",
+        f"  The node-novelty coalition game has a small player set (P = "
+        f"{dist['min']}-{dist['max']}, median {dist['median']:.0f} over "
+        f"{n_flows} explained",
+        f"  flows), and KernelSHAP enumerates the coalition space exhaustively "
+        f"whenever",
+        f"  2^P - 2 does not exceed the sampling budget. At the configured "
+        f"budget of",
+        f"  nsamples = {node_nsamples} this holds for P <= {p_max_exact}, so "
+        f"{n_exact} of {n_flows} flows ({pct_exact:.1f}%) receive",
+        f"  exact Shapley values at the node layer rather than Monte Carlo "
+        f"estimates.",
+        f"  The remaining {n_sampled} flows ({100.0 - pct_exact:.1f}%) are "
+        f"sampled.",
+        "",
+        "SUGGESTED FIGURE CAPTION",
+        "-------------------------",
+        f"  Node-layer attribution exactness. Left: distribution of "
+        f"node-novelty coalition",
+        f"  player counts P = |V_sub \\ endpoints| + 2 novelty flags over the "
+        f"{n_flows} explained",
+        f"  flows (min {dist['min']}, median {dist['median']:.0f}, "
+        f"mean {dist['mean']:.2f}, max {dist['max']}). KernelSHAP enumerates "
+        f"the full",
+        f"  coalition space when 2^P - 2 <= nsamples, which at the configured "
+        f"nsamples = {node_nsamples}",
+        f"  means P <= {p_max_exact} (green bars); those "
+        f"{n_exact} flows ({pct_exact:.1f}%) receive exact Shapley values, "
+        f"while the",
+        f"  remaining {n_sampled} ({100.0 - pct_exact:.1f}%) are sampled. "
+        f"Right: exact share as a function of the",
+        f"  coalition budget, with the configured value circled.",
+    ]
+
     txt_path = FIG_DIR / "node_shap_convergence_details.txt"
     with open(txt_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     logger.info(f"Text report → {txt_path}")
 
-    # --- Figure ---
+    # ── Figure ────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
 
-    # Panel 1 — efficiency error vs nsamples
-    mean_err = np.array([agg[n]["mean_abs_err"] for n in ns_present])
-    std_err  = np.array([agg[n]["std_abs_err"]  for n in ns_present])
-    ns_arr   = np.array(ns_present, dtype=float)
-
     ax = axes[0]
-    ax.loglog(ns_arr, mean_err, "o-", color="steelblue", lw=1.5, label="Mean |eff. error|")
-    ax.fill_between(
-        ns_arr,
-        np.clip(mean_err - std_err, 1e-6, None),
-        mean_err + std_err,
-        alpha=0.2, color="steelblue",
+    ps = np.array(sorted(histogram))
+    counts = np.array([histogram[int(p)] for p in ps])
+    colors = [
+        "seagreen" if is_exhaustive(int(p), node_nsamples) else "lightsteelblue"
+        for p in ps
+    ]
+    ax.bar(ps, counts, color=colors, edgecolor="white", linewidth=0.5)
+    ax.axvline(p_max_exact + 0.5, color="tomato", ls="--", lw=1.2)
+    ax.text(
+        p_max_exact + 0.7, counts.max() * 0.92,
+        f"exhaustive: P $\\leq$ {p_max_exact}\n(nsamples = {node_nsamples})",
+        fontsize=8, color="tomato", va="top",
     )
-    # Reference line anchored at midpoint with slope −0.5
-    mid_idx = len(ns_arr) // 2
-    y_ref = agg[ns_present[mid_idx]]["mean_abs_err"] * (ns_arr / ns_arr[mid_idx]) ** (-0.5)
-    ax.loglog(ns_arr, y_ref, "--", color="tomato", lw=1.2, label="slope −0.50 (ref.)")
-    ax.set_xlabel("nsamples")
-    ax.set_ylabel("|Efficiency error|")
+    ax.set_xlabel("Node-game players $P$")
+    ax.set_ylabel("Flows")
     ax.set_title(
-        f"Node SHAP convergence (n={len(selected)} flows)\n"
-        f"empirical slope = {slope:.2f}"
+        f"Node-layer player counts (n = {n_flows} flows)\n"
+        f"{n_exact} exact ({pct_exact:.1f}%), {n_sampled} sampled"
     )
-    ax.legend(fontsize=8)
-    ax.grid(True, which="both", alpha=0.3)
-
-    # Panel 2 — wall-clock time vs nsamples
-    mean_time = np.array([agg[n]["mean_time_s"] for n in ns_present])
-    std_time  = np.array([agg[n]["std_time_s"]  for n in ns_present])
+    ax.grid(True, axis="y", alpha=0.3)
 
     ax2 = axes[1]
-    ax2.loglog(ns_arr, mean_time, "s-", color="darkorange", lw=1.5, label="Mean wall time")
-    ax2.fill_between(
-        ns_arr,
-        np.clip(mean_time - std_time, 1e-4, None),
-        mean_time + std_time,
-        alpha=0.2, color="darkorange",
-    )
-    # Reference line with slope +1 (linear in nsamples)
-    y_ref_t = mean_time[0] * (ns_arr / ns_arr[0])
-    ax2.loglog(ns_arr, y_ref_t, "--", color="gray", lw=1.2, label="slope +1.00 (ref.)")
-    ax2.set_xlabel("nsamples")
-    ax2.set_ylabel("Wall-clock time (s)")
-    ax2.set_title("Node SHAP runtime vs nsamples")
-    ax2.legend(fontsize=8)
-    ax2.grid(True, which="both", alpha=0.3)
+    ns_arr = np.array([s["nsamples"] for s in sensitivity], dtype=float)
+    pct_arr = np.array([s["pct_exact"] for s in sensitivity], dtype=float)
+    ax2.semilogx(ns_arr, pct_arr, "o-", color="seagreen", lw=1.5, base=2)
+    for s in sensitivity:
+        if s["is_configured"]:
+            ax2.scatter(
+                [s["nsamples"]], [s["pct_exact"]], s=120,
+                facecolors="none", edgecolors="tomato", lw=1.6, zorder=5,
+                label=f"configured ({s['nsamples']})",
+            )
+    ax2.set_xticks(ns_arr)
+    ax2.set_xticklabels([f"{int(n)}" for n in ns_arr])
+    ax2.set_xlabel("KernelSHAP coalition budget (nsamples)")
+    ax2.set_ylabel("Flows with exact Shapley values (%)")
+    ax2.set_ylim(0, 100)
+    ax2.set_title("Exhaustively enumerated share vs budget")
+    ax2.legend(fontsize=8, loc="lower right")
+    ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
     for ext in ("pdf", "png"):
@@ -445,7 +527,10 @@ def main() -> None:
         logger.info(f"Figure → {out}")
     plt.close(fig)
 
-    logger.info(f"Done. Empirical slope={slope:.4f}  (expected −0.50)")
+    logger.info(
+        f"Done. {n_exact}/{n_flows} ({pct_exact:.1f}%) node games solved by "
+        f"exhaustive enumeration at nsamples={node_nsamples} (P <= {p_max_exact})."
+    )
 
 
 if __name__ == "__main__":
