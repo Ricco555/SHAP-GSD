@@ -168,6 +168,8 @@ def main() -> None:
     all_node_gaps: list[float] = []
     feat_pass = feat_fail = 0
     node_pass = node_fail = 0
+    n_flows_total = 0
+    n_flows_with_temporal_nbrs = 0
 
     for c, cls_name in int_to_name.items():
         cls_dir = expl_dir / cls_name
@@ -188,6 +190,10 @@ def main() -> None:
         for jf in json_files:
             with open(jf) as f:
                 d = json.load(f)
+
+            n_flows_total += 1
+            if len(d.get("neighbor_edge_ids", [])) > 0:
+                n_flows_with_temporal_nbrs += 1
 
             global_eid = int(d["edge_id"])
             true_class = int(d["true_label"])
@@ -346,10 +352,12 @@ def main() -> None:
             "note": (
                 "Temporal SHAP efficiency requires recomputing node-state rollbacks. "
                 "Verified via test_shap_axioms.py (toy linear model, seed=42, tol=0.05): PASS. "
-                "Only 22/1764 explained flows have non-zero temporal neighbors; "
+                f"Only {n_flows_with_temporal_nbrs}/{n_flows_total} explained flows "
+                "have non-zero temporal neighbors (nonempty neighbor_edge_ids); "
                 "their efficiency errors are logged at DEBUG level during 06_explain.py."
             ),
-            "n_flows_with_temporal_nbrs": 22,
+            "n_flows_with_temporal_nbrs": n_flows_with_temporal_nbrs,
+            "n_flows_total": n_flows_total,
             "status": "PASS (toy axiom test)",
         },
         "per_class": per_class_results,

@@ -198,7 +198,10 @@ def novelty_fidelity_for_flow(
     Returns:
         dict with keys n_players, n_non_target, effective_k, p_full,
         p_masked, p_kept, fidelity_plus, fidelity_minus, top_k_players,
-        n_novelty_in_top_k. Rounding is left to the row-building layer.
+        n_novelty_in_top_k. n_novelty_in_top_k only counts a novelty flag
+        whose own |phi| is nonzero — a zero-phi flag that landed in top_idx
+        merely because P was small does not count as "reaching top-k".
+        Rounding is left to the row-building layer.
     """
     P = len(phi_novelty)
     assert P == 2 + len(non_target_pos), (
@@ -253,6 +256,18 @@ def novelty_fidelity_for_flow(
         else:
             top_k_players.append(f"node:{idx_to_nid[col]}")
 
+    # n_novelty_in_top_k must NOT count a novelty flag that only landed in
+    # top_idx because P was small (k = min(top_k, P) degenerates to "keep
+    # everyone" for low-player flows). shap's l1_reg produces exact-zero phi
+    # ties (see the argsort comment above), so a zero-phi novelty flag can sit
+    # inside top_idx without carrying any genuine attribution. Require the
+    # novelty column's own |phi| to be nonzero before it counts as "reaching
+    # top-k" — this is what scripts/08_metrics.py's table2_novelty.txt reports
+    # as "novelty reaches top-k in N/1846", so a trivial zero-phi inclusion
+    # would silently inflate that count.
+    novelty_top_idx = top_idx[top_idx < 2]
+    n_novelty_in_top_k = int(np.sum(np.abs(phi_novelty[novelty_top_idx]) > 0))
+
     return {
         "n_players":          P,
         "n_non_target":       P - 2,
@@ -263,5 +278,5 @@ def novelty_fidelity_for_flow(
         "fidelity_plus":      p_full - p_masked,
         "fidelity_minus":     p_full - p_kept,
         "top_k_players":      top_k_players,
-        "n_novelty_in_top_k": int(np.sum(top_idx < 2)),
+        "n_novelty_in_top_k": n_novelty_in_top_k,
     }

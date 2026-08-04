@@ -2,9 +2,11 @@
 arg10_global_profiles.py — Argument 10: "Global Profiles as Proxy Ground Truth"
 ================================================================================
 What it shows:
-  Claim: SHAP-GSD per-class global feature-group rankings match independently
-  derived literature profiles (Moustafa & Slay 2015). Only one class (Backdoor)
-  reaches ρ > 0.7; mean ρ = 0.221 across all classes.
+  Claim: SHAP-GSD per-class global feature-group rankings are compared against
+  independently derived literature profiles (Moustafa & Slay 2015) via Spearman
+  ρ. Per-class ρ values and the count of classes reaching the ρ ≥ 0.7 threshold
+  are computed fresh at run time — see the emitted .txt's WHAT/KEY FINDINGS
+  blocks, not this docstring, for current numbers.
 
 Panels:
   Left  (ax1) — Heatmap: classes (rows) × top-12 groups (cols), cell = mean
@@ -223,6 +225,24 @@ def main() -> None:
     weak = [(c, r) for c, r in zip(cls_sorted, rho_sorted) if r < 0.4]
     mean_rho = np.mean(rho_sorted)
 
+    top_cls, top_rho = cls_sorted[0], rho_sorted[0]
+    top_strength = "strong" if top_rho >= 0.7 else ("moderate" if top_rho >= 0.4 else "weak")
+    overall_strength = "weak" if mean_rho < 0.4 else ("moderate" if mean_rho < 0.7 else "strong")
+
+    if strong:
+        threshold_sentence = (
+            f"Spearman ρ measures cross-source rank correlation; {len(strong)} of "
+            f"{len(classes)} classes ("
+            + ", ".join(c for c, _ in strong)
+            + f") reach ρ ≥ 0.7, with the highest at {top_cls} (ρ = {top_rho:+.3f})."
+        )
+    else:
+        threshold_sentence = (
+            f"Spearman ρ measures cross-source rank correlation; no class reaches ρ ≥ 0.7 — "
+            f"the highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}), "
+            "so the threshold cannot be used as a blanket validation claim."
+        )
+
     lines = [
         f"Figure reasoning — {STEM}",
         "=" * 48, "",
@@ -230,8 +250,7 @@ def main() -> None:
         "----",
         "SHAP-GSD per-class feature-group rankings are compared against independently",
         "derived literature profiles (Moustafa & Slay 2015, UNSW-NB15 attack descriptions).",
-        "Spearman ρ measures cross-source rank correlation; only one class (Backdoor) reaches ρ > 0.7,",
-        "so the threshold cannot be used as a blanket validation claim.",
+        threshold_sentence,
         "",
         "KEY FINDINGS",
         "------------",
@@ -263,9 +282,6 @@ def main() -> None:
         "SHAP-GSD profiles align with literature-derived attack signatures, not a",
         "validation that can be claimed uniformly across classes.",
     ]
-    top_cls, top_rho = cls_sorted[0], rho_sorted[0]
-    top_strength = "strong" if top_rho >= 0.7 else ("moderate" if top_rho >= 0.4 else "weak")
-    overall_strength = "weak" if mean_rho < 0.4 else ("moderate" if mean_rho < 0.7 else "strong")
     lines += [
         f"The highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}); "
         f"{len(strong)} of {len(classes)} classes",

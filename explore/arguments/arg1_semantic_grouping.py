@@ -100,7 +100,23 @@ def top1_group(phi: list, names: list) -> str:
     return names[idx]
 
 
+def sci_notation(value: float) -> str:
+    """Format `value` as 'm.mm×10^e' (mantissa in [1, 10))."""
+    exp = int(np.floor(np.log10(value)))
+    mantissa = value / (10 ** exp)
+    return f"{mantissa:.2f}×10^{exp}"
+
+
 def main() -> None:
+    # --- load d_e (encoded feature-vector dimensionality) from the run's
+    # own transformer metadata, never hardcoded (it is split-dependent) ---
+    meta_path = ROOT / _P["cfg"]["output"]["transformers_dir"] / "meta.json"
+    d_e = json.loads(meta_path.read_text())["d_e"]
+    reduction_exp = d_e - 48
+    reduction_pow10 = int(np.floor(reduction_exp * np.log10(2)))
+    reduction_mantissa = 10 ** (reduction_exp * np.log10(2) - reduction_pow10)
+    reduction_str = f"{reduction_mantissa:.1f}×10^{reduction_pow10}"
+
     # --- load fidelity mean per class for coloring ---
     fid_df = pd.read_csv(_P["metrics"] / "fidelity.csv")
     class_mean_fid = fid_df.groupby("class_name")["fidelity_plus"].mean()
@@ -196,8 +212,8 @@ def main() -> None:
 
     # Coalition space textbox
     ax2.text(0.97, 0.04,
-             "$2^{48}$ groups vs $2^{212}$ encoded dims\n"
-             r"$\approx \times 10^{49}$ reduction in coalition space",
+             f"$2^{{48}}$ groups vs $2^{{{d_e}}}$ encoded dims\n"
+             rf"$\approx \times {reduction_mantissa:.1f}\times 10^{{{reduction_pow10}}}$ reduction in coalition space",
              transform=ax2.transAxes, fontsize=8, ha="right", va="bottom",
              bbox=dict(boxstyle="round,pad=0.35", fc="#f0fff4", ec=_TEAL, alpha=0.92))
 
@@ -219,8 +235,8 @@ def main() -> None:
         "=" * 48, "",
         "WHAT",
         "----",
-        "Semantic grouping of 212 encoded NetFlow dimensions into K=48 named feature",
-        "groups reduces the SHAP coalition space from 2^212 to 2^48 (×10^49).",
+        f"Semantic grouping of {d_e} encoded NetFlow dimensions into K=48 named feature",
+        f"groups reduces the SHAP coalition space from 2^{d_e} to 2^48 ({reduction_str}).",
         "Attribution concentration: per-class concentration scores show how many groups",
         "account for 80% of total |φ|. A per-category bar shows which functional group",
         "dominates. Note: the class-level scores below are averaged UNWEIGHTED across",
@@ -247,14 +263,14 @@ def main() -> None:
         lines.append(f"    {cat:15s}: {val:.5f}")
     lines += [
         "",
-        f"  Coalition space: 2^48 ≈ 2.81×10^14  vs  2^212 ≈ 6.58×10^63",
-        f"  Reduction factor: ≈ 10^49",
+        f"  Coalition space: 2^48 ≈ {sci_notation(float(2**48))}  vs  2^{d_e} ≈ {sci_notation(2.0**d_e)}",
+        f"  Reduction factor: ≈ {reduction_str}",
         "",
         "PAPER FRAMING",
         "-------------",
         "Treating the 48 semantic groups as atomic coalition players preserves the four",
         "Shapley axioms (Dummy, Efficiency, Symmetry, Additivity) while compressing the",
-        "sampling space by a factor of ~10^49. Attribution shows moderate concentration:",
+        f"sampling space by a factor of ~{reduction_str}. Attribution shows moderate concentration:",
         f"the mean class needs {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) to capture 80%",
         "of total |φ| — fewer than the full group set, but not a small dominant subset",
         "either. This confirms SHAP-GSD explanations remain theoretically sound while",
@@ -269,11 +285,11 @@ def main() -> None:
         "coloured by attribution sign (teal = presence-driven, coral = absence-driven);",
         "annotations show the top-1 attributed group per class. Right: mean |φ| per",
         "feature category across all flows and classes; the coalition space reduction",
-        f"(2^48 vs 2^212, ×10^49) is annotated. Attribution shows moderate concentration:",
+        f"(2^48 vs 2^{d_e}, {reduction_str}) is annotated. Attribution shows moderate concentration:",
         f"on average {overall_mean_score:.1f} of 48 groups (~{overall_pct:.0f}%) suffice to explain",
         "80% of each decision.",
     ]
-    notes = load_paper_notes(STEM)
+    notes = load_paper_notes(STEM, d_e=d_e, reduction_str=reduction_str)
     if notes:
         lines += [""] + notes
 
