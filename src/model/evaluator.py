@@ -145,12 +145,28 @@ class Evaluator:
         y_true, y_pred, y_prob = self._run_inference()
 
         # ── Metrics ──────────────────────────────────────────────────────────
-        accuracy   = float(accuracy_score(y_true, y_pred))
-        macro_f1   = float(f1_score(y_true, y_pred, average="macro",    zero_division=0))
-        weighted_f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+        # A class can be entirely absent from a chronological test split (e.g.
+        # a NetFlow attack campaign confined to one contiguous time window).
+        # macro_f1/weighted_f1 are averaged only over classes present in the
+        # test split's TRUE labels (`labels_present`) -- a class with zero
+        # test support is excluded from the average rather than scored as a
+        # deducting 0, since it was never evaluable in the first place. This
+        # is deliberately keyed on y_true alone, not the union with y_pred:
+        # a class the model spuriously predicts despite having no true test
+        # instances must not silently drag the average down either.
+        accuracy = float(accuracy_score(y_true, y_pred))
+        labels_present = sorted(int(v) for v in np.unique(y_true))
+        macro_f1    = float(f1_score(y_true, y_pred, labels=labels_present, average="macro",    zero_division=0))
+        weighted_f1 = float(f1_score(y_true, y_pred, labels=labels_present, average="weighted", zero_division=0))
 
+        # labels=range(len(class_names)) mirrors confusion_matrix's existing
+        # call below: pin the full label space so a class absent from this
+        # split's observed y_true/y_pred union gets an explicit zero row
+        # instead of crashing classification_report (which otherwise refuses
+        # to run when target_names doesn't match the observed label count).
         report = classification_report(
             y_true, y_pred,
+            labels=list(range(len(class_names))),
             target_names=class_names,
             output_dict=True,
             zero_division=0,
@@ -167,9 +183,22 @@ class Evaluator:
         }
 
         metrics = {
-            "accuracy":      accuracy,
-            "macro_f1":      macro_f1,
-            "weighted_f1":   weighted_f1,
+            "accuracy":                  accuracy,
+            "macro_f1":                  macro_f1,
+            "weighted_f1":               weighted_f1,
+            "macro_f1_convention":       (
+                "macro_f1/weighted_f1 are averaged only over classes present "
+                "in the test split's true labels (n_classes_present_in_test "
+                "of n_classes_total); classes absent from the test split are "
+                "excluded from the average, not scored as 0 -- see per_class "
+                "for their explicit zero/zero-support rows."
+            ),
+            "n_classes_total":            len(class_names),
+            "n_classes_present_in_test":  len(labels_present),
+            "classes_absent_from_test": [
+                class_names[i] for i in range(len(class_names))
+                if i not in labels_present
+            ],
             "n_test_edges":  len(y_true),
             "per_class":     per_class,
         }
@@ -271,9 +300,18 @@ class Evaluator:
         logger.info("=" * 65)
         logger.info("TEST EVALUATION SUMMARY")
         logger.info(f"  Accuracy:     {metrics['accuracy']:.4f}")
-        logger.info(f"  Macro F1:     {metrics['macro_f1']:.4f}")
+        logger.info(
+            f"  Macro F1:     {metrics['macro_f1']:.4f}  "
+            f"(averaged over {metrics['n_classes_present_in_test']}/"
+            f"{metrics['n_classes_total']} classes present in test)"
+        )
         logger.info(f"  Weighted F1:  {metrics['weighted_f1']:.4f}")
         logger.info(f"  Test edges:   {metrics['n_test_edges']:,}")
+        if metrics["classes_absent_from_test"]:
+            logger.info(
+                "  Absent from test (excluded from macro/weighted F1, not "
+                f"scored as 0): {', '.join(metrics['classes_absent_from_test'])}"
+            )
         logger.info("")
         logger.info("Per-class F1:")
         for name in class_names:
