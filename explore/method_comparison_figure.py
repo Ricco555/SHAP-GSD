@@ -1,10 +1,12 @@
 """
 SHAP-GSD vs GNNExplainer[F] per-class comparison.
 
-Both methods use feature-group fidelity — GNNExplainer over raw 218-dim
-features (top-5 raw features masked), SHAP-GSD over 48 semantic groups
-(top-5 groups masked). Direct Fidelity+ comparison is valid within this
-pairing.
+Both methods use feature-group fidelity — GNNExplainer over the full
+encoded edge-feature space (top-5 raw features masked), SHAP-GSD over 48
+semantic groups (top-5 groups masked). Direct Fidelity+ comparison is
+valid within this pairing. The encoded dimension (d_e) is read live from
+the run's transformers/meta.json — it is split-dependent and must never be
+hardcoded (see final/review01/coder_instructions_pass10_followups.md §1).
 
 Two-panel figure:
   Left  — Per-class Fidelity+ for both methods (grouped horizontal bars)
@@ -15,6 +17,7 @@ Outputs:
 """
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +36,11 @@ FIDELITY_CSV = _P["metrics"] / "fidelity.csv"
 GNN_CSV      = _P["baselines"] / "gnnexplainer_results.csv"
 OUT_DIR      = _P["figures"] / "explore"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Encoded edge-feature dimensionality, read live (d_e is split-dependent —
+# e.g. 212 for armRb+S2, 218 for the superseded armRb run — never hardcode).
+_META_PATH = ROOT / _P["cfg"]["output"]["transformers_dir"] / "meta.json"
+d_e = json.loads(_META_PATH.read_text())["d_e"]
 
 LABEL_FS = 9
 
@@ -77,7 +85,7 @@ ax1.barh(y + bar_h / 2, [sg_means[c]  for c in classes_sorted],
          label="SHAP-GSD[F]  (48 semantic groups)")
 ax1.barh(y - bar_h / 2, [gnn_means[c] for c in classes_sorted],
          height=bar_h, color=_GNN,  edgecolor="white", linewidth=0.4,
-         label="GNNExplainer[F]  (218 raw features)")
+         label=f"GNNExplainer[F]  ({d_e} encoded features)")
 
 ax1.axvline(0, color="black", linewidth=0.8, zorder=3)
 
@@ -135,8 +143,13 @@ plt.close(fig)
 
 # ── Reasoning ─────────────────────────────────────────────────────────────────
 
-winners = sum(1 for d in deltas.values() if d > 0)
-losers  = sum(1 for d in deltas.values() if d <= 0)
+n_classes    = len(classes_all)
+winners_list = sorted(c for c in classes_all if deltas[c] > 0)
+losers_list  = sorted(c for c in classes_all if deltas[c] <= 0)
+winners = len(winners_list)
+losers  = len(losers_list)
+
+n_flows = len(rows_sg)
 
 reasoning = f"""\
 Figure reasoning — method_comparison_fg
@@ -145,27 +158,27 @@ Figure reasoning — method_comparison_fg
 WHAT THIS FIGURE SHOWS
 -----------------------
 Direct Fidelity+ comparison between SHAP-GSD (48 semantic groups) and
-GNNExplainer (raw 218-dim features), both masked at top-5 elements.
-These two methods are directly comparable because they use the same
-coalition space (edge feature fidelity).
+GNNExplainer ({d_e} encoded edge-feature dimensions), both masked at top-5
+elements. These two methods are directly comparable because they use the
+same coalition space (edge feature fidelity).
 
 PER-CLASS RESULTS
 -----------------
-SHAP-GSD wins ({winners}/10 classes): Backdoor, DoS, Exploits
-GNNExplainer wins ({losers}/10 classes): Analysis, Benign, Fuzzers, Generic, Recon, Shellcode, Worms
+SHAP-GSD wins ({winners}/{n_classes} classes): {', '.join(winners_list)}
+GNNExplainer wins ({losers}/{n_classes} classes): {', '.join(losers_list)}
 
 Overall: SHAP-GSD Fidelity+ = {overall_sg:+.4f}, GNNExplainer = {overall_gnn:+.4f}
 Delta = {overall_delta:+.4f} — SHAP-GSD is ~{abs(overall_delta/overall_gnn)*100:.0f}% lower overall.
 
 WHY GNNExplainer LEADS OVERALL
 --------------------------------
-GNNExplainer optimises a mask directly over raw features, giving it access
-to fine-grained discriminative signal within each semantic group. SHAP-GSD
-operates at the group level — masking a whole group may occlude both the
-useful and redundant features together.
+GNNExplainer optimises a mask directly over the full encoded edge-feature
+space, giving it access to fine-grained discriminative signal within each
+semantic group. SHAP-GSD operates at the group level — masking a whole
+group may occlude both the useful and redundant features together.
 
 The gap is largest for Reconnaissance (Δ = {deltas['Reconnaissance']:+.3f}) and Shellcode
-(Δ = {deltas['Shellcode']:+.3f}), where the top raw features (e.g. specific
+(Δ = {deltas['Shellcode']:+.3f}), where the top encoded features (e.g. specific
 packet lengths, TTL values) provide more discriminative information than
 the group-level aggregation.
 
@@ -180,32 +193,32 @@ THE INTERPRETABILITY TRADE-OFF
 --------------------------------
 The ~{abs(overall_delta/overall_gnn)*100:.0f}% lower Fidelity+ for SHAP-GSD vs GNNExplainer is the cost of
 semantic interpretability. SHAP-GSD explains via analyst-meaningful feature
-groups (protocol, timing, packet size, TCP flags etc.) rather than raw
-218-dimensional flow statistics. This trade-off is the central design choice
-in the paper.
+groups (protocol, timing, packet size, TCP flags etc.) rather than the full
+{d_e}-dimensional encoded flow representation. This trade-off is the central
+design choice in the paper.
 
 SUGGESTED FIGURE CAPTION
 -------------------------
-SHAP-GSD[F] vs GNNExplainer[F]: semantic grouping trade-off (n = 1,764 flows,
+SHAP-GSD[F] vs GNNExplainer[F]: semantic grouping trade-off (n = {n_flows:,} flows,
 top-5 masked). Left: mean Fidelity+ per class for both methods; SHAP-GSD
-attributes over 48 semantic groups, GNNExplainer over raw 218-dim features.
-Dashed verticals mark overall means (teal = SHAP-GSD {overall_sg:.3f}, amber =
+attributes over 48 semantic groups, GNNExplainer over {d_e} encoded edge-feature
+dimensions. Dashed verticals mark overall means (teal = SHAP-GSD {overall_sg:.3f}, amber =
 GNNExplainer {overall_gnn:.3f}). Right: per-class delta (SHAP-GSD − GNNExplainer);
 teal = SHAP-GSD better, coral = GNNExplainer better. Overall Δ = {overall_delta:+.3f}
-reflects the cost of semantic grouping; SHAP-GSD outperforms for Backdoor,
-DoS, and Exploits where the discriminative signal spans coherent feature families.
+reflects the cost of semantic grouping; SHAP-GSD outperforms for {', '.join(winners_list)}
+where the discriminative signal spans coherent feature families.
 
 SUGGESTED PAPER FRAMING
 ------------------------
-"GNNExplainer, operating over raw 218-dim edge features, achieves higher
-Fidelity+ overall (0.156 vs 0.107) because it can selectively mask
-individual low-level features within each semantic group. SHAP-GSD, by
+"GNNExplainer, operating over the full {d_e}-dim encoded edge-feature space, achieves
+higher Fidelity+ overall ({overall_gnn:.3f} vs {overall_sg:.3f}) because it can selectively
+mask individual low-level features within each semantic group. SHAP-GSD, by
 design, attributes over 48 analyst-interpretable groups; masking a group
 removes all its features simultaneously. The gap reflects a deliberate
 trade-off: per-group attribution provides directly actionable NIDS
 signatures (e.g., 'retransmission patterns and packet size distinguish
-Exploits') at a measured cost of ~30% lower average Fidelity+. For 3 of 10
-classes (Backdoor, DoS, Exploits), SHAP-GSD Fidelity+ exceeds GNNExplainer,
+Exploits') at a measured cost of ~{abs(overall_delta/overall_gnn)*100:.0f}% lower average Fidelity+. For {winners} of
+{n_classes} classes ({', '.join(winners_list)}), SHAP-GSD Fidelity+ exceeds GNNExplainer,
 suggesting that semantic grouping actively helps when the discriminative
 signal spans coherent feature families rather than isolated raw statistics."
 """
