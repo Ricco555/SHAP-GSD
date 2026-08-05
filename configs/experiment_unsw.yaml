@@ -1,8 +1,8 @@
 # NF-UNSW-NB15-v3 experiment — overrides default.yaml
 data:
   csv_path: "data/NF-UNSW-NB15-v3.csv"
-  train_frac: 0.6
-  val_frac: 0.3
+  train_frac: 0.644821
+  val_frac: 0.174783
 
 run:
   dir: "runs/nf_unsw_nb15_v3"
@@ -14,19 +14,20 @@ preprocessing:
 
 balancer:
   strategy: "oversample"
-  min_class_ratio: 0.1
+  min_class_ratio: 0.0
   max_majority_ratio: 5.0
   seed: 42
-  class_weight_method: "inverse_freq"
-  class_weight_max_clamp: 50              # caps Worms(~2820→50); Backdoor stays ~44
+  class_weight_method: "effective_num"    # armRb: loss reweighting only, no oversample-side compensation
+  effective_num_beta: 0.9999
+  class_weight_max_clamp: null            # armRb: unclamped
 
 reproducibility:
-  model_seed: 90   # seed=42+48: trial 48 was the only tuning trial where Backdoor converged
+  model_seed: 90
 
 model:
   early_stopping_metric: "composite"
-  minority_class_threshold: 5000         # selects DoS(1719) Analysis(514) Backdoor(3185) Shellcode(980) Worms(50) — not Recon(5349)
+  minority_class_threshold: 5000         # S2 train split: selects DoS(2358) Analysis(646) Backdoor(3219) Shellcode(1160) Worms(64) — not Reconnaissance(6874)
   composite_minority_weight: 0.5
-  patience: 20                           # Backdoor first appears ~ep13; need 17+ epochs after for composite to recover
+  patience: 20
 
 seed: 42
