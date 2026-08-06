@@ -201,3 +201,110 @@ class FeatureGrouping:
         assert not missing, f"Groups missing columns: {sorted(missing)}"
         assert not extra,   f"Groups reference out-of-range columns: {sorted(extra)}"
         logger.debug(f"FeatureGrouping validation passed: {self.K} groups cover all {self.d_e} columns")
+
+
+# ---------------------------------------------------------------------------
+# Raw-feature (ungrouped) coalition space — paper config (i)
+# ---------------------------------------------------------------------------
+
+def build_singleton_feature_groups(source: dict[str, Any]) -> dict[str, Any]:
+    """Derive a one-player-per-raw-feature grouping from a semantic grouping.
+
+    Produces the coalition space for the paper's SHAP-GSD config (i): raw,
+    ungrouped KernelSHAP over the ``d_e`` encoded edge-feature dimensions,
+    i.e. ``K == d_e`` singleton groups instead of the 48 semantic groups.
+    The output has exactly the ``feature_groups.json`` schema that
+    ``FeatureGroupSHAP``, ``FeatureGrouping`` and ``scripts/08_metrics.py``
+    already consume, so no explainer or metric code has to change.
+
+    The transform is deterministic and order-preserving: group ``i`` is named
+    ``source["feature_names"][i]`` and owns exactly column ``i``. Each
+    singleton inherits the ``type`` of the semantic group that contained its
+    column, so downstream type-aware consumers keep working.
+
+    Args:
+        source: parsed ``feature_groups.json`` dict with keys ``d_e``, ``K``,
+                ``feature_names`` and ``groups``. Must be the RUN-SCOPED file
+                of the run being explained (its ``d_e`` must match that run's
+                feature store), not a stale top-level copy.
+
+    Returns:
+        A new ``feature_groups.json``-shaped dict with ``K == d_e`` and one
+        single-column group per raw feature. A ``singleton_source`` provenance
+        key records the grouping it was derived from; no consumer reads it.
+
+    Raises:
+        ValueError: if the source is internally inconsistent (``K`` disagrees
+            with ``groups``, ``feature_names`` length disagrees with ``d_e``,
+            duplicate feature names, or the groups do not partition
+            ``{0, ..., d_e-1}`` exactly).
+    """
+    required = ("d_e", "K", "feature_names", "groups")
+    missing_keys = [k for k in required if k not in source]
+    if missing_keys:
+        raise ValueError(f"source feature_groups is missing keys: {missing_keys}")
+
+    d_e: int = int(source["d_e"])
+    feature_names: list[str] = list(source["feature_names"])
+    src_groups: dict[str, Any] = source["groups"]
+
+    if int(source["K"]) != len(src_groups):
+        raise ValueError(
+            f"source K={source['K']} disagrees with len(groups)={len(src_groups)}"
+        )
+    if len(feature_names) != d_e:
+        raise ValueError(
+            f"source has {len(feature_names)} feature_names but d_e={d_e}"
+        )
+    if len(set(feature_names)) != d_e:
+        dupes = sorted({n for n in feature_names if feature_names.count(n) > 1})
+        raise ValueError(
+            f"feature_names are not unique — cannot key singleton groups by "
+            f"name; duplicates: {dupes}"
+        )
+
+    # Column -> type of the semantic group owning it; doubles as the partition
+    # check (every column claimed exactly once, nothing out of range).
+    col_type: dict[int, str] = {}
+    for name, info in src_groups.items():
+        for idx in info["indices"]:
+            if idx in col_type:
+                raise ValueError(
+                    f"column {idx} appears in more than one source group "
+                    f"(duplicate found in '{name}')"
+                )
+            if not 0 <= idx < d_e:
+                raise ValueError(
+                    f"source group '{name}' references out-of-range column {idx} "
+                    f"(d_e={d_e})"
+                )
+            col_type[idx] = info.get("type", "raw")
+
+    uncovered = sorted(set(range(d_e)) - set(col_type))
+    if uncovered:
+        raise ValueError(f"source groups do not cover columns: {uncovered}")
+
+    groups: dict[str, dict[str, Any]] = {
+        feature_names[i]: {"indices": [i], "type": col_type[i]}
+        for i in range(d_e)
+    }
+
+    logger.info(
+        f"Singleton feature groups: K={d_e} (from K={source['K']} semantic "
+        f"groups), d_e={d_e}"
+    )
+    return {
+        "d_e": d_e,
+        "K": d_e,
+        "feature_names": feature_names,
+        "groups": groups,
+        "singleton_source": {
+            "d_e": d_e,
+            "K": int(source["K"]),
+            "note": (
+                "Derived by build_singleton_feature_groups() for paper config "
+                "(i): raw-feature (ungrouped) KernelSHAP. One player per "
+                "encoded edge-feature dimension."
+            ),
+        },
+    }
