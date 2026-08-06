@@ -148,10 +148,6 @@ Mean top temporal Shapley value at W=60s:   {shap_means[0]:.6f}
 Mean top temporal Shapley value at W=3600s: {shap_means[-1]:.6f}
 Max  top temporal Shapley value at W=3600s: {shap_maxs[-1]:.6f}
 
-SUGGESTED PAPER PLACEMENT
---------------------------
-Place immediately after the temporal SHAP case-study panel (d).
-
 SUGGESTED FIGURE CAPTION
 -------------------------
 Temporal-window sensitivity on this dataset (median flow gap = {median_gap:.0f} s). Left:
