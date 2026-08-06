@@ -66,6 +66,8 @@ for cls in classes_sorted:
         "fp_bad_mean":fp_bad.mean() if len(fp_bad) else np.nan,
         "fp_bad_std": fp_bad.std()  if len(fp_bad) else np.nan,
         "pct_pos":    100 * (fp_all > 0).mean(),
+        "pct_pos_ok":  100 * (fp_ok  > 0).mean() if len(fp_ok)  else float("nan"),
+        "pct_pos_bad": 100 * (fp_bad > 0).mean() if len(fp_bad) else float("nan"),
         "group_freq": group_freq,
         "n_correct":  len(correct),
     }
@@ -214,7 +216,93 @@ plt.close(fig2)
 
 # ── Reasoning files ───────────────────────────────────────────────────────────
 
-(OUT_DIR / "class_accuracy_fidelity.txt").write_text("""\
+lowest_acc_cls  = min(classes_sorted, key=lambda c: per_class[c]["acc"])
+highest_acc_cls = max(classes_sorted, key=lambda c: per_class[c]["acc"])
+
+
+def _pol_gap(c: str) -> float:
+    ok, bad = per_class[c]["pct_pos_ok"], per_class[c]["pct_pos_bad"]
+    return abs(ok - bad) if not (np.isnan(ok) or np.isnan(bad)) else -1.0
+
+
+polarity_gap_classes = sorted(
+    (c for c in classes_sorted if _pol_gap(c) >= 0),
+    key=_pol_gap, reverse=True,
+)[:2]
+
+_valid_pol = [c for c in classes_sorted
+              if not (np.isnan(per_class[c]["pct_pos_ok"])
+                      or np.isnan(per_class[c]["pct_pos_bad"]))]
+correct_more_presence = (
+    bool(_valid_pol)
+    and np.mean([per_class[c]["pct_pos_ok"]  for c in _valid_pol])
+      > np.mean([per_class[c]["pct_pos_bad"] for c in _valid_pol])
+)
+
+_lo = per_class[lowest_acc_cls]
+_hi = per_class[highest_acc_cls]
+
+key_findings_lines = [
+    f"{lowest_acc_cls} ({_lo['acc']:.0f}% accuracy): {_lo['n_correct']}/{_lo['n']} flows "
+    f"correctly classified. "
+    + (
+        f"Correct flows are {_lo['pct_pos_ok']:.0f}% presence-driven (positive Fidelity+)."
+        if not np.isnan(_lo["pct_pos_ok"])
+        else "No correctly-classified flows exist in this run to characterise their "
+             "Fidelity+ polarity."
+    )
+]
+if highest_acc_cls != lowest_acc_cls:
+    key_findings_lines.append(
+        f"{highest_acc_cls} ({_hi['acc']:.0f}% accuracy): the highest-accuracy class in "
+        f"this run ({_hi['n_correct']}/{_hi['n']} flows correct), "
+        + (
+            f"{_hi['pct_pos_ok']:.0f}% presence-driven among correct flows."
+            if not np.isnan(_hi["pct_pos_ok"])
+            else "with no correctly-classified flows to characterise Fidelity+ polarity."
+        )
+    )
+key_findings_block = "\n\n".join(key_findings_lines)
+
+if polarity_gap_classes:
+    pol_lines = []
+    for c in polarity_gap_classes:
+        d = per_class[c]
+        pol_lines.append(
+            f"For {c}: correct flows {d['pct_pos_ok']:.1f}% positive, "
+            f"misclassified {d['pct_pos_bad']:.1f}% positive."
+        )
+    polarity_para = (
+        "Fidelity+ polarity split (correct vs misclassified):\n"
+        + " ".join(pol_lines)
+    )
+else:
+    polarity_para = (
+        "Fidelity+ polarity split (correct vs misclassified):\n"
+        "No class in this run has both correctly-classified and misclassified flows "
+        "to compare."
+    )
+
+if correct_more_presence:
+    correlation_sentence = (
+        "Classification accuracy and SHAP-GSD explainability show a positive "
+        "correlation in this run: correctly classified flows are on average more "
+        "presence-driven (higher positive Fidelity+) than misclassified flows."
+    )
+else:
+    correlation_sentence = (
+        "No clear correlation between classification accuracy and Fidelity+ polarity "
+        "is observed in this run — correctly classified flows are not consistently "
+        "more presence-driven than misclassified flows."
+    )
+
+outlier_sentence = (
+    f"{lowest_acc_cls} ({_lo['acc']:.0f}% accuracy, {_lo['n_correct']}/{_lo['n']} flows "
+    f"correct) is the lowest-accuracy class in this run — with so few correctly "
+    f"classified flows, its explanation-quality estimate is unreliable."
+)
+
+(OUT_DIR / "class_accuracy_fidelity.txt").write_text(f"""\
 Figure reasoning — class_accuracy_fidelity
 ===========================================
 
@@ -227,32 +315,13 @@ Three-panel horizontal-bar chart sorted by mean Fidelity+ ascending (highest at 
 
 KEY FINDINGS
 ------------
-Backdoor (3% accuracy): Only 6/200 flows correctly classified. All 6 correct flows have
-positive Fidelity+ (presence-driven). The 194 misclassifications are spread across all
-other attack classes (not Benign), showing the model confuses Backdoor with other attacks.
+{key_findings_block}
 
-Benign (97.5% accuracy): Despite near-perfect classification, Fidelity+ is near zero for
-all flows (median = 0.000). The model classifies Benign correctly but uses diffuse,
-low-magnitude attributions — no single feature group dominates.
-
-Generic (74% accuracy, 98% presence-driven when correct): Strongly presence-driven when
-the model is right. When misclassified, 34.6% still show positive Fidelity+.
-
-Fidelity+ polarity split (correct vs misclassified):
-The middle panel reveals that correct predictions are consistently more presence-driven
-than misclassifications. For Recon: correct flows 87.5% positive, misclassified 1.1%.
-For Shellcode: correct 82.3%, misclassified 0%. This pattern suggests the model's
-SHAP-GSD attributions are interpretability-consistent — good predictions correlate
-with clearer feature presence signals.
+{polarity_para}
 
 PAPER FRAMING
 -------------
-"Classification accuracy and SHAP-GSD explainability are positively correlated across
-classes. Correctly classified flows are more likely to show strong presence-driven
-attributions (positive Fidelity+), while misclassified flows tend toward absence-driven
-or near-zero attributions. Backdoor (3% accuracy) is the primary outlier — the training
-weighting issue means few Backdoor flows reach the model's Backdoor decision boundary,
-and explanations reflect attribution noise rather than interpretable patterns."
+"{correlation_sentence} {outlier_sentence}"
 
 SUGGESTED FIGURE CAPTION
 -------------------------
@@ -264,7 +333,40 @@ flows with positive Fidelity+ per class; values above 60% indicate presence-driv
 classes, below 40% indicate absence-driven.
 """)
 
-(OUT_DIR / "feature_group_heatmap.txt").write_text("""\
+def _top_groups_for_class(cls: str, k: int = 3) -> list[tuple[str, float]]:
+    n_ok = per_class[cls]["n_correct"]
+    if n_ok == 0:
+        return []
+    gf = per_class[cls]["group_freq"]
+    return [(g, 100 * cnt / n_ok)
+            for g, cnt in sorted(gf.items(), key=lambda x: -x[1])[:k]]
+
+
+class_top_groups = {c: _top_groups_for_class(c) for c in classes_alpha}
+
+_THRESH = 0.80
+classes_over_threshold = [
+    c for c in classes_alpha
+    if per_class[c]["n_correct"] > 0
+    and max(per_class[c]["group_freq"].values(), default=0)
+        / per_class[c]["n_correct"] >= _THRESH
+]
+
+key_findings_groups = []
+for c in classes_alpha:
+    if class_top_groups[c]:
+        groups_str = ", ".join(f"{g} ({pct:.0f}%)" for g, pct in class_top_groups[c])
+        key_findings_groups.append(f"{c}: {groups_str}")
+    else:
+        key_findings_groups.append(f"{c}: no correctly-classified flows in this run")
+key_findings_groups_block = "\n".join(key_findings_groups)
+
+if classes_over_threshold:
+    threshold_desc = ", ".join(classes_over_threshold)
+else:
+    threshold_desc = "none"
+
+(OUT_DIR / "feature_group_heatmap.txt").write_text(f"""\
 Figure reasoning — feature_group_heatmap
 ==========================================
 
@@ -276,43 +378,30 @@ SHAP-GSD attributions. Higher value = group appears more often in top-5.
 
 KEY FINDINGS
 ------------
-Generic:    DNS_QUERY_TYPE (96%), MIN_IP_PKT_LEN (91%), DST_PORT_GROUP (86%)
-            → DNS and small packet size are the primary discriminators
-Recon:      MIN_IP_PKT_LEN (98%), L7_PROTO (96%), DST_PORT_GROUP (92%)
-            → Packet size and destination port dominate (port scan signature)
-Shellcode:  DST_PORT_GROUP (100%), TCP_WIN_MAX_IN (87%), PROTOCOL (82%)
-            → All Shellcode flows use the same port group; TCP window reveals exploit delivery
-Exploits:   MIN_TTL (83%), MAX_TTL (66%)
-            → TTL manipulation is the primary Exploits indicator
-Worms:      NUM_PKTS_1024_TO_1514_BYTES (64%), ICMP_IPV4_TYPE (50%), ICMP_TYPE (50%)
-            → Large packets and ICMP propagation (worm self-replication pattern)
-Backdoor:   DST_PORT_GROUP (100%), L7_PROTO (83%) — but only 6/200 correct
-            → The 6 correct Backdoor flows all use the same port/protocol signature
+{key_findings_groups_block}
 
 ABSENCE-DRIVEN PATTERN
 -----------------------
-For Analysis, Fuzzers, Recon: the groups in the heatmap are not the ones driving
-classification — they appear in top-5 as most-negative attributions. The heatmap
-shows frequency of appearance in top-5, not sign of attribution. A group can appear
-in top-5 because it is strongly negative (absence-driving).
+This heatmap counts top-5 *appearance frequency* only, not attribution *sign*. A
+group can appear frequently in the top-5 while being strongly negative
+(absence-driving) rather than positive. See the Fidelity+ figures
+(class_accuracy_fidelity, fidelity_violins, fidelity_pa_bars) for per-class
+attribution polarity.
 
 PAPER FRAMING
 -------------
-"Feature group attributions are class-consistent: SHAP-GSD identifies the same 2–3
-semantic groups as top attributions in 80–100% of correctly-classified flows for 7 of 10
-classes. This stability, combined with the low mean phi-std stability metric (0.0012 for
-Analysis, 0.0059 for Exploits), confirms that SHAP-GSD explanations are reproducible
-across coalition seeds and flows within the same class."
+"Feature group attributions are class-consistent: SHAP-GSD's single most frequent
+group reaches at least {_THRESH:.0%} appearance in the top-5 attributions of
+correctly-classified flows for {len(classes_over_threshold)} of {len(classes_alpha)}
+classes ({threshold_desc})."
 
 SUGGESTED FIGURE CAPTION
 -------------------------
-Top-20 feature groups in SHAP-GSD top-5 attributions across 10 attack classes
-(correctly classified flows only). Cell value = fraction of flows where the group
+Top-20 feature groups in SHAP-GSD top-5 attributions across {len(classes_alpha)} attack
+classes (correctly classified flows only). Cell value = fraction of flows where the group
 appears in the top-5 most-attributed semantic groups. Note: appearance in top-5 does
 not imply positive attribution — groups driving absence-based classification appear
-with high frequency but negative φ (see main text). Feature groups align with known
-attack semantics: DNS for Generic, packet size and destination port for Recon,
-TTL manipulation for Exploits, ICMP for Worms.
+with high frequency but negative φ (see main text).
 """)
 
 print("\nDone.")

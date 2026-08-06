@@ -113,6 +113,7 @@ _C_POS_BAD = "#80d5cc"   # wrong   + positive fp (lighter teal)
 _C_NEG_OK  = "#e76f51"   # correct + negative fp
 _C_NEG_BAD = "#f4c7b8"   # wrong   + negative fp (lighter coral)
 
+pa_stats: dict[str, dict] = {}
 for i, cls in enumerate(classes_sorted):
     fp = per_class[cls]["fp"]
     ok = per_class[cls]["correct"]
@@ -122,6 +123,9 @@ for i, cls in enumerate(classes_sorted):
     pos_bad = ((fp > 0) & ~ok).sum()
     neg_ok  = ((fp <= 0) & ok).sum()
     neg_bad = ((fp <= 0) & ~ok).sum()
+
+    pa_stats[cls] = dict(pos_ok=pos_ok, pos_bad=pos_bad,
+                          neg_ok=neg_ok, neg_bad=neg_bad, n=n)
 
     # Stack from zero up (positive) and zero down (negative) as fractions
     ax2.bar(i, pos_ok  / n, width=bar_w, bottom=0,                   color=_C_POS_OK)
@@ -155,7 +159,51 @@ plt.close(fig2)
 
 # ── Reasoning files ───────────────────────────────────────────────────────────
 
-(OUT_DIR / "fidelity_violins.txt").write_text("""\
+highest_mean_cls = classes_sorted[-1]
+lowest_mean_cls  = classes_sorted[0]
+highest_std_cls  = max(classes_all, key=lambda c: per_class[c]["fp"].std())
+
+
+def _fp_stats(cls: str) -> dict:
+    fp = per_class[cls]["fp"]
+    return dict(mean=fp.mean(), median=float(np.median(fp)), std=fp.std())
+
+
+_named = set()
+
+
+def _dedupe_note(cls: str) -> str:
+    if cls in _named:
+        return " (same class as above)"
+    _named.add(cls)
+    return ""
+
+
+_s_hi  = _fp_stats(highest_mean_cls)
+hi_note = _dedupe_note(highest_mean_cls)
+key_line_hi = (
+    f"{highest_mean_cls} (mean {_s_hi['mean']:+.3f}, median {_s_hi['median']:+.3f})"
+    f"{hi_note}: the most presence-driven class by mean Fidelity+ in this run."
+)
+
+_s_lo = _fp_stats(lowest_mean_cls)
+lo_note = _dedupe_note(lowest_mean_cls)
+key_line_lo = (
+    f"{lowest_mean_cls} (mean {_s_lo['mean']:+.3f}, std {_s_lo['std']:.3f}){lo_note}: "
+    f"the most absence-driven class by mean Fidelity+ in this run."
+)
+
+_s_std = _fp_stats(highest_std_cls)
+std_note = _dedupe_note(highest_std_cls)
+key_line_std = (
+    f"{highest_std_cls} (std {_s_std['std']:.3f}){std_note}: "
+    f"the widest Fidelity+ spread of any class in this run."
+)
+
+key_findings_lines = [key_line_hi, key_line_lo, key_line_std]
+key_findings_block = "\n\n".join(key_findings_lines)
+
+(OUT_DIR / "fidelity_violins.txt").write_text(f"""\
 Figure reasoning — fidelity_violins
 =====================================
 
@@ -167,42 +215,134 @@ lines show medians.
 
 KEY FINDINGS
 ------------
-Generic (mean +0.362, median +0.519): Strongly right-skewed — most flows have high
-positive Fidelity+. The top DNS and packet-size features are very discriminative.
-
-Shellcode (mean +0.316, std 0.493) and Recon (mean -0.063, std 0.458): Wide, bimodal
-distributions. Some flows within each class have extremely high positive Fidelity+
-(>0.9) while others are strongly negative. This reflects within-class heterogeneity:
-some flows are near the model's Shellcode/Recon decision boundary, others are not.
-
-Benign (mean -0.007, std 0.105): Very tight distribution near zero — consistent with
-the high stability (0.043 mean_phi_std, the outlier in the stability figure). The model
-has no dominant feature group for Benign.
-
-Backdoor (mean +0.008, std 0.104): Misleadingly positive mean. 70% of flows have
-negative Fidelity+ (70% are absence-driven), but the 6 correctly-classified flows have
-very high Fidelity+ (0.32–0.79), pulling the mean positive.
+{key_findings_block}
 
 PAPER FRAMING
 -------------
-"Fidelity+ distributions reveal within-class explanation heterogeneity. Generic shows
-a tight right-skewed distribution (median 0.52), indicating consistently strong presence-
-driven attributions. Shellcode and Recon show bimodal distributions, reflecting flows
-near and far from the model's decision boundary. Benign has a near-degenerate
-distribution concentrated at zero — the model classifies Benign correctly but does so
-without dominant feature attributions, consistent with heterogeneous benign traffic."
+"Fidelity+ distributions reveal within-class explanation heterogeneity. {highest_mean_cls}
+is the most presence-driven class in this run (mean {_s_hi['mean']:+.3f}, median
+{_s_hi['median']:+.3f}). {lowest_mean_cls} is the most absence-driven (mean
+{_s_lo['mean']:+.3f}). {highest_std_cls} shows the widest spread (std {_s_std['std']:.3f}),
+indicating within-class heterogeneity in how strongly individual flows are explained."
 
 SUGGESTED FIGURE CAPTION
 -------------------------
 Per-class Fidelity+ distribution for SHAP-GSD (n ≤ 200 flows per class, sorted by
 mean ascending). Violins show kernel density; diamonds mark means; horizontal lines
 mark medians. Teal = presence-driven (mean ≥ 0), coral = absence-driven (mean < 0).
-Dashed line marks the overall mean (0.107). Generic shows a tight right-skewed
-distribution (median 0.52); Shellcode and Recon show wide bimodal distributions
-(std > 0.45); Benign is near-degenerate at zero.
+Dashed line marks the overall mean ({global_mean:+.3f}). {highest_mean_cls} shows the
+most presence-driven distribution (mean {_s_hi['mean']:+.3f}); {lowest_mean_cls} is the
+most absence-driven (mean {_s_lo['mean']:+.3f}); {highest_std_cls} has the widest spread
+(std {_s_std['std']:.3f}).
 """)
 
-(OUT_DIR / "fidelity_pa_bars.txt").write_text("""\
+def _acc(cls: str) -> float:
+    return 100 * per_class[cls]["correct"].mean()
+
+
+def _presence_frac(cls: str) -> float:
+    s = pa_stats[cls]
+    return (s["pos_ok"] + s["pos_bad"]) / s["n"]
+
+
+most_presence_cls = max(classes_sorted, key=_presence_frac)
+most_absence_cls  = min(classes_sorted, key=_presence_frac)
+lowest_acc_cls    = min(classes_sorted, key=_acc)
+
+_pa_named = set()
+
+
+def _pa_dedupe_note(cls: str) -> str:
+    if cls in _pa_named:
+        return " (same class as above)"
+    _pa_named.add(cls)
+    return ""
+
+
+def _pa_desc(cls: str) -> str:
+    s = pa_stats[cls]
+    n = s["n"]
+    return (
+        f"presence {100*(s['pos_ok']+s['pos_bad'])/n:.0f}% "
+        f"(correct {100*s['pos_ok']/n:.0f}%, misclassified {100*s['pos_bad']/n:.0f}%), "
+        f"absence {100*(s['neg_ok']+s['neg_bad'])/n:.0f}% "
+        f"(correct {100*s['neg_ok']/n:.0f}%, misclassified {100*s['neg_bad']/n:.0f}%)"
+    )
+
+
+mp_note = _pa_dedupe_note(most_presence_cls)
+ma_note = _pa_dedupe_note(most_absence_cls)
+la_note = _pa_dedupe_note(lowest_acc_cls)
+
+key_findings_lines = [
+    f"{most_presence_cls}{mp_note}: the most presence-driven class in this run — "
+    f"{_pa_desc(most_presence_cls)}.",
+]
+if ma_note:
+    key_findings_lines.append(
+        f"{most_absence_cls}{ma_note}: also the most absence-driven class in this run "
+        f"(same underlying flow statistics as above)."
+    )
+else:
+    key_findings_lines.append(
+        f"{most_absence_cls}: the most absence-driven class in this run — "
+        f"{_pa_desc(most_absence_cls)}."
+    )
+if la_note:
+    key_findings_lines.append(
+        f"{lowest_acc_cls}{la_note} ({_acc(lowest_acc_cls):.0f}% accuracy): also the "
+        f"lowest-accuracy class in this run (same underlying flow statistics as above)."
+    )
+else:
+    key_findings_lines.append(
+        f"{lowest_acc_cls} ({_acc(lowest_acc_cls):.0f}% accuracy): the "
+        f"lowest-accuracy class in this run — {_pa_desc(lowest_acc_cls)}."
+    )
+key_findings_block = "\n\n".join(key_findings_lines)
+
+# Aggregate correctness-vs-polarity check across all classes' flows in this run.
+_agg_pos_ok  = sum(pa_stats[c]["pos_ok"]  for c in classes_sorted)
+_agg_pos_bad = sum(pa_stats[c]["pos_bad"] for c in classes_sorted)
+_agg_neg_ok  = sum(pa_stats[c]["neg_ok"]  for c in classes_sorted)
+_agg_neg_bad = sum(pa_stats[c]["neg_bad"] for c in classes_sorted)
+_agg_n_ok    = _agg_pos_ok + _agg_neg_ok
+_agg_n_bad   = _agg_pos_bad + _agg_neg_bad
+_presence_frac_ok  = _agg_pos_ok  / _agg_n_ok  if _agg_n_ok  else float("nan")
+_presence_frac_bad = _agg_pos_bad / _agg_n_bad if _agg_n_bad else float("nan")
+correctness_correlates = (
+    not np.isnan(_presence_frac_ok) and not np.isnan(_presence_frac_bad)
+    and _presence_frac_ok > _presence_frac_bad
+)
+
+if correctness_correlates:
+    correlation_sentence = (
+        "The polarity breakdown shows that explanation quality (positive Fidelity+) "
+        f"is associated with prediction correctness in this run: correctly classified "
+        f"flows are presence-driven {100*_presence_frac_ok:.0f}% of the time, versus "
+        f"{100*_presence_frac_bad:.0f}% for misclassified flows."
+    )
+else:
+    correlation_sentence = (
+        "No clear association between explanation polarity and prediction correctness "
+        "is observed in this run."
+    )
+
+exception_sentence = (
+    f"{lowest_acc_cls} has the lowest accuracy in this run "
+    f"({_acc(lowest_acc_cls):.0f}%, {pa_stats[lowest_acc_cls]['n']} flows)."
+)
+
+if most_presence_cls == most_absence_cls:
+    caption_class_sentence = (
+        f"The model produces a single dominant polarity in this run."
+    )
+else:
+    caption_class_sentence = (
+        f"Correctly classified flows are predominantly presence-driven for "
+        f"{most_presence_cls}, and predominantly absence-driven for {most_absence_cls}."
+    )
+
+(OUT_DIR / "fidelity_pa_bars.txt").write_text(f"""\
 Figure reasoning — fidelity_pa_bars
 =====================================
 
@@ -216,41 +356,18 @@ Classes are sorted by mean Fidelity+ ascending (most absence-driven at left).
 
 KEY FINDINGS
 ------------
-Backdoor: Almost entirely below zero for misclassified flows (70% absence-driven),
-with a tiny positive sliver from the 6 correct flows. The bar is dominated by
-coral (absence), consistent with Backdoor being absence-driven via missing DNS
-and L7 protocol features.
-
-Analysis: 82.5% correct, but split ~50/50 between presence and absence even for
-correct flows. The absence-driven signal (missing ephemeral source ports) is the
-primary driver.
-
-Generic: Near-entirely presence-driven correct (dark teal dominates above axis).
-The few misclassified Generic flows still show some teal (positive Fidelity+),
-suggesting Generic features are present but point to the wrong class.
-
-Recon: Equal split above/below for correct flows (87.5% are presence-driven, 1.1%
-for wrong). The few wrong Recon flows are almost entirely absence-driven.
-
-Benign: About 40% presence-driven correct + 58% absence-driven correct — Benign
-is borderline. The model correct classifies it without a clear directional signal.
+{key_findings_block}
 
 PAPER FRAMING
 -------------
-"The polarity breakdown shows that explanation quality (positive Fidelity+) strongly
-correlates with prediction correctness for most classes. Misclassified flows cluster
-near the negative Fidelity+ regime (absence-driven), suggesting the model's boundary
-is ill-defined for those samples. The exception is Backdoor, where both correct and
-incorrect flows show diffuse attribution due to near-chance classification accuracy."
+"{correlation_sentence} {exception_sentence}"
 
 SUGGESTED FIGURE CAPTION
 -------------------------
 Fidelity+ polarity × prediction correctness per class (n ≤ 200 flows, sorted by mean
 Fidelity+ ascending). Bars above zero = presence-driven (positive Fidelity+); bars
 below zero = absence-driven (negative Fidelity+). Within each direction, dark shading
-= correctly classified, light shading = misclassified. Correctly classified flows are
-predominantly presence-driven for Generic, Recon, and Shellcode; misclassified flows
-collapse to absence-driven or near-zero across almost all classes.
+= correctly classified, light shading = misclassified. {caption_class_sentence}
 """)
 
 print("\nDone.")

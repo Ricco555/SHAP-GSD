@@ -195,7 +195,30 @@ plt.close(fig)
 
 # ── Save reasoning ─────────────────────────────────────────────────────────────
 
-reasoning = """\
+fidelity_leaders = sorted(classes, key=lambda c: -per_class[c]["fidelity_plus"])[:2]
+
+fm_vals = [per_class[c]["fidelity_minus"] for c in classes]
+fm_min, fm_max = min(fm_vals), max(fm_vals)
+
+green_classes = sorted((c for c in classes if per_class[c]["stability"] <= 0.010),
+                        key=lambda c: per_class[c]["stability"])
+amber_classes = sorted((c for c in classes if 0.010 < per_class[c]["stability"] <= 0.025),
+                        key=lambda c: per_class[c]["stability"])
+red_classes   = sorted((c for c in classes if per_class[c]["stability"] > 0.025),
+                        key=lambda c: -per_class[c]["stability"])
+
+stability_outlier_cls = max(classes, key=lambda c: per_class[c]["stability"])
+
+
+def _band_desc(band_classes: list) -> str:
+    if not band_classes:
+        return "no classes fall in this band"
+    return ", ".join(f"{c} ({per_class[c]['stability']:.4f})" for c in band_classes)
+
+
+leaders_desc = " and ".join(fidelity_leaders)
+
+reasoning = f"""\
 Figure reasoning — table2_fidelity_stability
 =============================================
 
@@ -203,66 +226,59 @@ WHY THIS LAYOUT
 ---------------
 The diverging Fidelity+ chart is doing real argumentative work. The teal/coral
 split immediately encodes the "presence-driven vs absence-driven" distinction
-from the methodology — readers absorb the five-class split before reading a
-word. Classes are sorted by Fidelity+ descending so Generic and Shellcode lead,
-which matches their dominant SHAP values in the case studies.
+from the methodology — readers absorb the class split before reading a
+word. Classes are sorted by Fidelity+ descending so {leaders_desc} lead.
 
 WHY FIDELITY- IS OMITTED
 -------------------------
-Fidelity− was left out of the figure. Given its tight range (−0.02 to 0.11)
-and mostly-consistent direction, it adds little visual insight beyond what the
-table already says. One sentence in the caption covers it without a third chart
-competing for space:
+Fidelity− was left out of the figure. Given its tight range ({fm_min:.2f} to
+{fm_max:.2f}) and mostly-consistent direction, it adds little visual insight
+beyond what the table already says. One sentence in the caption covers it
+without a third chart competing for space:
 
-  "Fidelity− was 0.03–0.11 across most classes, indicating top-5 groups are
-   compact and sufficient."
+  "Fidelity− was {fm_min:.2f}–{fm_max:.2f} across most classes, indicating
+   top-5 groups are compact and sufficient."
 
 STABILITY COLOUR BANDS
 -----------------------
 Stability is colour-coded in three bands:
 
-  Green  (≤ 0.010) — near-deterministic, dominated by Analysis (0.0012)
-                      and Exploits (0.0059). The explanation is highly
-                      consistent across coalition seeds — publishable claim.
+  Green  (≤ 0.010) — near-deterministic. {_band_desc(green_classes)}. The
+                      explanation is highly consistent across coalition seeds.
 
-  Amber  (≤ 0.025) — stable. Backdoor (0.011), DoS (0.013), Generic (0.015),
-                      Recon (0.024). Acceptable variance for a sampling-based
-                      Shapley estimator at nsamples=256.
+  Amber  (≤ 0.025) — stable. {_band_desc(amber_classes)}.
 
-  Red    (> 0.025) — variable. Benign (0.043) and Shellcode (0.037) are the
-                     two outliers.
+  Red    (> 0.025) — variable. {_band_desc(red_classes)}.
 
-BENIGN OUTLIER (0.043)
-----------------------
-The Benign stability outlier is the point to call out in the paper. It reflects
-heterogeneous benign traffic with no dominant feature signal: the model assigns
-low-confidence, diffuse feature attributions that shift meaningfully between
-coalition seeds. This is correct behaviour — it is not a flaw in the explainer
-but evidence that benign traffic is genuinely harder to summarise in k=5 groups.
-The caption or text should read something like:
-
-  "Benign traffic exhibits the highest instability (0.043), consistent with its
-   heterogeneous mix of protocols and flow patterns; no single feature group
-   dominates, so coalition-sampled attributions are sensitive to seed choice."
+STABILITY OUTLIER ({stability_outlier_cls}, {per_class[stability_outlier_cls]['stability']:.3f})
+----------------------------------------------------------------------
+{stability_outlier_cls} shows the most cross-seed variance of any class in this
+run. This warrants qualitative investigation before asserting why — it may
+reflect genuinely harder-to-summarise traffic for that class, or it may be an
+artefact of a small explanation sample; the numbers alone do not distinguish
+the two.
 
 OVERALL DASHED LINE
 -------------------
-Both panels carry a dashed vertical line at the overall mean (Fidelity+ 0.107,
-Stability 0.019). This gives the reader an immediate reference: classes above
-the line are better-than-average, classes below are worse. It also visually
-anchors the caption statistics without requiring the reader to locate the number
-in the table.
+Both panels carry a dashed vertical line at the overall mean (Fidelity+
+{overall['fidelity_plus']:.3f}, Stability {overall['stability']:.3f}). This
+gives the reader an immediate reference: classes above the line are
+better-than-average, classes below are worse. It also visually anchors the
+caption statistics without requiring the reader to locate the number in the
+table.
 
 SUGGESTED PAPER CAPTION
 ------------------------
-"Fidelity+ and Stability of SHAP-GSD feature-group explanations across 10
-classes (k = 5, n = 1,764 flows, 3 coalition seeds). Fidelity+ < 0 indicates
-absence-driven classes where top-5 attributed groups include negative-φ
-features; positive values indicate presence-driven classes. Fidelity− was
-0.03–0.11 across most classes, indicating top-5 groups are compact and
-sufficient. Stability reflects mean per-group φ standard deviation across
-coalition sampling seeds; lower is more stable. The Benign outlier (0.043)
-reflects heterogeneous traffic with no dominant feature signal."
+"Fidelity+ and Stability of SHAP-GSD feature-group explanations across
+{len(classes)} classes (k = {summary['top_k']}, n = {overall['n_flows']:,}
+flows, 3 coalition seeds). Fidelity+ < 0 indicates absence-driven classes
+where top-5 attributed groups include negative-φ features; positive values
+indicate presence-driven classes. Fidelity− was {fm_min:.2f}–{fm_max:.2f}
+across most classes, indicating top-5 groups are compact and sufficient.
+Stability reflects mean per-group φ standard deviation across coalition
+sampling seeds; lower is more stable. {stability_outlier_cls}
+({per_class[stability_outlier_cls]['stability']:.3f}) shows the most
+cross-seed variance of any class in this run."
 
 SUGGESTED PLACEMENT
 -------------------
