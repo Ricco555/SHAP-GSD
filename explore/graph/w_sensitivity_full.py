@@ -9,8 +9,23 @@ What it shows:
     1. Median IAT vertical red dashed line.
     2. Saturation box at W = 1800 s.
     3. 50% majority threshold horizontal dashed line.
-    4. Cross-dataset prediction textbox (amber, bottom-right).
+    4. Observed-values textbox (amber, bottom-right) — this dataset's own
+       coverage/mean-φ_T at W=60s, computed live. NOT a cross-dataset
+       prediction (see below).
     5. Point value labels on every marker.
+
+This script is reused across datasets. It previously baked a specific,
+named cross-dataset prediction into the figure image and into most of the
+.txt reasoning text ("On IoT datasets (NF-ToN-IoT, NF-BoT-IoT) ... φ_T is
+expected to dominate") — written when only UNSW-NB15 existed, never
+recomputed once NF-BoT-IoT-v3 data existed to actually test it. That
+prediction is now measured false on NF-BoT-IoT-v3 (63.3% in-window at
+W=60s, not >80%; φ_T is 0.00-0.001% of total attribution, not dominant —
+final/review01/results_update_tracker.md §10b). Fixed: no other dataset is
+named or predicted about anywhere in this script's output; every sentence
+in KEY FINDINGS/PAPER FRAMING/SUGGESTED FIGURE CAPTION is computed from
+this run's own gap_stats.json/W*_temporal.csv, describing only what was
+actually measured for whichever dataset is currently active.
 
 Panels:
   fig, ax1 — single axis with twinx(), figsize=(9, 5.5)
@@ -55,6 +70,7 @@ _GRAY    = "#888888"
 
 def main() -> None:
     # ------------------------------------------------------------------ data
+    dataset_name = _P["dataset_name"]
     gap_stats = json.loads((ABL_DIR / "gap_stats.json").read_text())
     Ws        = [g["W_s"] for g in gap_stats]
     pct_cov   = [g["pct_flows_with_inwindow"] for g in gap_stats]
@@ -116,9 +132,13 @@ def main() -> None:
     ax1.axhline(y=50, color=_GRAY, lw=1.2, ls="--", alpha=0.6)
     ax1.text(55, 51.5, "50% majority", color=_GRAY, fontsize=LABEL_FS - 2)
 
-    # --- Annotation 4: Cross-dataset prediction textbox ---
+    # --- Annotation 4: Observed values at W=60s (this dataset only — no
+    # cross-dataset prediction; see module docstring) ---
+    idx_60 = list(Ws).index(60.0)
     ax1.text(0.98, 0.08,
-             "Cross-dataset prediction:\nIoT IAT ≈ O(1 s)\n→ > 80% in-window at W = 60 s\n→ φ_T expected to dominate",
+             f"At W = 60 s: {cov_arr[idx_60]:.1f}% in-window,\n"
+             f"mean top-φ_T = {shap_arr[idx_60]:.5f}\n"
+             f"({dataset_name})",
              transform=ax1.transAxes, fontsize=LABEL_FS - 1.5,
              ha="right", va="bottom",
              bbox=dict(boxstyle="round,pad=0.35", fc="#fff8e1", ec=_AMBER, alpha=0.92))
@@ -150,16 +170,25 @@ def main() -> None:
     print(f"Saved {OUT_DIR / STEM}.{{pdf,png}}")
 
     # ------------------------------------------------------------------ txt
+    max_W = Ws_arr[-1]
+    cov_at_max = cov_arr[-1]
+    shap_at_max = shap_arr[-1]
+    iat_exceeds_max_W = median_gap > max_W
+    # No fixed threshold for "near-zero" is imposed here — the number is
+    # reported and the reader judges it, per this script's own
+    # GENERATOR NOTE precedent (attribution_decomp.py: report computed
+    # values, do not assert an interpretation the data doesn't force).
+
     lines = [
         "Figure reasoning — w_sensitivity_annotated",
         "=" * 44, "",
         "WHAT THE FIGURE SHOWS",
         "----------------------",
-        "Dual-axis line plot showing how temporal coverage (% of UNSW-NB15 test flows that",
-        "have at least one in-window temporal neighbor, left axis teal) and mean top-φ_T",
-        "(right axis green dashed) vary as the temporal window W grows from 60 to 3600 s.",
-        "A vertical dotted red line marks the median inter-arrival time (5168 s), which lies",
-        "far to the right of all tested W values.",
+        f"Dual-axis line plot showing how temporal coverage (% of {dataset_name} test flows",
+        "that have at least one in-window temporal neighbor, left axis teal) and mean top-φ_T",
+        "(right axis green dashed) vary as the temporal window W grows from",
+        f"{int(Ws_arr[0])} to {int(max_W)} s. A vertical dotted red line marks the median",
+        f"inter-arrival time ({median_gap:.0f} s).",
         "",
         "KEY FINDINGS",
         "------------",
@@ -171,35 +200,34 @@ def main() -> None:
     lines += [
         "",
         f"  Saturation: Δφ_T from W=1800s → W=3600s = {delta_phi:+.5f}",
-        f"  Median IAT = {median_gap:.1f} s >> largest tested W (3600 s).",
+        f"  Median IAT = {median_gap:.1f} s "
+        f"{'>>' if iat_exceeds_max_W else '<'} largest tested W ({max_W:.0f} s).",
         "",
-        "  The temporal null result is a dataset property: UNSW-NB15 flows arrive at",
-        "  large inter-arrival gaps (median 5168 s). Even at W=3600s only 39.4% of flows",
-        "  have any in-window neighbor, and the mean φ_T plateaus at ~0.032 — near-zero",
-        "  compared to φ_F (~0.3–0.5) and φ_N (~0.1–0.3).",
+        f"  At the largest tested window (W={max_W:.0f}s): {cov_at_max:.1f}% of {dataset_name}",
+        f"  flows have an in-window neighbor, and mean top-φ_T is {shap_at_max:.5f}.",
+    ]
+
+    lines += [
         "",
         "PAPER FRAMING",
         "-------------",
-        "The W-sensitivity analysis confirms that temporal neighbor attribution (φ_T) is a",
-        "genuine null result on UNSW-NB15, not a modelling artefact. The median inter-arrival",
-        "time of 5168 s means that at any practical window size flows almost never share a",
-        "temporal neighborhood. φ_T saturates between W=1800 s and W=3600 s (Δ=+0.0005),",
-        "indicating that fan-out capacity (k=25) is not the limiting factor — temporal sparsity",
-        "is. On IoT datasets (NF-ToN-IoT, NF-BoT-IoT) where flows burst at sub-second",
-        "intervals, φ_T is expected to dominate, making SHAP-GSD's temporal granularity",
-        "valuable for cross-dataset deployment.",
+        f"On {dataset_name}, temporal coverage reaches {cov_at_max:.1f}% and mean top-φ_T reaches",
+        f"{shap_at_max:.5f} by the largest tested window (W={max_W:.0f}s). φ_T saturates between",
+        f"W=1800s and W=3600s (Δ={delta_phi:+.5f}), i.e. widening the window past 1800s does not",
+        "materially change the temporal attribution magnitude on this dataset. This script is",
+        "reused across datasets and reports only what this run's own data shows — no claim is",
+        "made here about whether this generalizes to any other dataset; where a comparison",
+        "across datasets is needed, see final/review01/results_update_tracker.md's cross-dataset",
+        "table instead of this per-run figure.",
         "",
         "SUGGESTED FIGURE CAPTION",
         "-------------------------",
-        "W-sensitivity of the SHAP-GSD temporal component on UNSW-NB15. Left axis (teal):",
+        f"W-sensitivity of the SHAP-GSD temporal component on {dataset_name}. Left axis (teal):",
         "percentage of test flows with at least one in-window temporal neighbor at each window",
         "size W. Right axis (green dashed): mean top-φ_T per flow. The red dotted line marks",
-        "the median inter-arrival time (5168 s). φ_T saturates between W = 1800 s and",
-        "W = 3600 s (Δ = +0.0005), confirming that temporal sparsity — not fan-out capacity —",
-        "is the limiting factor. At W = 60 s only 1.25% of flows have in-window neighbors,",
-        "explaining the near-zero φ_T observed across all attack classes (Figure 4c). The",
-        "amber inset projects that on IoT datasets with sub-second inter-arrival times the",
-        "temporal component would dominate.",
+        f"the median inter-arrival time ({median_gap:.0f} s). φ_T saturates between W = 1800 s and",
+        f"W = 3600 s (Δ = {delta_phi:+.5f}). At W = 60 s, {cov_arr[list(Ws).index(60.0)]:.1f}% of flows",
+        f"have an in-window neighbor and mean top-φ_T is {shap_arr[list(Ws).index(60.0)]:.5f}.",
     ]
 
     txt_path = OUT_DIR / f"{STEM}.txt"
