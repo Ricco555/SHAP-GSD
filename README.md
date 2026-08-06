@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.13**
+**Version 2.2.15**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -122,6 +122,32 @@ count — with a verified exact-vs-sampled coalition-enumeration measurement
 instead. None of these affect model training, evaluation, or the
 underlying SHAP values themselves; they affect only how existing numbers
 are selected, labelled, and narrated in generated figures and reports.
+
+As of `v2.2.15`, `main` fixes a class of hardcoded-narrative defects the
+`v2.2.13` pass missed: `method_comparison_figure.py`, `shap_scatter.py`,
+`arg1_semantic_grouping.py`, and `attribution_decomp.py` crashed outright
+on any dataset with a class that has zero explained flows (a case that
+cannot occur on NF-UNSW-NB15-v3, so it was never exercised before a second
+dataset existed); `class_analysis.py`, `fidelity_distributions.py`, and
+`table2_figure.py` did not crash but silently wrote entirely static
+UNSW-describing narrative text into any other dataset's output directory
+regardless of the data actually being processed; and
+`w_sensitivity_full.py` baked a specific, named cross-dataset prediction
+directly into its figure image and reasoning text ("IoT-scale datasets
+would show >80% in-window temporal coverage and dominant phi_T"), written
+before a second dataset existed to test it and now measurably false on
+NF-BoT-IoT-v3 (63.3% coverage, phi_T at 0.00-0.001% of total attribution).
+All eight scripts now compute their narrative content live from the run
+being rendered, matching the already-fixed scripts from `v2.2.13`, and
+were verified against both NF-UNSW-NB15-v3 and NF-BoT-IoT-v3 before and
+after the fix. Also added: `class_coverage_analysis.py`, a single
+reproducible tool run identically against all four Paper-3 NetFlow
+datasets to report per-class row coverage across train/val/test splits
+(replacing several independently-written, ad hoc per-dataset
+investigations); and `class_coverage_split_sweep.py`, a companion tool
+that sweeps 789 candidate split fractions per dataset to distinguish a
+capture property from a merely-untuned split. None of these changes
+affect model training, evaluation, or the underlying SHAP values.
 
 ---
 
