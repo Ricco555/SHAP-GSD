@@ -136,7 +136,7 @@ def main() -> None:
     # cross-dataset prediction; see module docstring) ---
     idx_60 = list(Ws).index(60.0)
     ax1.text(0.98, 0.08,
-             f"At W = 60 s: {cov_arr[idx_60]:.1f}% in-window,\n"
+             f"At W = 60 s: {cov_arr[idx_60]:.2f}% in-window,\n"
              f"mean top-φ_T = {shap_arr[idx_60]:.5f}\n"
              f"({dataset_name})",
              transform=ax1.transAxes, fontsize=LABEL_FS - 1.5,
@@ -147,7 +147,7 @@ def main() -> None:
     offsets = [(-18, 8), (5, 8), (5, -14), (5, 8)]   # (dx_pt, dy_pt) alternating
     for i, (w, cov, sm) in enumerate(zip(Ws_arr, cov_arr, shap_arr)):
         dx, dy = offsets[i % len(offsets)]
-        ax1.annotate(f"{cov:.1f}%", xy=(w, cov),
+        ax1.annotate(f"{cov:.2f}%", xy=(w, cov),
                      xytext=(dx, dy), textcoords="offset points",
                      fontsize=LABEL_FS - 2, color=_TEAL)
         ax2.annotate(f"{sm:.4f}", xy=(w, sm),
@@ -203,7 +203,7 @@ def main() -> None:
         f"  Median IAT = {median_gap:.1f} s "
         f"{'>>' if iat_exceeds_max_W else '<'} largest tested W ({max_W:.0f} s).",
         "",
-        f"  At the largest tested window (W={max_W:.0f}s): {cov_at_max:.1f}% of {dataset_name}",
+        f"  At the largest tested window (W={max_W:.0f}s): {cov_at_max:.2f}% of {dataset_name}",
         f"  flows have an in-window neighbor, and mean top-φ_T is {shap_at_max:.5f}.",
     ]
 
@@ -211,7 +211,7 @@ def main() -> None:
         "",
         "PAPER FRAMING",
         "-------------",
-        f"On {dataset_name}, temporal coverage reaches {cov_at_max:.1f}% and mean top-φ_T reaches",
+        f"On {dataset_name}, temporal coverage reaches {cov_at_max:.2f}% and mean top-φ_T reaches",
         f"{shap_at_max:.5f} by the largest tested window (W={max_W:.0f}s). φ_T saturates between",
         f"W=1800s and W=3600s (Δ={delta_phi:+.5f}), i.e. widening the window past 1800s does not",
         "materially change the temporal attribution magnitude on this dataset. This script is",
@@ -226,7 +226,7 @@ def main() -> None:
         "percentage of test flows with at least one in-window temporal neighbor at each window",
         "size W. Right axis (green dashed): mean top-φ_T per flow. The red dotted line marks",
         f"the median inter-arrival time ({median_gap:.0f} s). φ_T saturates between W = 1800 s and",
-        f"W = 3600 s (Δ = {delta_phi:+.5f}). At W = 60 s, {cov_arr[list(Ws).index(60.0)]:.1f}% of flows",
+        f"W = 3600 s (Δ = {delta_phi:+.5f}). At W = 60 s, {cov_arr[list(Ws).index(60.0)]:.2f}% of flows",
         f"have an in-window neighbor and mean top-φ_T is {shap_arr[list(Ws).index(60.0)]:.5f}.",
     ]
 

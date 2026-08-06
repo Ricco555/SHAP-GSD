@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
 _P = paths()
+dataset_name  = _P["dataset_name"]
 OUT_DIR       = _P["figures"] / "explore"
 ABLATION_DIR  = _P["w_ablation"]
 GAP_STATS     = ABLATION_DIR / "gap_stats.json"
@@ -79,7 +80,7 @@ ax1.semilogx(Ws, pct_edges, color=_CORAL, marker=marker, linewidth=1.5,
              markersize=6, linestyle="--", label="% edges in-window")
 
 for W, yf, ye in zip(Ws, pct_flows, pct_edges):
-    ax1.annotate(f"{yf:.1f}%", (W, yf), textcoords="offset points",
+    ax1.annotate(f"{yf:.2f}%", (W, yf), textcoords="offset points",
                  xytext=(4, 4), fontsize=LABEL_FS - 2, color=_TEAL)
     ax1.annotate(f"{ye:.2f}%", (W, ye), textcoords="offset points",
                  xytext=(4, -10), fontsize=LABEL_FS - 2, color=_CORAL)
@@ -127,15 +128,15 @@ Figure reasoning — w_ablation
 WHAT THE FIGURE SHOWS
 ---------------------
 Two log-x panels showing how in-window coverage (left) and temporal SHAP
-magnitude (right) scale with the temporal window W on NF-UNSW-NB15-v3.
+magnitude (right) scale with the temporal window W on {dataset_name}.
 
 W VALUES TESTED:  {Ws}
 
 COVERAGE (LEFT PANEL)
 ----------------------
-The median neighbour gap is {median_gap:.0f}s. At W=60s, only {pct_flows[0]:.1f}% of
+The median neighbour gap is {median_gap:.0f}s. At W=60s, only {pct_flows[0]:.2f}% of
 flows have any in-window neighbors. Even at W=3600s (one hour), only
-{pct_flows[-1]:.1f}% of flows have in-window neighbors and only {pct_edges[-1]:.2f}% of
+{pct_flows[-1]:.2f}% of flows have in-window neighbors and only {pct_edges[-1]:.2f}% of
 neighbour edges fall inside the window.
 
 The vertical dotted line marks the median gap, showing that most of the
@@ -146,8 +147,6 @@ TEMPORAL SHAP MAGNITUDE (RIGHT PANEL)
 Mean top temporal Shapley value at W=60s:   {shap_means[0]:.6f}
 Mean top temporal Shapley value at W=3600s: {shap_means[-1]:.6f}
 Max  top temporal Shapley value at W=3600s: {shap_maxs[-1]:.6f}
-
-For reference, typical top-feature-group φ magnitude is O(0.1-0.5).
 
 SUGGESTED PAPER PLACEMENT
 --------------------------
