@@ -1,0 +1,19 @@
+# NF-ToN-IoT-v3 experiment — overrides default.yaml
+# Untuned starter config (Paper 3, dataset run in progress). Revisit balancer/
+# model overrides once this dataset has been through its own tuning pass,
+# the way configs/experiment_unsw.yaml was.
+data:
+  csv_path: "data/NF-ToN-IoT-v3.csv"
+  train_frac: 0.6
+  val_frac: 0.3
+
+run:
+  dir: "runs/nf_ton_iot_v3"
+
+model:
+  early_stopping_metric: "composite"   # imbalanced multi-class NIDS dataset — see configs/experiment_unsw.yaml's
+                                         # rationale; minority_class_threshold/composite_minority_weight/patience
+                                         # left at configs/default.yaml's defaults pending this dataset's own
+                                         # Phase 3 tuning pass (do not copy UNSW's tuned values here)
+
+seed: 42

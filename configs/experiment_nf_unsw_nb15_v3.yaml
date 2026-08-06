@@ -1,0 +1,50 @@
+# NF-UNSW-NB15-v3 experiment — overrides default.yaml
+#
+# Adopted config: armRb balancer (R1 winner, macro_f1_regression_investigation.md
+# §6-§7) + R3-S2 split fractions (the confirmed, statistically significant
+# improvement over armRb alone, §7.6 — 5-seed mean 0.4684 vs 0.4569, p=0.049).
+# Matches configs/experiment_nf_unsw_nb15_v3_r3_s2.yaml's settings; kept as a
+# separate file, pointed at the canonical runs/nf_unsw_nb15_v3 run.dir, purely
+# for forward-looking convenience so a future `run_dataset.py --csv
+# NF-UNSW-NB15-v3.csv` resolves to the adopted config by default. The actual
+# citable result lives in the isolated runs/nf_unsw_nb15_v3_r3_s2/ run.dir
+# (job 1008442, then the l1_reg-fix rerun) — this file does not alias or
+# duplicate that data, it is a config for a genuinely fresh future run.
+#
+# The historical pre-armRb control run (old inverse_freq balancer, original
+# 60/30/10 split) previously lived at runs/nf_unsw_nb15_v3 and has been
+# archived to runs/nf_unsw_nb15_v3_control (owner decision: kept for
+# comparison, not deleted — see local/handoff.md §8o/§8w) to free this
+# canonical run.dir name for the adopted config.
+data:
+  csv_path: "data/NF-UNSW-NB15-v3.csv"
+  train_frac: 0.644821
+  val_frac: 0.174783
+
+preprocessing:
+  spearman_threshold: 0.995
+  ohe_min_frequency: 0.001
+  ohe_handle_unknown: "ignore"
+
+balancer:
+  strategy: "oversample"
+  min_class_ratio: 0.0
+  max_majority_ratio: 5.0
+  seed: 42
+  class_weight_method: "effective_num"
+  effective_num_beta: 0.9999
+  class_weight_max_clamp: null
+
+reproducibility:
+  model_seed: 90
+
+model:
+  early_stopping_metric: "composite"
+  minority_class_threshold: 5000
+  composite_minority_weight: 0.5
+  patience: 20
+
+seed: 42
+
+run:
+  dir: "runs/nf_unsw_nb15_v3"
