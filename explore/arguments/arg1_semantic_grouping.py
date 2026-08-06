@@ -125,6 +125,7 @@ def main() -> None:
     class_scores  = {}   # cls -> list[int] concentration scores
     class_top1    = {}   # cls -> Counter of top-1 group names
     cat_phi_all   = {c: [] for c in CATEGORIES}  # cat -> list of mean |φ| per flow
+    empty_classes: list[str] = []
 
     for cls_dir in sorted(EXP_DIR.iterdir()):
         if not cls_dir.is_dir():
@@ -148,6 +149,11 @@ def main() -> None:
                 cat = GROUP_TO_CAT.get(name)
                 if cat:
                     cat_phi_all[cat].append(phi_a[i])
+
+        if not scores:
+            empty_classes.append(cls)
+            print(f"  {cls}: 0 explained flows — SKIPPED")
+            continue
 
         class_scores[cls] = scores
         # most common top-1 group
@@ -258,6 +264,11 @@ def main() -> None:
         sign = "presence" if fid > 0 else "absence"
         lines.append(f"  {cls:12s}: mean groups to 80% |φ| = {score:.2f}  "
                      f"top-1 group = {t1}  ({sign}-driven)")
+    if empty_classes:
+        lines += [
+            "",
+            f"  SKIPPED (0 explained flows): {', '.join(sorted(empty_classes))}",
+        ]
     lines += [
         "",
         f"  Concentration to 80% of Σ|φ| (PRIMARY, flow-level, n={n_flows_total}): {flow_level_mean_score:.2f} of {n_groups_total} groups",

@@ -86,13 +86,21 @@ def main() -> None:
 
     # Compute per-class mean fractions
     rows = []  # (cls, frac_f, frac_t, frac_n, mean_phi_t)
+    empty_classes = []
     for cls, d in class_data.items():
+        if d["phi_f"].shape[0] == 0:
+            empty_classes.append(cls)
+            print(f"  {cls}: 0 explained flows — SKIPPED")
+            continue
         totals = d["phi_f"] + d["phi_t"] + d["phi_n"]
         safe = np.where(totals > 0, totals, 1.0)
         frac_f = (d["phi_f"] / safe).mean()
         frac_t = (d["phi_t"] / safe).mean()
         frac_n = (d["phi_n"] / safe).mean()
         rows.append((cls, frac_f, frac_t, frac_n, d["phi_t"].mean()))
+    if empty_classes:
+        print(f"  NOTE: {len(empty_classes)} class(es) skipped for zero "
+              f"explained flows: {', '.join(empty_classes)}")
 
     # Sort by φ_T fraction descending
     rows.sort(key=lambda r: r[2], reverse=True)
@@ -132,6 +140,14 @@ def main() -> None:
              rf"mean $\varphi_T$ fraction across classes: {overall_ft_pct:.3f}%",
              transform=ax1.transAxes, fontsize=7.5, va="bottom",
              bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_GRAY, alpha=0.85))
+
+    if empty_classes:
+        ax1.text(0.02, 0.98,
+                 f"skipped (0 flows): {', '.join(sorted(empty_classes))}",
+                 transform=ax1.transAxes, fontsize=7, va="top",
+                 color="#b23b3b",
+                 bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                           ec="#b23b3b", alpha=0.85))
 
     # --- Right: φ_T violin per class ---
     phi_t_per_class = [class_data[cls]["phi_t"] for cls in classes]
@@ -181,6 +197,11 @@ def main() -> None:
         lines.append(f"  {cls:12s}: phi_F={ff:.3f} ({ff*100:.1f}%)  "
                      f"phi_T={ft:.5f} ({ft*100:.3f}%)  "
                      f"phi_N={fn:.3f} ({fn*100:.1f}%)")
+    if empty_classes:
+        lines += [
+            "",
+            f"SKIPPED (0 explained flows): {', '.join(sorted(empty_classes))}",
+        ]
 
     overall_ft = frac_t.mean()
     overall_fn = frac_n.mean()

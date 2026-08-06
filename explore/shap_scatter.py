@@ -166,17 +166,30 @@ def draw_beeswarm(
 print("Loading explanation data and feature vectors …")
 all_classes = sorted(d.name for d in EXP_DIR.iterdir() if d.is_dir())
 class_data: dict[str, tuple] = {}
+empty_classes: list[str] = []
 for cls in all_classes:
     shap_mat, feat_mat, gnames = load_class(cls)
+    if shap_mat.shape[0] == 0:
+        empty_classes.append(cls)
+        print(f"  {cls}: 0 flows — SKIPPED (no explained flows for this class)")
+        continue
     class_data[cls] = (shap_mat, feat_mat, gnames)
     print(f"  {cls}: {shap_mat.shape[0]} flows, {shap_mat.shape[1]} groups")
 
-group_names = class_data[all_classes[0]][2]   # same for all classes
+plot_classes = [c for c in all_classes if c not in empty_classes]
+if empty_classes:
+    print(f"  NOTE: {len(empty_classes)} class(es) skipped for zero explained "
+          f"flows: {', '.join(empty_classes)}")
+
+if not plot_classes:
+    print("ERROR: no class has any explained flows — nothing to plot.")
+    sys.exit(1)
+group_names = class_data[plot_classes[0]][2]   # same for all classes
 
 # ── Figure 1: per-class individual beeswarms ─────────────────────────────────
 
 print("Generating per-class beeswarm figures …")
-for cls in all_classes:
+for cls in plot_classes:
     shap_mat, feat_mat, gnames = class_data[cls]
 
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -219,6 +232,15 @@ _COLORS = {
 }
 
 for ax, (cls, (gname, xlabel)) in zip(axes.flat, ABSENCE_DRIVERS.items()):
+    if cls not in class_data:
+        print(f"  {cls}: not present in class_data (absent from this "
+              f"dataset, or 0 explained flows) — SKIPPED in absence-driver "
+              f"panel")
+        ax.axis("off")
+        ax.text(0.5, 0.5, f"{cls}: no data", ha="center", va="center",
+                fontsize=LABEL_FS, color="#999999",
+                transform=ax.transAxes)
+        continue
     shap_mat, feat_mat, gnames = class_data[cls]
 
     grp_idx = gnames.index(gname)
@@ -283,10 +305,18 @@ fig3, axes3 = plt.subplots(nrows, ncols, figsize=(20, 10),
                             gridspec_kw=dict(hspace=0.55, wspace=0.70))
 fig3.subplots_adjust(left=0.06, right=0.97, top=0.95, bottom=0.06)
 
-for ax, cls in zip(axes3.flat, all_classes):
+for ax, cls in zip(axes3.flat, plot_classes):
     shap_mat, feat_mat, gnames = class_data[cls]
     draw_beeswarm(ax, shap_mat, feat_mat, gnames,
                   title=f"{cls}  (n={shap_mat.shape[0]})", top_n=10)
+
+for ax, cls in zip(axes3.flat[len(plot_classes):], empty_classes):
+    ax.axis("off")
+    ax.text(0.5, 0.5, f"{cls}\nno data (0 explained flows)",
+            ha="center", va="center", fontsize=LABEL_FS,
+            color="#999999", transform=ax.transAxes)
+for ax in axes3.flat[len(plot_classes) + len(empty_classes):]:
+    ax.axis("off")
 
 for ext, dpi in (("pdf", 300), ("png", 120)):
     p = OUT_DIR / f"shap_beeswarm_grid.{ext}"

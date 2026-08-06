@@ -151,6 +151,46 @@ losers  = len(losers_list)
 
 n_flows = len(rows_sg)
 
+# Classes where GNNExplainer leads most (most-negative delta), computed
+# live from `deltas` — never hardcoded (specs/49 §3.1). Excludes NaN
+# deltas (classes with an SG fidelity row but no GNNExplainer baseline
+# row, e.g. BoT-IoT's Theft) since a NaN gap cannot be described as
+# "largest".
+gnn_lead_classes = sorted(
+    (c for c in classes_all if not np.isnan(deltas[c])),
+    key=lambda c: deltas[c],
+)[:2]
+if gnn_lead_classes:
+    gnn_lead_desc = " and ".join(gnn_lead_classes)
+    gnn_lead_deltas_str = ", ".join(
+        f"Δ = {deltas[c]:+.3f}" for c in gnn_lead_classes
+    )
+    gap_sentence = (
+        f"The gap is largest for {gnn_lead_desc} ({gnn_lead_deltas_str}), where "
+        f"the top encoded features (e.g. specific packet lengths, TTL values) "
+        f"provide more discriminative information than the group-level "
+        f"aggregation."
+    )
+else:
+    gap_sentence = (
+        "No class has a defined GNNExplainer-vs-SHAP-GSD gap in this run "
+        "(no class has both a SHAP-GSD fidelity row and a GNNExplainer "
+        "baseline row)."
+    )
+
+if winners_list:
+    shap_wins_sentence = (
+        f"For {', '.join(winners_list)}, SHAP-GSD's Fidelity+ exceeds "
+        f"GNNExplainer's — the semantic group structure captures the "
+        f"discriminative signal for these classes well enough that grouping "
+        f"features together does not average out the useful signal."
+    )
+else:
+    shap_wins_sentence = (
+        "No class shows SHAP-GSD Fidelity+ exceeding GNNExplainer's in this "
+        "run."
+    )
+
 reasoning = f"""\
 Figure reasoning — method_comparison_fg
 =========================================
@@ -177,17 +217,11 @@ space, giving it access to fine-grained discriminative signal within each
 semantic group. SHAP-GSD operates at the group level — masking a whole
 group may occlude both the useful and redundant features together.
 
-The gap is largest for Reconnaissance (Δ = {deltas['Reconnaissance']:+.3f}) and Shellcode
-(Δ = {deltas['Shellcode']:+.3f}), where the top encoded features (e.g. specific
-packet lengths, TTL values) provide more discriminative information than
-the group-level aggregation.
+{gap_sentence}
 
-WHY SHAP-GSD WINS FOR DoS AND EXPLOITS
-----------------------------------------
-For DoS and Exploits, the semantic group structure captures the discriminative
-signal well. The grouped attributions (L7_PROTO, RETRANSMITTED_OUT_BYTES,
-MIN_TTL) are the most informative features and the grouping does not average
-out discriminative signal.
+WHY SHAP-GSD WINS FOR SOME CLASSES
+------------------------------------
+{shap_wins_sentence}
 
 THE INTERPRETABILITY TRADE-OFF
 --------------------------------
@@ -216,8 +250,7 @@ mask individual low-level features within each semantic group. SHAP-GSD, by
 design, attributes over 48 analyst-interpretable groups; masking a group
 removes all its features simultaneously. The gap reflects a deliberate
 trade-off: per-group attribution provides directly actionable NIDS
-signatures (e.g., 'retransmission patterns and packet size distinguish
-Exploits') at a measured cost of ~{abs(overall_delta/overall_gnn)*100:.0f}% lower average Fidelity+. For {winners} of
+signatures at a measured cost of ~{abs(overall_delta/overall_gnn)*100:.0f}% lower average Fidelity+. For {winners} of
 {n_classes} classes ({', '.join(winners_list)}), SHAP-GSD Fidelity+ exceeds GNNExplainer,
 suggesting that semantic grouping actively helps when the discriminative
 signal spans coherent feature families rather than isolated raw statistics."
