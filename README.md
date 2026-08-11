@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.15**
+**Version 2.2.16**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -47,81 +47,39 @@ granularities and an unfiltered stratified case-study sampling mode (see
 Phase 8 and Exploration figures below) — **recommended for any new run**, but
 not part of the numbers already reported in the submitted paper.
 
-As of `v2.2.9`, `main` additionally contains **results-changing correctness
-fixes** to the four baseline-explainer wrappers (GraphSVX, GNNShap,
-PGExplainer, EdgeSHAPer) used for Table 2's baseline comparison: a shared
-embedding-construction defect meant these baselines could not assign
-importance to any neighbourhood node (only the two target-edge endpoints had
-real embeddings), so their reported attribution and fidelity numbers on
-`main` will differ from the submitted `v2.1.0` snapshot. SHAP-GSD's own
-model training/evaluation is unaffected. Table 2's baseline columns should
-be regenerated from current `main` before being cited as reproducing the
-paper, and should not be assumed identical to the `v2.1.0` numbers.
+Between `v2.2.9` and `v2.2.13`, `main` accumulated a series of
+results-changing correctness fixes on top of that submitted state: the
+four baseline-explainer wrappers used for Table 2 (GraphSVX, GNNShap,
+PGExplainer, EdgeSHAPer) could not assign importance to any neighbourhood
+node due to an embedding-construction defect; two orchestration/
+config-resolution bugs could silently substitute default settings for a
+run's actual tuned configuration; all three SHAP-GSD granularities were
+silently capped to 10 nonzero contributors by an unset `l1_reg` default;
+and roughly a dozen `explore/`/`scripts/` figure and metric generators
+carried hardcoded narrative literals that no longer matched their own
+computed output once the `l1_reg` fix changed the underlying attribution
+magnitudes. SHAP-GSD's own model training/evaluation was unaffected
+throughout — none of this changes macro-F1, weighted-F1, or the training
+pipeline — but any Table 2 baseline column, SHAP-GSD explanation-derived
+statistic, or generated figure/report should be regenerated from current
+`main` rather than assumed identical to `v2.1.0`.
 
-As of `v2.2.10`, `main` also fixes two orchestration/config-resolution bugs
-in `scripts/run_dataset.py` and Phase 3 hyperparameter tuning that silently
-substituted default settings (class balancing, seed, early-stopping policy,
-per-trial tuning budget) instead of a run's actual tuned configuration.
-Neither bug affects the submitted `v2.1.0` snapshot's own numbers — that run
-predates the orchestrator and used a working local configuration directly —
-but both matter for any NEW run through `scripts/run_dataset.py` (including
-future Paper 3 dataset runs), which previously risked silently training
-under the wrong settings with no error.
-
-As of `v2.2.12`, `main` fixes a SHAP attribution-truncation defect: all
-three explainer granularities (feature-group, temporal-neighbourhood,
-node-novelty) called `shap.KernelExplainer.shap_values(...)` without an
-explicit `l1_reg` argument, and the installed `shap` library's actual
-default (`"num_features(10)"`, not `"auto"`) silently capped every
-explanation to exactly 10 nonzero contributors regardless of the true
-underlying attribution spread — confirmed to fire on every explained flow
-in the adopted UNSW run. This inflates the retained contributors'
-magnitudes, not only their count, so it affects any concentration,
-sparsity, or per-flow attribution-magnitude statistic derived from SHAP-GSD's
-own explanations. All three granularities now pass `l1_reg=False` explicitly,
-with the KernelSHAP sample count raised accordingly. `main` also fixes a
-GraphSVX baseline-wrapper defect (an import path the installed
-`torch_geometric` version had relocated; the failure was silently caught
-per-flow and reported as plausible-looking zero-attribution results
-instead of failing loudly) and a class-weight construction defect that
-crashed training outright on any dataset with a class entirely absent from
-the training split (does not affect NF-UNSW-NB15-v3, where every class has
-training-split support; affects the other NetFlow datasets used in
-follow-up work). Any SHAP-GSD explanation-derived number — feature-group
-concentration, per-flow attribution magnitude, or the GraphSVX column of
-Table 2 — should be regenerated from current `main` before being cited.
-
-As of `v2.2.13`, `main` fixes a class of hardcoded-narrative defects across
-roughly a dozen `explore/` figure and `scripts/` metric generators: numeric
-literals, class-name abbreviations, and qualitative claims that were
-written by hand when a script was first authored and never re-derived from
-the run being rendered, so several no longer matched their own file's
-computed output after the `v2.2.12` fix above changed the underlying
-attribution magnitudes. Fixes include: correcting a `"Recon"`/`"Reconnaissance"`
-class-key mismatch that silently dropped or mis-mapped that class's data in
-six scripts; replacing stale `d_e`/coalition-space literals and a
-contradicted Spearman-ρ claim with values read live from the run;
-populating two previously-unfilled narrative templates
-(`class_time_distribution.py`) with computed criteria instead of a
-placeholder; fixing a hardcoded temporal-neighbour count and a top-k
-membership-counting defect (`11_efficiency.py`, `node_fidelity.py`);
-locking and applying one primary convention (with the alternative kept as
-a labelled secondary) for four statistics that previously had more than
-one silently-chosen definition in play (feature-group concentration,
-node-novelty nonzero rate, φ_T attribution share, per-flow explanation
-cost); regenerating the Backdoor case-study/topology-panel candidates to
-reflect that 0 of that class's explained flows are correctly classified in
-this run (no attribution panel is emitted for it; its one valid,
-prediction-independent artifact — the 2-hop topology panel — now is);
-aligning the case-study and topology-panel generators onto a single shared
-candidate list (they previously sampled independently and disagreed on
-four classes' example flows); and replacing `node_shap_convergence.py`'s
-reported convergence slope — which measured the KernelSHAP solver's
-efficiency-axiom residual, satisfied exactly by construction at any sample
-count — with a verified exact-vs-sampled coalition-enumeration measurement
-instead. None of these affect model training, evaluation, or the
-underlying SHAP values themselves; they affect only how existing numbers
-are selected, labelled, and narrated in generated figures and reports.
+As of `v2.2.16`, `main` adds a fourth SHAP-GSD explainer configuration,
+`SHAP-GSD[raw]`: KernelSHAP over the 212 encoded edge-feature dimensions
+individually (no semantic grouping), evaluated at $k=5$ (matching every
+other Table 2 row) and, separately, at $k=36$ (masking-scope-matched to
+`SHAP-GSD[F]`'s mean masked-column count, since equal $k$ does not mean
+equal masking scope once the coalition players themselves differ). This
+configuration required a sample-budget increase to $M_F = 27{,}000$
+(13.2× `SHAP-GSD[F]`'s 2,048) to clear the same seed-to-seed stability
+threshold the grouped configuration clears at its native budget — a
+result reported in the paper as evidence that semantic grouping reduces
+explanation cost, not only that it aids interpretability. Reproducing this
+row requires no `src/` changes (a synthetic per-feature grouping is
+generated at run time) but does require re-running Phase 6/Phase 8 at the
+larger sample budget; see `jobs_draft/config_i_prep_notes.md` for the full
+budget-selection rationale if reproducing from scratch. All other numbers
+already on `main` are unaffected.
 
 ---
 
