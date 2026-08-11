@@ -27,6 +27,13 @@ instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ### Version note for reviewers
 
+**The current manuscript revision reflects `v2.2.16`** — check out that tag
+to match what's currently under review:
+
+```bash
+git checkout v2.2.16
+```
+
 The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
 2026-06-16):
 
@@ -34,17 +41,17 @@ The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
 git checkout v2.1.0
 ```
 
-Each subsequent tagged release (see the
-[Releases](https://github.com/Ricco555/SHAP-GSD/releases) page, or `git tag
---list` / `git log` locally) accumulates correctness fixes and, from
-`v2.2.16` on, an additional SHAP-GSD explainer configuration
-(`SHAP-GSD[raw]`, raw per-feature KernelSHAP with no semantic grouping —
-see `jobs_draft/config_i_prep_notes.md` for its sample-budget rationale if
-reproducing from scratch). None of it changes the core training/evaluation
-pipeline. When comparing against a specific reported result, check out the
-matching tag rather than assuming a later `main` reproduces an earlier
-tag's numbers exactly — regenerate explanation-derived metrics and
-baseline-comparison output from whichever version you're actually running.
+Everything between those two tags is correctness fixes plus one addition —
+`SHAP-GSD[raw]`, a raw per-feature KernelSHAP configuration with no semantic
+grouping (see `jobs_draft/config_i_prep_notes.md` for its sample-budget
+rationale if reproducing from scratch) — none of which changes the core
+training/evaluation pipeline. Full detail for any intermediate tag is in
+`git log` / the [Releases](https://github.com/Ricco555/SHAP-GSD/releases)
+page, not repeated here. When comparing against a specific reported result,
+check out the matching tag rather than assuming a later `main` reproduces
+an earlier tag's numbers exactly — regenerate explanation-derived metrics
+and baseline-comparison output from whichever version you're actually
+running.
 
 ---
 
