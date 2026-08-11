@@ -27,59 +27,24 @@ instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ### Version note for reviewers
 
-The paper was **submitted at version `v2.1.0`** (tag `v2.1.0`, commit `a024a6d`,
-2026-06-16) — that snapshot is the exact code that produced every number in the
-paper (macro-F1 = 0.508, weighted-F1 = 0.961, Table 2, and all other reported
-results). To reproduce the paper exactly, check out that tag:
+The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
+2026-06-16):
 
 ```bash
 git checkout v2.1.0
 ```
 
-The current `main` branch contains, on top of that
-submitted state, **infrastructure fixes**: an out-of-memory bug at larger
-dataset scale (fixed by disabling an unused node-state cache; verified to
-produce identical results with it enabled or disabled), hardcoded
-developer-machine paths removed from three baseline-explainer wrappers, and an
-internal lookup optimization (O(n) → O(log n), same data). As of `v2.2.8`,
-`main` also adds independent Fidelity+/Fidelity− metrics for the φ_T and φ_N
-granularities and an unfiltered stratified case-study sampling mode (see
-Phase 8 and Exploration figures below) — **recommended for any new run**, but
-not part of the numbers already reported in the submitted paper.
-
-Between `v2.2.9` and `v2.2.13`, `main` accumulated a series of
-results-changing correctness fixes on top of that submitted state: the
-four baseline-explainer wrappers used for Table 2 (GraphSVX, GNNShap,
-PGExplainer, EdgeSHAPer) could not assign importance to any neighbourhood
-node due to an embedding-construction defect; two orchestration/
-config-resolution bugs could silently substitute default settings for a
-run's actual tuned configuration; all three SHAP-GSD granularities were
-silently capped to 10 nonzero contributors by an unset `l1_reg` default;
-and roughly a dozen `explore/`/`scripts/` figure and metric generators
-carried hardcoded narrative literals that no longer matched their own
-computed output once the `l1_reg` fix changed the underlying attribution
-magnitudes. SHAP-GSD's own model training/evaluation was unaffected
-throughout — none of this changes macro-F1, weighted-F1, or the training
-pipeline — but any Table 2 baseline column, SHAP-GSD explanation-derived
-statistic, or generated figure/report should be regenerated from current
-`main` rather than assumed identical to `v2.1.0`.
-
-As of `v2.2.16`, `main` adds a fourth SHAP-GSD explainer configuration,
-`SHAP-GSD[raw]`: KernelSHAP over the 212 encoded edge-feature dimensions
-individually (no semantic grouping), evaluated at $k=5$ (matching every
-other Table 2 row) and, separately, at $k=36$ (masking-scope-matched to
-`SHAP-GSD[F]`'s mean masked-column count, since equal $k$ does not mean
-equal masking scope once the coalition players themselves differ). This
-configuration required a sample-budget increase to $M_F = 27{,}000$
-(13.2× `SHAP-GSD[F]`'s 2,048) to clear the same seed-to-seed stability
-threshold the grouped configuration clears at its native budget — a
-result reported in the paper as evidence that semantic grouping reduces
-explanation cost, not only that it aids interpretability. Reproducing this
-row requires no `src/` changes (a synthetic per-feature grouping is
-generated at run time) but does require re-running Phase 6/Phase 8 at the
-larger sample budget; see `jobs_draft/config_i_prep_notes.md` for the full
-budget-selection rationale if reproducing from scratch. All other numbers
-already on `main` are unaffected.
+Each subsequent tagged release (see the
+[Releases](https://github.com/Ricco555/SHAP-GSD/releases) page, or `git tag
+--list` / `git log` locally) accumulates correctness fixes and, from
+`v2.2.16` on, an additional SHAP-GSD explainer configuration
+(`SHAP-GSD[raw]`, raw per-feature KernelSHAP with no semantic grouping —
+see `jobs_draft/config_i_prep_notes.md` for its sample-budget rationale if
+reproducing from scratch). None of it changes the core training/evaluation
+pipeline. When comparing against a specific reported result, check out the
+matching tag rather than assuming a later `main` reproduces an earlier
+tag's numbers exactly — regenerate explanation-derived metrics and
+baseline-comparison output from whichever version you're actually running.
 
 ---
 
@@ -103,10 +68,9 @@ pip install dgl -f https://data.dgl.ai/wheels/repo.html
 in Network Intrusion Detection* — full citation to follow upon acceptance.
 
 SHAP-GSD introduces a temporally-faithful, multi-granularity Shapley explanation
-framework evaluated on **NF-UNSW-NB15-v3**. The paper reports classification
-performance (macro-F1 = 0.508, weighted-F1 = 0.961), SHAP-GSD fidelity and
-stability metrics (Table 2), and baseline comparisons against five GNN explainers.
-All results are reproducible with the single command below.
+framework evaluated on **NF-UNSW-NB15-v3** — classification performance,
+SHAP-GSD explanation fidelity/stability, and comparisons against five GNN
+explainers, all reproducible with the single command below.
 
 ### Dataset
 
@@ -325,7 +289,7 @@ See [`explore/README.md`](explore/README.md) for output location, reasoning-file
 format, and style constants. Subfolder conventions: [`explore/arguments/README.md`](explore/arguments/README.md)
 and [`explore/graph/README.md`](explore/graph/README.md).
 
-### Baseline explainer comparison (Table 2)
+### Baseline explainer comparison
 
 Five baseline GNN explainers are benchmarked against SHAP-GSD. These
 dependencies are **not** in `requirements.txt` — install only when running
@@ -475,7 +439,7 @@ All paths are relative to `runs/<run_id>/`.
 | `outputs/metrics/novelty_audit.json` | Node IP topology + per-class novelty engagement |
 | `outputs/topology/gateway_distance.json` | Malicious-subgraph gateway-distance diagnostic (`k_star`, role assignment, per-class `d_gw`) |
 | `outputs/w_ablation/` | Temporal W ablation gap stats and summary |
-| `outputs/baselines/` | Baseline comparison results and Table 2 |
+| `outputs/baselines/` | Baseline explainer comparison results |
 | `outputs/figures/` | All publication figures from explore/ scripts |
 
 Runtime-generated directories (`runs/`, `feature_store/`, `graphs/`,
