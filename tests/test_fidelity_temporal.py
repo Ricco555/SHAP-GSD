@@ -229,6 +229,14 @@ def _make_ctx(
     return temp_shap, model, records, input_node_ids, base, fwd_kwargs
 
 
+# T11 (specs/60 §6.3): every rollback-driven test below runs under BOTH
+# novelty modes. Under "unseen_in_training" node 3 is absent from the training
+# slice, so its dim 1 flips 0 -> 1 and the stub model's logits genuinely differ
+# between the two runs — confirming nothing in the temporal-fidelity path
+# depends on dim 1 *moving* under rollback (specs/59 D3).
+_BOTH_MODES = [NOVELTY_MODE_RECENT_WINDOW, NOVELTY_MODE_UNSEEN_IN_TRAINING]
+
+
 def _p_full(model: _StubModel, base: np.ndarray, fwd_kwargs: dict,
             true_label: int) -> float:
     """P(true_label) with every neighbor present, via the same forward path."""
@@ -246,9 +254,12 @@ def _p_full(model: _StubModel, base: np.ndarray, fwd_kwargs: dict,
 # T1 — masking nothing gives Fidelity+ == 0
 # ---------------------------------------------------------------------------
 
-def test_mask_nothing_gives_zero_fidelity_plus():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_mask_nothing_gives_zero_fidelity_plus(novelty_mode):
     """absent_idx = [] must return base_node_feats itself → Fidelity+ == 0.0."""
-    temp_shap, model, records, input_ids, base, kw = _make_ctx([0, 2, 4])
+    temp_shap, model, records, input_ids, base, kw = _make_ctx(
+        [0, 2, 4], novelty_mode=novelty_mode
+    )
 
     unmasked = temp_shap.build_masked_node_feats(
         records, [], base, input_ids, _TARGET_TS
@@ -279,9 +290,12 @@ def test_mask_nothing_gives_zero_fidelity_plus():
 # T2 — keeping everything gives Fidelity− == 0
 # ---------------------------------------------------------------------------
 
-def test_keep_all_gives_zero_fidelity_minus():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_keep_all_gives_zero_fidelity_minus(novelty_mode):
     """top_k >= N leaves rest_idx empty → p_kept == p_full → Fidelity− == 0.0."""
-    temp_shap, model, records, input_ids, base, kw = _make_ctx([0, 2, 4])
+    temp_shap, model, records, input_ids, base, kw = _make_ctx(
+        [0, 2, 4], novelty_mode=novelty_mode
+    )
     n = len(records)
     true_label = 1
     p_full = _p_full(model, base, kw, true_label)
@@ -305,11 +319,14 @@ def test_keep_all_gives_zero_fidelity_minus():
 # T3 — masking matches a direct rollback (anti-drift guard)
 # ---------------------------------------------------------------------------
 
-def test_masking_matches_direct_rollback():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_masking_matches_direct_rollback(novelty_mode):
     """build_masked_node_feats must equal explicit rollback_edges, row for row."""
     # Absent record: edge index 2 → ts=300, src=0, dst=1. Nodes 2 and 3 are
     # untouched but are still real endpoints in the synthetic NSM.
-    temp_shap, _model, records, input_ids, base, _kw = _make_ctx([2])
+    temp_shap, _model, records, input_ids, base, _kw = _make_ctx(
+        [2], novelty_mode=novelty_mode
+    )
     nsm = temp_shap.nsm
     rec = records[0]
 
@@ -342,9 +359,12 @@ def test_masking_matches_direct_rollback():
 # T4 — empty neighborhood
 # ---------------------------------------------------------------------------
 
-def test_empty_neighborhood_row():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_empty_neighborhood_row(novelty_mode):
     """N == 0 emits the None row and makes no model call at all."""
-    temp_shap, model, _records, input_ids, base, kw = _make_ctx([])
+    temp_shap, model, _records, input_ids, base, kw = _make_ctx(
+        [], novelty_mode=novelty_mode
+    )
 
     res = temporal_fidelity_for_flow(
         model=model, temp_shap=temp_shap, blocks=[], neighbor_records=[],
@@ -369,9 +389,12 @@ def test_empty_neighborhood_row():
 # T5 — top-k selection by |φ|
 # ---------------------------------------------------------------------------
 
-def test_top_k_selection_by_abs_phi():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_top_k_selection_by_abs_phi(novelty_mode):
     """Selection ranks by |φ| descending — the largest magnitude wins."""
-    temp_shap, model, records, input_ids, base, kw = _make_ctx([0, 2, 4])
+    temp_shap, model, records, input_ids, base, kw = _make_ctx(
+        [0, 2, 4], novelty_mode=novelty_mode
+    )
     true_label = 2
     p_full = _p_full(model, base, kw, true_label)
 
@@ -417,10 +440,13 @@ def test_align_phi_to_records(caplog):
 # T7 — absent edges sharing an endpoint are grouped into one rollback
 # ---------------------------------------------------------------------------
 
-def test_multi_absent_grouped_per_node():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_multi_absent_grouped_per_node(novelty_mode):
     """Two absent edges sharing node 0 → ONE rollback_edges call with both."""
     # Edge 2: 0 → 1 at ts=300. Edge 4: 0 → 2 at ts=500. Shared endpoint: node 0.
-    temp_shap, _model, records, input_ids, base, _kw = _make_ctx([2, 4])
+    temp_shap, _model, records, input_ids, base, _kw = _make_ctx(
+        [2, 4], novelty_mode=novelty_mode
+    )
     spy = _SpyNSM(temp_shap.nsm)
     temp_shap.nsm = spy
 
@@ -448,9 +474,12 @@ def test_multi_absent_grouped_per_node():
 # T8 — the production row-alignment assertion
 # ---------------------------------------------------------------------------
 
-def test_build_masked_node_feats_row_alignment_assert():
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_build_masked_node_feats_row_alignment_assert(novelty_mode):
     """A base matrix whose row count disagrees with input_node_ids must assert."""
-    temp_shap, _model, records, input_ids, base, _kw = _make_ctx([2])
+    temp_shap, _model, records, input_ids, base, _kw = _make_ctx(
+        [2], novelty_mode=novelty_mode
+    )
 
     with pytest.raises(AssertionError):
         temp_shap.build_masked_node_feats(
