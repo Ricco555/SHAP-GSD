@@ -149,10 +149,15 @@ def main(cfg: dict) -> None:
     t0 = time.monotonic()
     window_s    = cfg["model"]["temporal_window_seconds"]
     snap_interval = cfg["model"]["snapshot_interval"]
+    # .get, never a bare lookup: a hand-written config predating specs/60 (or an
+    # HPC config not yet synced) must keep working with the published default.
+    novelty_mode = cfg["model"].get("novelty_mode", "recent_window")
+    logger.info(f"Node-state novelty_mode resolved to: {novelty_mode}")
 
     nsm = NodeStateManager(
         window_seconds=window_s,
         snapshot_interval=snap_interval,
+        novelty_mode=novelty_mode,
     )
     nsm.set_is_internal(is_internal_arr)
 
@@ -184,6 +189,14 @@ def main(cfg: dict) -> None:
         out_bytes=train_out_bytes,
     )
     _log_stage("4a. hourly baselines", t0)
+
+    # Training-split node membership (invariant 2/3): derived from the SAME
+    # train-only node-id arrays as the hourly baselines. Must precede
+    # build_snapshots — Pass 2 calls _compute_state, which reads this set
+    # under novelty_mode="unseen_in_training". Established unconditionally in
+    # both modes so train_node_ids.npy is present in every newly built snapshot
+    # dir and a later mode switch needs nothing beyond a phase-2 re-run.
+    nsm.set_train_nodes(train_src_ids, train_dst_ids)
 
     # Snapshots from ALL edges (preserves correct node state for val/test)
     t0 = time.monotonic()

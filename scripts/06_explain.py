@@ -162,7 +162,10 @@ def main() -> None:
     fs_train = FeatureStore(fs_train_dir)
 
     logger.info("Loading NodeStateManager …")
-    nsm = NodeStateManager.load(nsm_dir)
+    nsm = NodeStateManager.load(
+        nsm_dir,
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     # --- Background distributions ---
     bg_features_path = artifacts_dir / "background_features.npy"

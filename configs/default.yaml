@@ -63,6 +63,16 @@ model:
   # degrades gracefully (no node-state overlay) with this disabled. Set to a
   # positive int (e.g. 1000) in an experiment config to re-enable per run.
   snapshot_interval: 0
+  # Semantics of node-state dim 1 (novelty). See specs/59, specs/60.
+  #   "recent_window"      (DEFAULT, published behaviour): dim 1 = 1 iff the
+  #                        node's first-ever appearance falls inside the
+  #                        rolling window W ending at the query time.
+  #   "unseen_in_training": dim 1 = 1 iff the node appears in NO training-split
+  #                        edge (and has already appeared at or before t).
+  # Changing this invalidates EVERY downstream artifact — checkpoint, tuning
+  # results, backgrounds, explanation JSONs, all metrics. Phases 2 onward must
+  # be re-run. Mixing modes across phases is refused at load time (specs/60 §5).
+  novelty_mode: "recent_window"
 
 graph:
   dir: "graphs"

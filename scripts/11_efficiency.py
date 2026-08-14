@@ -140,7 +140,10 @@ def main() -> None:
     g_test, _ = dgl.load_graphs(str(graphs_dir / "test.bin"))
     g_test = g_test[0]
     fs_test = FeatureStore(fs_test_dir)
-    nsm = NodeStateManager.load(nsm_dir)
+    nsm = NodeStateManager.load(
+        nsm_dir,
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
     background = BackgroundDistributions.load(artifacts_dir)
     model = _load_model(cfg, device)
     sampler = TemporalNeighborSampler(fanouts=cfg["model"]["fanouts"])

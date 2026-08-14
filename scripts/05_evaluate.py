@@ -120,7 +120,10 @@ def main(
     fs_test = FeatureStore(repo_root / cfg["output"]["feature_store_dir"] / "test")
 
     # ── 5. Load NodeStateManager ───────────────────────────────────────────────
-    nsm = NodeStateManager.load(repo_root / cfg["graph"]["node_state_dir"])
+    nsm = NodeStateManager.load(
+        repo_root / cfg["graph"]["node_state_dir"],
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     # ── 6. Build model and load checkpoint ────────────────────────────────────
     # Derive num_classes from label_map.json (produced by 01_preprocess.py).

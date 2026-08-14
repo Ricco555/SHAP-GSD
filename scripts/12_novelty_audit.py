@@ -180,7 +180,10 @@ def audit_node_states(cfg: dict, n_sample: int, seed: int) -> dict:
     g_test = g_test[0]
 
     logger.info("Loading NodeStateManager …")
-    nsm = NodeStateManager.load(nsm_dir)
+    nsm = NodeStateManager.load(
+        nsm_dir,
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     n_edges = g_test.num_edges()
     rng = np.random.default_rng(seed)

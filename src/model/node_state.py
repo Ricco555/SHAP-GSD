@@ -9,7 +9,15 @@ NODE STATE SCHEMA:
                                  36 public/multicast (is_internal=0). Earlier note claiming
                                  all nodes are public was incorrect. Run
                                  scripts/12_novelty_audit.py for full dim-0/dim-1 breakdown.
-  [1]  novelty           binary  1 if first seen in window W
+  [1]  novelty           binary  MODE-DEPENDENT (model.novelty_mode):
+                                 "recent_window" (DEFAULT, published behaviour):
+                                   1 if the node's first-ever appearance falls
+                                   inside window W ending at the query time.
+                                 "unseen_in_training":
+                                   1 if the node appears in NO training-split
+                                   edge (and has already appeared at or before
+                                   the query time).
+                                 See specs/59, specs/60.
   [2]  recency           float   normalized time since last flow [0=just seen, 1=not seen in W]
   [3]  rolling_in_degree  int    incoming edges in W
   [4]  rolling_out_degree int    outgoing edges in W
@@ -68,6 +76,9 @@ When masking neighbor edge e' from node u:
   - outgoing: decrement rolling_out_degree, update unique_dst_ip/port counts,
     recalculate dst_port_entropy, update rolling bytes
   - if e' was FIRST edge for u in W: set novelty=0
+    (novelty_mode="recent_window" ONLY. Under "unseen_in_training" dim 1 is a
+     property of the node, not of its edges, so rollback leaves it unchanged —
+     specs/59 D3.)
   - recalculate recency from next-most-recent edge
   - recalculate iat_regularity from remaining IATs
   - time_sin, time_cos, is_internal: NOT rolled back (not edge-dependent)
@@ -89,6 +100,14 @@ from src.data.preprocessor import N_DST_PORT_BINS, port_to_bin_indices
 from src.utils.memory import _maxrss_mb
 
 logger = logging.getLogger(__name__)
+
+# Semantics of node-state dim 1 (novelty). See specs/59, specs/60.
+NOVELTY_MODE_RECENT_WINDOW: str = "recent_window"
+NOVELTY_MODE_UNSEEN_IN_TRAINING: str = "unseen_in_training"
+NOVELTY_MODES: tuple[str, ...] = (
+    NOVELTY_MODE_RECENT_WINDOW,
+    NOVELTY_MODE_UNSEEN_IN_TRAINING,
+)
 
 
 class _NodeHistory:
@@ -193,6 +212,7 @@ class NodeStateManager:
         nsm = NodeStateManager(window_seconds=60, snapshot_interval=0)
         nsm.set_is_internal(is_internal_arr)          # from GraphBuilder
         nsm.build_hourly_baselines(train_src, train_dst, train_ts, in_b, out_b)
+        nsm.set_train_nodes(train_src, train_dst)     # BEFORE build_snapshots
         nsm.build_snapshots(all_src, all_dst, all_ts, in_b, out_b, dst_ports)
         state = nsm.get_state_at_time(node_id, timestamp_ms)
         batch = nsm.get_batch_states(node_ids, timestamp_ms)
@@ -204,6 +224,7 @@ class NodeStateManager:
         self,
         window_seconds: float = 60.0,
         snapshot_interval: Optional[int] = 0,
+        novelty_mode: str = NOVELTY_MODE_RECENT_WINDOW,
     ) -> None:
         """
         Args:
@@ -213,10 +234,36 @@ class NodeStateManager:
                                 runtime query path reads snapshots). ``None``
                                 is also treated as disabled. Set to a positive
                                 int to re-enable snapshot generation.
+            novelty_mode:      semantics of node-state dim 1, one of
+                                ``NOVELTY_MODES``. ``"recent_window"`` (default)
+                                is the published behaviour and is bit-identical
+                                to the pre-``novelty_mode`` code.
+                                ``"unseen_in_training"`` additionally requires a
+                                training-node set, established by
+                                :meth:`set_train_nodes` or restored by
+                                :meth:`load` from a directory that carries
+                                ``train_node_ids.npy``; querying state without
+                                one raises ``RuntimeError``. See specs/59,
+                                specs/60.
+
+        Raises:
+            ValueError: if ``novelty_mode`` is not one of ``NOVELTY_MODES``.
         """
         self.window_seconds    = window_seconds
         self._W_ms: float      = window_seconds * 1000.0
         self.snapshot_interval = snapshot_interval
+
+        if novelty_mode not in NOVELTY_MODES:
+            raise ValueError(
+                f"Unknown model.novelty_mode {novelty_mode!r}; "
+                f"legal values are {NOVELTY_MODES}."
+            )
+        self.novelty_mode: str = novelty_mode
+
+        # Sorted unique training-split node ids. None == UNAVAILABLE (never
+        # established), which is NOT the same as an empty array (established and
+        # empty). Only ever set via set_train_nodes() — training split only.
+        self._train_node_ids: Optional[np.ndarray] = None
 
         # Static is_internal array indexed by node_id (set externally)
         self._is_internal: Optional[np.ndarray] = None
@@ -321,6 +368,77 @@ class NodeStateManager:
             f"global fallback={self._global_baseline:.4f}, "
             f"elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB"
         )
+
+    def set_train_nodes(
+        self,
+        src_node_ids: np.ndarray,
+        dst_node_ids: np.ndarray,
+    ) -> None:
+        """Establish the training-split node membership set (invariant 2/3).
+
+        A node is a *training node* iff it is an endpoint of at least one
+        TRAINING-split edge. Under ``novelty_mode="unseen_in_training"`` dim 1
+        is 1 exactly for known nodes that are NOT in this set.
+
+        TRAINING DATA ONLY — never pass val/test node ids here. Same contract as
+        :meth:`build_hourly_baselines`. Membership is edge-derived, not derived
+        from ``first_seen_ms`` vs ``tau_train``, and never inferred from
+        ``self._baselines`` keys (specs/59 D5).
+
+        Must be called BEFORE build_snapshots(): Pass 2 calls ``_compute_state``,
+        which reads this set under the new mode.
+
+        Args:
+            src_node_ids: integer node IDs for training-flow sources (n_train,).
+            dst_node_ids: integer node IDs for training-flow destinations.
+        """
+        ids = np.unique(
+            np.concatenate([
+                np.asarray(src_node_ids, dtype=np.int64).reshape(-1),
+                np.asarray(dst_node_ids, dtype=np.int64).reshape(-1),
+            ])
+        )
+        assert ids.size == 0 or int(ids.min()) >= 0, (
+            "training node ids must be non-negative; a negative id would make "
+            "the membership searchsorted disagree with the vectorized `valid` "
+            "clamp."
+        )
+        self._train_node_ids = ids          # np.unique returns sorted
+        logger.info(f"Training-node membership set: {ids.size:,} nodes")
+
+    def _is_train_node(self, node_ids: np.ndarray) -> np.ndarray:
+        """Boolean membership mask over the training-node set.
+
+        The single source of truth for training membership; both
+        ``_batch_states_vectorized`` and ``_compute_state`` call it, so the two
+        dim-1 implementations cannot drift.
+
+        Args:
+            node_ids: int64 array (N,) of node ids (may contain out-of-domain or
+                      negative ids — they simply return False here; D4 is
+                      enforced by each path's own ``valid``/history guard, not
+                      here).
+
+        Returns:
+            bool array (N,), True where the node is in the training-node set.
+
+        Raises:
+            RuntimeError: if the training-node set was never established.
+        """
+        if self._train_node_ids is None:
+            raise RuntimeError(
+                "novelty_mode='unseen_in_training' requires a training-node set, "
+                "but none is available (this NodeStateManager was built or loaded "
+                "without one). Re-run scripts/02_build_graph.py with "
+                "model.novelty_mode: unseen_in_training."
+            )
+        ids = np.asarray(node_ids, dtype=np.int64).reshape(-1)
+        tn = self._train_node_ids
+        if tn.size == 0:
+            return np.zeros(ids.shape, dtype=bool)
+        pos = np.searchsorted(tn, ids)
+        pos_c = np.minimum(pos, tn.size - 1)
+        return (pos < tn.size) & (tn[pos_c] == ids)
 
     def build_snapshots(
         self,
@@ -654,14 +772,29 @@ class NodeStateManager:
 
         # Dim 1 — novelty (HIGHEST PARITY RISK). Float window start, NOT int(lo),
         # AND the first_seen >= 0 sentinel exclusion AND valid.
+        # MODE-DEPENDENT (specs/60 §2.4): exactly one conjunct differs between
+        # the two modes; the shared `(fs >= 0)`, `(fs <= t)` and `valid` guards
+        # are identical, which is the parity control. The scalar oracle
+        # (_compute_state) mirrors this branch dim-for-dim.
         w_start = t - self._W_ms
         fs = (
             first_seen_arr[safe_ids] if num_nodes > 0
             else np.full(N, -1, dtype=np.int64)
         )
-        state[:, 1] = (
-            (fs >= 0) & (w_start <= fs) & (fs <= t) & valid
-        ).astype(np.float32)
+        if self.novelty_mode == NOVELTY_MODE_RECENT_WINDOW:
+            state[:, 1] = (
+                (fs >= 0) & (w_start <= fs) & (fs <= t) & valid
+            ).astype(np.float32)
+        else:
+            # unseen_in_training: exactly one conjunct swapped
+            # (w_start <= fs) -> (node not in the training set). specs/60 §2.3.
+            # Membership is looked up on the RAW node_ids, not safe_ids: a
+            # clamped invalid id would otherwise alias node 0's membership.
+            # `valid` already zeroes those rows, so this is belt-and-braces, but
+            # it keeps the mask semantically honest and matches the scalar path.
+            state[:, 1] = (
+                (fs >= 0) & (fs <= t) & valid & ~self._is_train_node(node_ids)
+            ).astype(np.float32)
 
         # Dims 11/12 — seasonal, shared scalar t (bit-exact).
         hour_frac = (t / 3_600_000.0) % 24.0
@@ -859,7 +992,10 @@ class NodeStateManager:
           baselines.pkl    per-node hourly baselines and global fallback
           histories.pkl    per-node _NodeHistory objects (numpy arrays)
           snapshots.pkl    periodic snapshot times and state dicts
-          meta.pkl         window_seconds and snapshot_interval
+          is_internal.npy  static is_internal array (only if set)
+          train_node_ids.npy  sorted unique training-split node ids
+                              (only if set_train_nodes/load established them)
+          meta.pkl         window_seconds, snapshot_interval, novelty_mode
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -879,26 +1015,69 @@ class NodeStateManager:
             )
         if self._is_internal is not None:
             np.save(output_dir / "is_internal.npy", self._is_internal)
+        if self._train_node_ids is not None:
+            np.save(output_dir / "train_node_ids.npy", self._train_node_ids)
         with open(output_dir / "meta.pkl", "wb") as f:
             pickle.dump(
                 {"window_seconds": self.window_seconds,
-                 "snapshot_interval": self.snapshot_interval}, f,
+                 "snapshot_interval": self.snapshot_interval,
+                 "novelty_mode": self.novelty_mode}, f,
             )
         logger.info(
             f"NodeStateManager saved → {output_dir} "
-            f"(save elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB)"
+            f"(novelty_mode={self.novelty_mode}, "
+            f"save elapsed={time.monotonic() - t0:.1f}s, maxrss={_maxrss_mb():.0f} MiB)"
         )
 
     @classmethod
-    def load(cls, output_dir: Path | str) -> "NodeStateManager":
-        """Restore a NodeStateManager from a previously saved directory."""
+    def load(
+        cls,
+        output_dir: Path | str,
+        expected_novelty_mode: Optional[str] = None,
+    ) -> "NodeStateManager":
+        """Restore a NodeStateManager from a previously saved directory.
+
+        The persisted artifact is authoritative for *behaviour*; the config is
+        checked only for *agreement* (specs/60 §0). Passing
+        ``expected_novelty_mode=None`` therefore means "the caller makes no
+        claim", NOT "assume recent_window".
+
+        Args:
+            output_dir:            directory previously written by :meth:`save`.
+            expected_novelty_mode: the mode the active config requests, or
+                                    ``None`` to make no claim. When given and
+                                    different from the persisted mode, raise —
+                                    dim 1 would otherwise mean different things
+                                    in different phases of the same run
+                                    (specs/59 §5.1).
+
+        Returns:
+            A NodeStateManager restored from the directory.
+
+        Raises:
+            ValueError: if ``expected_novelty_mode`` is not ``None`` and not a
+                legal mode; if it disagrees with the persisted mode; or if the
+                directory declares ``"unseen_in_training"`` but carries no
+                training-node set.
+        """
         output_dir = Path(output_dir)
+
+        if (expected_novelty_mode is not None
+                and expected_novelty_mode not in NOVELTY_MODES):
+            raise ValueError(
+                f"Unknown expected_novelty_mode {expected_novelty_mode!r}; "
+                f"legal values are {NOVELTY_MODES} (or None for 'no claim')."
+            )
 
         with open(output_dir / "meta.pkl", "rb") as f:
             meta = pickle.load(f)
+        # Backward compatibility: every node_state_snapshots/ directory written
+        # before specs/60 has a two-key meta.pkl and no train_node_ids.npy.
+        mode = meta.get("novelty_mode", NOVELTY_MODE_RECENT_WINDOW)
         nsm = cls(
             window_seconds=meta["window_seconds"],
             snapshot_interval=meta["snapshot_interval"],
+            novelty_mode=mode,
         )
         with open(output_dir / "baselines.pkl", "rb") as f:
             bl = pickle.load(f)
@@ -917,10 +1096,37 @@ class NodeStateManager:
         if is_int_path.exists():
             nsm._is_internal = np.load(is_int_path)
 
+        tn_path = output_dir / "train_node_ids.npy"
+        if tn_path.exists():
+            nsm._train_node_ids = np.load(tn_path).astype(np.int64, copy=False)
+        # else: stays None == UNAVAILABLE (specs/59 §4.2) — never an empty set,
+        # which would make every node novel.
+
+        if expected_novelty_mode is not None and expected_novelty_mode != mode:
+            raise ValueError(
+                f"novelty_mode mismatch: config requests "
+                f"{expected_novelty_mode!r} but {output_dir} was built with "
+                f"{mode!r}. dim 1 of the node state would mean different things "
+                f"in different phases of the same run. Re-run "
+                f"scripts/02_build_graph.py with the intended mode."
+            )
+        if mode == NOVELTY_MODE_UNSEEN_IN_TRAINING and nsm._train_node_ids is None:
+            raise ValueError(
+                f"{output_dir} declares novelty_mode='unseen_in_training' but has "
+                f"no train_node_ids.npy. Re-run scripts/02_build_graph.py."
+            )
+
+        # Positive control (specs/60 §7, §8): this line is how a run-level check
+        # distinguishes "mode active, genuinely 0 %" from "mode never propagated".
+        train_nodes = (
+            "unavailable" if nsm._train_node_ids is None
+            else f"{nsm._train_node_ids.size:,}"
+        )
         logger.info(
             f"NodeStateManager loaded from {output_dir}: "
             f"{len(nsm._histories):,} nodes, "
-            f"{len(nsm._snap_times):,} snapshots"
+            f"{len(nsm._snap_times):,} snapshots, "
+            f"novelty_mode={mode}, train_nodes={train_nodes}"
         )
         return nsm
 
@@ -989,13 +1195,26 @@ class NodeStateManager:
 
         w_start = time_ms - self._W_ms
 
-        # [1] novelty: node's effective first appearance is within window W.
-        # When the first-seen edge is rolled back, the node is no longer novel
-        # (the evidence of its initial appearance has been masked).
-        if _first_seen_rolled_back:
-            state[1] = 0.0
+        # [1] novelty — mode-dependent. specs/59 §3, specs/60 §2.5.
+        if self.novelty_mode == NOVELTY_MODE_RECENT_WINDOW:
+            # Effective first appearance within window W. When the first-seen
+            # edge is rolled back the node is no longer novel (the evidence of
+            # its initial appearance has been masked).
+            if _first_seen_rolled_back:
+                state[1] = 0.0
+            else:
+                state[1] = float(w_start <= hist.first_seen_ms <= time_ms)
         else:
-            state[1] = float(w_start <= hist.first_seen_ms <= time_ms)
+            # unseen_in_training: training membership is a property of the node,
+            # so a masked neighbour edge cannot change it —
+            # _first_seen_rolled_back is deliberately NOT consulted here
+            # (specs/59 D3).
+            state[1] = float(
+                hist.first_seen_ms <= time_ms
+                and not bool(
+                    self._is_train_node(np.array([node_id], dtype=np.int64))[0]
+                )
+            )
 
         # [2] recency: normalized time since most-recent edge in W (0=just seen)
         if len(ts) > 0:

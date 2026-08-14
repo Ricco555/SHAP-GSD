@@ -32,7 +32,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scipy.stats import entropy as scipy_entropy
-from src.model.node_state import NodeStateManager
+from src.model.node_state import (
+    NOVELTY_MODE_RECENT_WINDOW,
+    NOVELTY_MODE_UNSEEN_IN_TRAINING,
+    NodeStateManager,
+)
 from tests._paths import REPO_ROOT, resolve_cfg
 
 # ---------------------------------------------------------------------------
@@ -43,14 +47,31 @@ _W_MS = 1_000.0   # 1-second window for test clarity
 
 
 def _build_nsm(edges: list[dict], W_ms: float = _W_MS,
-               snapshot_interval: int = 5) -> NodeStateManager:
+               snapshot_interval: int = 5,
+               novelty_mode: str = NOVELTY_MODE_RECENT_WINDOW,
+               ) -> NodeStateManager:
     """Build a NodeStateManager from a list of edge dicts.
 
     Each dict: {'ts': int, 'src': int, 'dst': int, 'in_bytes': float,
                 'out_bytes': float, 'dst_port': int}
+
+    The training-node set is established UNCONDITIONALLY (in both modes) from
+    the same first-half edge slice used for the hourly baselines, and in the
+    same position relative to build_snapshots as scripts/02_build_graph.py
+    (specs/60 §3, §6.2) — so this helper exercises the production ordering.
+
+    Args:
+        edges:             edge dicts, ascending by 'ts'.
+        W_ms:              rolling window width in milliseconds.
+        snapshot_interval: Pass-2 snapshot interval (0/None disables Pass 2).
+        novelty_mode:      dim-1 semantics; see src.model.node_state.
+
+    Returns:
+        A ready-to-query NodeStateManager.
     """
     nsm = NodeStateManager(window_seconds=W_ms / 1000.0,
-                           snapshot_interval=snapshot_interval)
+                           snapshot_interval=snapshot_interval,
+                           novelty_mode=novelty_mode)
 
     n = len(edges)
     src  = np.array([e["src"]       for e in edges], dtype=np.int64)
@@ -63,6 +84,9 @@ def _build_nsm(edges: list[dict], W_ms: float = _W_MS,
     # Baselines: build from first half of edges (simulates train-only)
     half = max(1, n // 2)
     nsm.build_hourly_baselines(src[:half], dst[:half], ts[:half], ib[:half], ob[:half])
+    # Same ordering rule as phase 2: AFTER build_hourly_baselines, BEFORE
+    # build_snapshots (Pass 2 calls _compute_state, which reads this set).
+    nsm.set_train_nodes(src[:half], dst[:half])
     nsm.build_snapshots(src, dst, ts, ib, ob, dp, snapshot_interval=snapshot_interval)
 
     # Minimal is_internal: all 0
@@ -192,7 +216,13 @@ def test_rollback_most_recent():
 # ---------------------------------------------------------------------------
 
 def test_rollback_first_edge_novelty():
-    """Removing the global first-seen edge sets novelty to 0."""
+    """Removing the global first-seen edge sets novelty to 0.
+
+    DEFAULT MODE ONLY (``novelty_mode="recent_window"``). Under
+    ``"unseen_in_training"`` dim 1 is a property of the node rather than of its
+    edges and is rollback-invariant — see
+    ``test_unseen_mode_rollback_invariance`` (specs/59 D3).
+    """
     # Node 0 has exactly ONE edge (at t=500ms).
     # Window W=1000ms, query at t=600ms → window=[−400, 600].
     # first_seen=500ms is within window → novelty=1.
@@ -509,10 +539,19 @@ _PARITY_EDGES = [
 # Category 1 — oracle parity
 # ---------------------------------------------------------------------------
 
+_BOTH_MODES = [NOVELTY_MODE_RECENT_WINDOW, NOVELTY_MODE_UNSEEN_IN_TRAINING]
+
+
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
 @pytest.mark.parametrize("t", [-500.0, 50.0, 350.0, 600.0, 5000.0])
-def test_batch_states_oracle_parity(t):
-    """Vectorized batch equals the stacked scalar oracle across query times."""
-    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+def test_batch_states_oracle_parity(t, novelty_mode):
+    """Vectorized batch equals the stacked scalar oracle across query times.
+
+    T2 — parametrized over both novelty modes (specs/60 §6.2). dim 1 is in
+    ``_EXACT_DIMS``, so this asserts bit-parity of the two dim-1
+    implementations under the new mode as well as the default.
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
     node_ids = np.array([0, 1, 2, 3], dtype=np.int64)
     _assert_batch_parity(nsm, node_ids, t)
 
@@ -521,14 +560,20 @@ def test_batch_states_oracle_parity(t):
 # Category 2 — edge cases (each asserted against the _compute_state oracle)
 # ---------------------------------------------------------------------------
 
-def test_batch_states_edge_cases():
-    """Every edge case in spec 20 §1.9 item 2, vs the oracle under §3.9 split."""
-    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_batch_states_edge_cases(novelty_mode):
+    """Every edge case in spec 20 §1.9 item 2, vs the oracle under §3.9 split.
+
+    T2 — parametrized over both novelty modes (specs/60 §6.2): out-of-domain
+    ids, negative ids, history-less nodes, duplicates and unsorted batches all
+    have to agree on dim 1 between the vectorized and scalar paths.
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
     # Domain: nodes 0-3 have history; is_internal length = 4.
 
     # Node absent from _histories but in domain: use an id with no edges by
     # extending is_internal so num_nodes > max history id.
-    nsm2 = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    nsm2 = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
     nsm2.set_is_internal(np.zeros(6, dtype=np.float32))  # domain now 0..5
     # node 5 in domain, no history
     _assert_batch_parity(nsm2, [5], 600.0)
@@ -548,7 +593,7 @@ def test_batch_states_edge_cases():
 
     # nid >= len(is_internal) but WITH history: shrink is_internal to len 1,
     # node 0 keeps history, dim 0 must be 0 (independent guard).
-    nsm3 = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    nsm3 = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
     nsm3.set_is_internal(np.array([1.0], dtype=np.float32))  # only node 0 covered
     # node 2 has history but is beyond is_internal length -> dim0 = 0
     _assert_batch_parity(nsm3, [0, 1, 2, 3], 600.0)
@@ -578,9 +623,10 @@ def test_batch_states_edge_cases():
 # Category 4 — contract checks
 # ---------------------------------------------------------------------------
 
-def test_batch_states_contract():
-    """Shape/dtype/row-order/empty-batch contract."""
-    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_batch_states_contract(novelty_mode):
+    """Shape/dtype/row-order/empty-batch contract (T2 — both modes)."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
 
     got = nsm.get_batch_states(np.array([0, 2], dtype=np.int64), 600.0)
     assert got.shape == (2, 15)
@@ -716,9 +762,15 @@ def test_batch_states_microbenchmark(capsys):
 # ===========================================================================
 
 
-def test_batch_states_negative_id_parity():
-    """Finding 1 — negative node_id parity with a non-degenerate is_internal."""
-    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+@pytest.mark.parametrize("novelty_mode", _BOTH_MODES)
+def test_batch_states_negative_id_parity(novelty_mode):
+    """Finding 1 — negative node_id parity with a non-degenerate is_internal.
+
+    T2 — parametrized over both novelty modes: under ``"unseen_in_training"``
+    the vectorized path looks membership up on the RAW ids, so a negative id
+    must not alias node 0's membership.
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0, novelty_mode=novelty_mode)
     # Non-degenerate is_internal: last element (node 3) = 1.0 so is_internal[-1] != 0.
     nsm.set_is_internal(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
     nsm._flat_index = None            # force a rebuild with the new is_internal
@@ -792,3 +844,496 @@ def test_node_state_uses_preprocessor_port_bin_constant():
     from src.data.preprocessor import N_DST_PORT_BINS as PP_BINS
     assert ns.N_DST_PORT_BINS is PP_BINS       # module-level import, same object
     assert ns.N_DST_PORT_BINS == 16
+
+
+# ===========================================================================
+# specs/59 + specs/60 — model.novelty_mode ("recent_window" vs
+# "unseen_in_training"). T1-T11 per specs/60 §6.
+#
+# Training-node set for _build_nsm(_PARITY_EDGES): half = 5 // 2 = 2, so the
+# training slice is the edges at ts 100 (0->1) and ts 200 (0->2)
+# => train nodes {0, 1, 2}. Node 3 first appears at ts 400 and is UNSEEN.
+# ===========================================================================
+
+_GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" \
+    / "node_state_golden_recent_window.npz"
+
+_GOLDEN_KEYS = ("scalar", "batch_all", "batch_odd", "rollback_first")
+
+_GOLDEN_FAILURE_NOTE = (
+    "\n\nDO NOT REGENERATE THE FIXTURE TO MAKE THIS PASS. "
+    "tests/fixtures/node_state_golden_recent_window.npz was generated from "
+    "src/model/node_state.py as it stood at the pre-change commit (its "
+    "source_sha256 pins that file's exact bytes). A mismatch here means the "
+    "default 'recent_window' path — the published, peer-reviewed dim-1 "
+    "behaviour — has CHANGED, which specs/59 §6 forbids. Fix the product code."
+)
+
+
+def _compute_golden_arrays(nsm: NodeStateManager) -> dict:
+    """Recompute the golden arrays from a freshly built manager.
+
+    Args:
+        nsm: manager built exactly as the generator builds it.
+
+    Returns:
+        Mapping of fixture key -> freshly computed array.
+    """
+    from tests.gen_node_state_golden import compute_golden
+    return compute_golden(nsm)
+
+
+# ---------------------------------------------------------------------------
+# T1 — default / absent config reproduces the published behaviour BIT-EXACTLY
+# ---------------------------------------------------------------------------
+
+def test_default_mode_matches_golden():
+    """T1 — the default path is bit-identical to the pre-change code.
+
+    The golden fixture was generated BEFORE model.novelty_mode existed, so this
+    is the only assertion in the suite that pins today's behaviour to the code
+    that produced the published phi_N result, rather than to the post-change
+    code comparing against itself.
+    """
+    from tests.gen_node_state_golden import build_reference_manager
+
+    assert _GOLDEN_PATH.exists(), f"missing golden fixture: {_GOLDEN_PATH}"
+    golden = np.load(_GOLDEN_PATH, allow_pickle=False)
+
+    # (a) constructed with NO novelty_mode argument at all.
+    fresh = _compute_golden_arrays(build_reference_manager(novelty_mode=None))
+    for key in _GOLDEN_KEYS:
+        np.testing.assert_array_equal(
+            fresh[key], golden[key],
+            err_msg=f"golden mismatch on '{key}' (no novelty_mode argument)"
+                    + _GOLDEN_FAILURE_NOTE,
+        )
+
+    # (b) constructed with an EXPLICIT "recent_window" — must be identical.
+    explicit = _compute_golden_arrays(
+        build_reference_manager(novelty_mode=NOVELTY_MODE_RECENT_WINDOW)
+    )
+    for key in _GOLDEN_KEYS:
+        np.testing.assert_array_equal(
+            explicit[key], golden[key],
+            err_msg=f"golden mismatch on '{key}' "
+                    f"(explicit novelty_mode='recent_window')"
+                    + _GOLDEN_FAILURE_NOTE,
+        )
+
+
+def test_golden_fixture_provenance_is_recorded():
+    """T1 support — the fixture carries the provenance stamp stage 5 verifies.
+
+    Checks only that the stamp EXISTS and is well-formed; the cross-check
+    against ``git show <git_head>:src/model/node_state.py | sha256sum`` is a
+    stage-5 review step (specs/60 §6.1, §8).
+    """
+    golden = np.load(_GOLDEN_PATH, allow_pickle=False)
+    src_sha = str(golden["source_sha256"])
+    head = str(golden["git_head"])
+    assert len(src_sha) == 64 and all(c in "0123456789abcdef" for c in src_sha)
+    assert head != "unknown" and len(head) == 40
+
+
+# ---------------------------------------------------------------------------
+# T3 — semantics of the new mode
+# ---------------------------------------------------------------------------
+
+def test_unseen_mode_semantics():
+    """T3 — dim 1 marks nodes absent from the training split, time-invariantly."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                     novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    ref = _build_nsm(_PARITY_EDGES, W_ms=1000.0)   # default mode
+
+    np.testing.assert_array_equal(
+        nsm._train_node_ids, np.array([0, 1, 2], dtype=np.int64)
+    )
+
+    # Node 3 is absent from the training split -> novel, at ANY query time
+    # at or after its first appearance (D2 time-invariance).
+    assert nsm.get_state_at_time(3, 600.0)[1] == 1.0
+    assert nsm.get_state_at_time(3, 5000.0)[1] == 1.0
+
+    # Node 0 IS a training node -> never novel, even at a time where the
+    # window predicate would fire. Proves the predicate was REPLACED, not OR-ed.
+    assert ref.get_state_at_time(0, 600.0)[1] == 1.0, (
+        "fixture assumption broken: recent_window must fire for node 0 at t=600"
+    )
+    assert nsm.get_state_at_time(0, 600.0)[1] == 0.0
+
+    # D4 — a domain-resident node with no history, an out-of-domain id and a
+    # negative id all read 0.0 on both surfaces.
+    nsm5 = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                      novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    nsm5.set_is_internal(np.zeros(6, dtype=np.float32))   # domain 0..5
+    assert nsm5.get_state_at_time(5, 600.0)[1] == 0.0
+    assert nsm5.get_batch_states(np.array([5], dtype=np.int64), 600.0)[0, 1] == 0.0
+    for bad in (9999, -1):
+        assert nsm.get_state_at_time(bad, 600.0)[1] == 0.0
+        assert nsm.get_batch_states(
+            np.array([bad], dtype=np.int64), 600.0
+        )[0, 1] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# T4 — causality: a node is not "novel" before it has appeared at all
+# ---------------------------------------------------------------------------
+
+def test_unseen_mode_causality():
+    """T4 — dim 1 is 0 for an unseen node queried BEFORE its first edge (D1)."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                     novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    # Node 3's only edge is at ts 400; query at 300 precedes it.
+    assert nsm.get_state_at_time(3, 300.0)[1] == 0.0
+    assert nsm.get_batch_states(np.array([3], dtype=np.int64), 300.0)[0, 1] == 0.0
+    # ... and 1.0 once it has appeared, so the 0.0 above is causality, not a
+    # dead code path.
+    assert nsm.get_state_at_time(3, 400.0)[1] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# T5 — rollback invariance under the new mode (D3)
+# ---------------------------------------------------------------------------
+
+def test_unseen_mode_rollback_invariance():
+    """T5 — masking the first-seen edge does NOT change dim 1 in the new mode.
+
+    Mirror of ``test_rollback_first_edge_novelty`` (default mode), which stays
+    unchanged. Training membership is a property of the node, so a masked
+    neighbour edge cannot alter it (specs/59 D3).
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                     novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+
+    # Unseen node (3): first-seen edge at ts 400, incoming from node 0.
+    assert nsm.get_state_at_time(3, 600.0)[1] == 1.0
+    after = nsm.rollback_edge(
+        node_id=3, edge_timestamp_ms=400.0, edge_direction="outgoing",
+        edge_features={"peer_id": 0}, query_time_ms=600.0,
+    )
+    assert after[1] == 1.0, "unseen node must stay novel across a rollback"
+
+    # Training node (0): first-seen edge at ts 100, outgoing to node 1.
+    assert nsm.get_state_at_time(0, 600.0)[1] == 0.0
+    after0 = nsm.rollback_edge(
+        node_id=0, edge_timestamp_ms=100.0, edge_direction="outgoing",
+        edge_features={"peer_id": 1}, query_time_ms=600.0,
+    )
+    assert after0[1] == 0.0
+
+    # Under the DEFAULT mode the same rollback DOES move dim 1 — proving the
+    # invariance above is mode-specific and not an inert assertion.
+    ref = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    assert ref.get_state_at_time(3, 600.0)[1] == 1.0
+    assert ref.rollback_edge(
+        node_id=3, edge_timestamp_ms=400.0, edge_direction="outgoing",
+        edge_features={"peer_id": 0}, query_time_ms=600.0,
+    )[1] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# T6 — persistence round-trip and legacy-directory degradation
+# ---------------------------------------------------------------------------
+
+def _rewrite_legacy_meta(out_dir: Path) -> None:
+    """Strip a saved directory back to the pre-specs/60 on-disk shape.
+
+    Args:
+        out_dir: directory previously written by ``NodeStateManager.save``.
+    """
+    tn = out_dir / "train_node_ids.npy"
+    if tn.exists():
+        tn.unlink()
+    with open(out_dir / "meta.pkl", "rb") as f:
+        meta = pickle.load(f)
+    with open(out_dir / "meta.pkl", "wb") as f:
+        pickle.dump({"window_seconds": meta["window_seconds"],
+                     "snapshot_interval": meta["snapshot_interval"]}, f)
+
+
+def test_novelty_mode_persistence_roundtrip(tmp_path):
+    """T6 — save/load round-trips the mode and the training-node set."""
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                     novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    out_dir = tmp_path / "ns_unseen"
+    nsm.save(out_dir)
+
+    assert (out_dir / "train_node_ids.npy").exists()
+    loaded = NodeStateManager.load(out_dir)
+    assert loaded.novelty_mode == NOVELTY_MODE_UNSEEN_IN_TRAINING
+    np.testing.assert_array_equal(loaded._train_node_ids, nsm._train_node_ids)
+    assert loaded.get_state_at_time(3, 600.0)[1] == 1.0
+    assert loaded.get_state_at_time(0, 600.0)[1] == 0.0
+
+
+def test_legacy_snapshot_dir_degrades_to_default_mode(tmp_path):
+    """T6 — a directory written before specs/60 loads as 'recent_window'.
+
+    Simulated by saving, then deleting ``train_node_ids.npy`` and rewriting
+    ``meta.pkl`` with only the two keys the old ``save()`` wrote.
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    out_dir = tmp_path / "ns_legacy"
+    nsm.save(out_dir)
+    _rewrite_legacy_meta(out_dir)
+
+    loaded = NodeStateManager.load(out_dir)
+    assert loaded.novelty_mode == NOVELTY_MODE_RECENT_WINDOW
+    assert loaded._train_node_ids is None
+
+    # Behaviour matches a never-saved default-mode manager, bit for bit.
+    ref = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    for t in (-500.0, 350.0, 600.0, 5000.0):
+        for v in (0, 1, 2, 3):
+            np.testing.assert_array_equal(
+                loaded.get_state_at_time(v, t)[_EXACT_DIMS],
+                ref.get_state_at_time(v, t)[_EXACT_DIMS],
+            )
+
+    # A caller CLAIMING the new mode against a legacy directory must be refused.
+    with pytest.raises(ValueError, match="novelty_mode mismatch"):
+        NodeStateManager.load(
+            out_dir, expected_novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING
+        )
+
+
+def _real_node_state_dirs() -> list[Path]:
+    """Every genuine on-disk node-state directory in this checkout.
+
+    Superset of specs/60 §6.2's ``_artifacts_available()`` gate, which also
+    requires ``graphs/train.bin`` — irrelevant to a load-only backward-compat
+    check, and absent in checkouts that still carry usable legacy node-state
+    directories.
+
+    Returns:
+        Directories containing a ``histories.pkl`` and a ``meta.pkl``.
+    """
+    cfg = resolve_cfg()
+    candidates = [REPO_ROOT / cfg["graph"]["node_state_dir"],
+                  REPO_ROOT / "node_state_snapshots"]
+    candidates += sorted((REPO_ROOT / "runs").glob("*/node_state_snapshots"))
+    seen: list[Path] = []
+    for d in candidates:
+        if d in seen:
+            continue
+        if (d / "histories.pkl").exists() and (d / "meta.pkl").exists():
+            seen.append(d)
+    return seen
+
+
+def test_legacy_on_disk_snapshot_dir_loads_as_default_mode():
+    """T6b — REAL on-disk node-state directories still load (artifact-gated).
+
+    T6's delete-and-rewrite simulation proves the code handles a directory the
+    test itself built; this proves it handles the directories that actually
+    exist (including the HPC-mirror shape) — the backward-compat claim that
+    matters most (specs/60 §6.2).
+    """
+    dirs = _real_node_state_dirs()
+    if not dirs:
+        pytest.skip(
+            "no on-disk node_state directory found — run "
+            "scripts/02_build_graph.py first"
+        )
+    for d in dirs:
+        nsm = NodeStateManager.load(d)
+        assert nsm.novelty_mode == NOVELTY_MODE_RECENT_WINDOW, d
+        assert nsm._train_node_ids is None, d
+        # A pre-specs/60 directory must also satisfy an explicit default claim.
+        NodeStateManager.load(d, expected_novelty_mode=NOVELTY_MODE_RECENT_WINDOW)
+
+
+# ---------------------------------------------------------------------------
+# T7 — validation of the mode string and the config/artifact agreement guard
+# ---------------------------------------------------------------------------
+
+def test_novelty_mode_validation(tmp_path):
+    """T7 — every illegal or inconsistent mode combination raises ValueError."""
+    with pytest.raises(ValueError, match="Unknown model.novelty_mode"):
+        NodeStateManager(novelty_mode="bogus")
+
+    good = _build_nsm(_PARITY_EDGES, W_ms=1000.0)
+    good_dir = tmp_path / "ns_default"
+    good.save(good_dir)
+
+    with pytest.raises(ValueError, match="Unknown expected_novelty_mode"):
+        NodeStateManager.load(good_dir, expected_novelty_mode="bogus")
+
+    unseen = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                        novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    unseen_dir = tmp_path / "ns_unseen"
+    unseen.save(unseen_dir)
+
+    with pytest.raises(ValueError, match="novelty_mode mismatch"):
+        NodeStateManager.load(
+            unseen_dir, expected_novelty_mode=NOVELTY_MODE_RECENT_WINDOW
+        )
+
+    # "No claim" (expected_novelty_mode=None) accepts a consistent directory.
+    loaded = NodeStateManager.load(unseen_dir)
+    assert loaded.novelty_mode == NOVELTY_MODE_UNSEEN_IN_TRAINING
+
+    # An INTERNALLY inconsistent directory is refused even with no claim.
+    (unseen_dir / "train_node_ids.npy").unlink()
+    with pytest.raises(ValueError, match="no train_node_ids.npy"):
+        NodeStateManager.load(unseen_dir)
+
+
+# ---------------------------------------------------------------------------
+# T8 — the new mode refuses to guess when the training-node set is unavailable
+# ---------------------------------------------------------------------------
+
+def test_unseen_mode_membership_unavailable_raises():
+    """T8 — querying without an established training-node set is a hard error.
+
+    Asymmetry by design (specs/60 §6.2): ``_compute_state``'s no-history early
+    return fires before dim 1, so the scalar surfaces only reach the membership
+    lookup for a node that HAS history (node 3). ``get_batch_states`` reaches it
+    unconditionally.
+    """
+    arr = _arrays_from_edges(_PARITY_EDGES)
+    nsm = NodeStateManager(window_seconds=1.0, snapshot_interval=0,
+                           novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+    nsm.build_hourly_baselines(
+        arr["src"][:2], arr["dst"][:2], arr["ts"][:2],
+        arr["ib"][:2], arr["ob"][:2],
+    )
+    # NOTE: no set_train_nodes() call.
+    nsm.build_snapshots(arr["src"], arr["dst"], arr["ts"],
+                        arr["ib"], arr["ob"], arr["dp"], snapshot_interval=0)
+    nsm.set_is_internal(np.zeros(4, dtype=np.float32))
+    assert nsm._train_node_ids is None
+
+    with pytest.raises(RuntimeError, match="requires a training-node set"):
+        nsm.get_state_at_time(3, 600.0)
+    with pytest.raises(RuntimeError, match="requires a training-node set"):
+        nsm.rollback_edges(3, 600.0, [])
+    with pytest.raises(RuntimeError, match="requires a training-node set"):
+        nsm.get_batch_states(np.array([0, 1, 2, 3], dtype=np.int64), 600.0)
+    with pytest.raises(RuntimeError, match="requires a training-node set"):
+        nsm.get_batch_states(np.array([-1, 9999], dtype=np.int64), 600.0)
+
+
+# ---------------------------------------------------------------------------
+# T9 — every scripts/ load site passes expected_novelty_mode (source pinning)
+# ---------------------------------------------------------------------------
+
+def _extract_call_texts(source: str, needle: str) -> list[str]:
+    """Return the full text of every ``needle(...)`` call, paren-balanced.
+
+    A naive line scan misses the multi-line call form the load sites use, so
+    walk parenthesis depth from the opening paren until it returns to zero.
+
+    Args:
+        source: full file source text.
+        needle: call prefix INCLUDING the opening paren, e.g. ``"foo.load("``.
+
+    Returns:
+        One string per call, from ``needle`` through its matching ``)``.
+    """
+    calls: list[str] = []
+    start = source.find(needle)
+    while start != -1:
+        i = start + len(needle) - 1        # index of the opening paren
+        depth = 0
+        for j in range(i, len(source)):
+            if source[j] == "(":
+                depth += 1
+            elif source[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(source[start:j + 1])
+                    break
+        start = source.find(needle, start + len(needle))
+    return calls
+
+
+def test_all_load_sites_pass_expected_novelty_mode():
+    """T9 — no scripts/ file may load a NodeStateManager without the guard.
+
+    Globbed, never a hardcoded list, so a future script cannot silently skip
+    the config/artifact agreement check (specs/60 §4, §8). explore/ is out of
+    scope by owner constraint 6; tests/ deliberately load with no claim.
+    """
+    offenders: list[str] = []
+    checked = 0
+    for path in sorted((REPO_ROOT / "scripts").glob("*.py")):
+        source = path.read_text()
+        for call in _extract_call_texts(source, "NodeStateManager.load("):
+            checked += 1
+            if "expected_novelty_mode" not in call:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {call}")
+    assert checked > 0, "no NodeStateManager.load( call sites found in scripts/"
+    assert not offenders, (
+        "these scripts/ call sites load a NodeStateManager without the "
+        "config/artifact agreement guard. Add "
+        "expected_novelty_mode=cfg['model'].get('novelty_mode', "
+        "'recent_window') to each:\n  " + "\n  ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# (d) — the training-node set is derived from TRAINING-split edges only
+# ---------------------------------------------------------------------------
+
+def test_phase2_sets_train_nodes_from_train_split_only():
+    """Phase 2 passes the train-only node arrays, in the required position.
+
+    Source-text pinned (house precedent: tests/test_tuning_config.py). Two
+    claims, both of which a refactor could silently break:
+
+      1. ``set_train_nodes`` receives ``train_src_ids``/``train_dst_ids`` — the
+         SAME arrays ``build_hourly_baselines`` receives, built from
+         ``per_split["train"]`` only (invariant 2/3, no val/test leakage).
+      2. The call sits AFTER ``build_hourly_baselines`` and BEFORE
+         ``build_snapshots`` — Pass 2 calls ``_compute_state``, which reads the
+         set under ``"unseen_in_training"`` (specs/60 §3, §8).
+    """
+    source = (REPO_ROOT / "scripts" / "02_build_graph.py").read_text()
+
+    assert "nsm.set_train_nodes(train_src_ids, train_dst_ids)" in source, (
+        "scripts/02_build_graph.py must establish the training-node set from "
+        "the train-only node-id arrays (invariant 2/3)."
+    )
+    # The arrays really are the ones the hourly baselines use.
+    assert "train_src_ids" in source and "train_dst_ids" in source
+    baselines_at = source.index("nsm.build_hourly_baselines(")
+    set_train_at = source.index("nsm.set_train_nodes(")
+    snapshots_at = source.index("nsm.build_snapshots(")
+    assert baselines_at < set_train_at < snapshots_at, (
+        "set_train_nodes must be called AFTER build_hourly_baselines and "
+        "BEFORE build_snapshots (specs/60 §3)."
+    )
+    # And no val/test array is passed to it.
+    call = _extract_call_texts(source, "nsm.set_train_nodes(")[0]
+    for forbidden in ("val", "test"):
+        assert forbidden not in call, (
+            f"set_train_nodes call mentions {forbidden!r}: {call}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T10 — positive control: the mode fires through all three query surfaces
+# ---------------------------------------------------------------------------
+
+def test_unseen_mode_fires_on_all_three_surfaces():
+    """T10 — dim 1 == 1.0 for node 3 via batch, scalar and rollback surfaces.
+
+    A mode that failed to propagate through any single surface cannot pass.
+    This is the unit-level half of specs/60 §8's anti-false-negative control:
+    an all-zero dim 1 is bit-identical to the expected UNSW finding, so the
+    plumbing has to be proven independently of any dataset number.
+    """
+    nsm = _build_nsm(_PARITY_EDGES, W_ms=1000.0,
+                     novelty_mode=NOVELTY_MODE_UNSEEN_IN_TRAINING)
+
+    batch = nsm.get_batch_states(np.array([0, 1, 2, 3], dtype=np.int64), 600.0)
+    np.testing.assert_array_equal(
+        batch[:, 1], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    )
+    assert nsm.get_state_at_time(3, 600.0)[1] == 1.0
+    assert nsm.rollback_edges(3, 600.0, [])[1] == 1.0
+    assert nsm.rollback_edges(
+        3, 600.0, [(400.0, "outgoing", 0)]
+    )[1] == 1.0

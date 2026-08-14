@@ -675,7 +675,10 @@ def main():
     fs_train = FeatureStore(fs_train_dir)
 
     logger.info("Loading NodeStateManager …")
-    nsm = NodeStateManager.load(nsm_dir)
+    nsm = NodeStateManager.load(
+        nsm_dir,
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     logger.info("Loading background distributions …")
     background = BackgroundDistributions.load(artifacts_dir)

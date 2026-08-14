@@ -1363,7 +1363,10 @@ def main() -> None:
     fs_test = FeatureStore(fs_test_dir)
 
     logger.info("Loading NodeStateManager …")
-    nsm = NodeStateManager.load(nsm_dir)
+    nsm = NodeStateManager.load(
+        nsm_dir,
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     logger.info("Loading background distributions …")
     background = BackgroundDistributions.load(artifacts_dir)

@@ -34,7 +34,11 @@ from src.explainer.temporal_fidelity import (
     temporal_fidelity_for_flow,
 )
 from src.explainer.temporal_shap import TemporalNeighborhoodSHAP, _NeighborEdge
-from src.model.node_state import NodeStateManager
+from src.model.node_state import (
+    NOVELTY_MODE_RECENT_WINDOW,
+    NOVELTY_MODE_UNSEEN_IN_TRAINING,
+    NodeStateManager,
+)
 
 # ---------------------------------------------------------------------------
 # Synthetic fixtures
@@ -64,9 +68,28 @@ _EDGES: list[dict] = [
 _GEID_BASE = 1_000
 
 
-def _build_nsm(edges: list[dict] = _EDGES, W_ms: float = _W_MS) -> NodeStateManager:
-    """Build a NodeStateManager over synthetic edges (test_node_state.py pattern)."""
-    nsm = NodeStateManager(window_seconds=W_ms / 1000.0, snapshot_interval=0)
+def _build_nsm(edges: list[dict] = _EDGES, W_ms: float = _W_MS,
+               novelty_mode: str = NOVELTY_MODE_RECENT_WINDOW,
+               ) -> NodeStateManager:
+    """Build a NodeStateManager over synthetic edges (test_node_state.py pattern).
+
+    The training-node set is established unconditionally, in the same position
+    relative to build_snapshots as scripts/02_build_graph.py (specs/60 §3).
+    With ``_EDGES`` (6 edges, half = 3) the training slice is ts 100/200/300
+    => train nodes {0, 1, 2}; node 3 (first seen at ts 400) is UNSEEN, so under
+    ``"unseen_in_training"`` its dim 1 flips 0 -> 1 and the stub model's logits
+    genuinely differ between the two parametrized runs.
+
+    Args:
+        edges:        edge dicts, ascending by 'ts'.
+        W_ms:         rolling window width in milliseconds.
+        novelty_mode: dim-1 semantics; see src.model.node_state.
+
+    Returns:
+        A ready-to-query NodeStateManager.
+    """
+    nsm = NodeStateManager(window_seconds=W_ms / 1000.0, snapshot_interval=0,
+                           novelty_mode=novelty_mode)
 
     src = np.array([e["src"] for e in edges], dtype=np.int64)
     dst = np.array([e["dst"] for e in edges], dtype=np.int64)
@@ -77,6 +100,7 @@ def _build_nsm(edges: list[dict] = _EDGES, W_ms: float = _W_MS) -> NodeStateMana
 
     half = max(1, len(edges) // 2)
     nsm.build_hourly_baselines(src[:half], dst[:half], ts[:half], ib[:half], ob[:half])
+    nsm.set_train_nodes(src[:half], dst[:half])
     nsm.build_snapshots(src, dst, ts, ib, ob, dp, snapshot_interval=0)
 
     max_node = max(int(src.max()), int(dst.max())) + 1
@@ -175,10 +199,19 @@ class _SpyNSM:
 
 def _make_ctx(
     record_idxs: list[int],
+    novelty_mode: str = NOVELTY_MODE_RECENT_WINDOW,
 ) -> tuple[TemporalNeighborhoodSHAP, _StubModel, list[_NeighborEdge],
            np.ndarray, np.ndarray, dict]:
-    """Assemble (temp_shap, model, records, input_ids, base_feats, kwargs)."""
-    nsm = _build_nsm()
+    """Assemble (temp_shap, model, records, input_ids, base_feats, kwargs).
+
+    Args:
+        record_idxs:  indices into ``_EDGES`` to turn into neighbor records.
+        novelty_mode: forwarded to :func:`_build_nsm` (T11, specs/60 §6.3).
+
+    Returns:
+        The six-tuple the fidelity tests unpack.
+    """
+    nsm = _build_nsm(novelty_mode=novelty_mode)
     # g_split is only touched by _extract_neighbor_edges, which these tests
     # bypass by constructing _NeighborEdge instances directly.
     temp_shap = TemporalNeighborhoodSHAP(

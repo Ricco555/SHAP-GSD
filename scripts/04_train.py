@@ -104,7 +104,10 @@ def main(cfg: dict, best_params_path: Path | None = None) -> None:
     fs_val   = FeatureStore(fs_dir / "val")
 
     # ── 4. Load NodeStateManager ───────────────────────────────────────────────
-    nsm = NodeStateManager.load(repo_root / cfg["graph"]["node_state_dir"])
+    nsm = NodeStateManager.load(
+        repo_root / cfg["graph"]["node_state_dir"],
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     # ── 5. Load balanced EIDs and class weights ────────────────────────────────
     balanced_eids = np.load(

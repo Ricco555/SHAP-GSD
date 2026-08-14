@@ -285,7 +285,10 @@ def main() -> None:
     fs_val   = FeatureStore(fs_dir / "val")
     fs_test  = FeatureStore(fs_dir / "test")
 
-    nsm = NodeStateManager.load(ROOT / cfg["graph"]["node_state_dir"])
+    nsm = NodeStateManager.load(
+        ROOT / cfg["graph"]["node_state_dir"],
+        expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
+    )
 
     balanced_eids = np.load(ROOT / cfg["output"]["balanced_train_indices_path"])
     class_weights = torch.from_numpy(
