@@ -1176,19 +1176,48 @@ def _real_node_state_dirs() -> list[Path]:
     return seen
 
 
+def _is_legacy_snapshot_dir(d: Path) -> bool:
+    """True if ``d`` predates specs/60, i.e. its meta records no novelty_mode.
+
+    Must be judged from the artifact itself, never from "a directory exists".
+    Once any run has been built with ``unseen_in_training`` — as happens the
+    moment the feature is used for real — a machine carries a legitimate
+    NON-legacy directory, and a test that assumes otherwise fails on that
+    machine only. That bit on the HPC container 2026-08-14 and killed the
+    pipeline's pytest gate.
+
+    Args:
+        d: candidate node-state snapshot directory.
+
+    Returns:
+        True when ``meta.pkl`` carries no ``novelty_mode`` key.
+    """
+    import pickle
+    try:
+        with open(d / "meta.pkl", "rb") as f:
+            meta = pickle.load(f)
+    except Exception:
+        return False
+    return isinstance(meta, dict) and "novelty_mode" not in meta
+
+
 def test_legacy_on_disk_snapshot_dir_loads_as_default_mode():
-    """T6b — REAL on-disk node-state directories still load (artifact-gated).
+    """T6b — REAL pre-specs/60 node-state directories still load (artifact-gated).
 
     T6's delete-and-rewrite simulation proves the code handles a directory the
     test itself built; this proves it handles the directories that actually
     exist (including the HPC-mirror shape) — the backward-compat claim that
     matters most (specs/60 §6.2).
+
+    Only directories that are genuinely legacy are asserted on; a directory
+    written by the new code is not a backward-compatibility case and is skipped
+    (see :func:`_is_legacy_snapshot_dir`).
     """
-    dirs = _real_node_state_dirs()
+    dirs = [d for d in _real_node_state_dirs() if _is_legacy_snapshot_dir(d)]
     if not dirs:
         pytest.skip(
-            "no on-disk node_state directory found — run "
-            "scripts/02_build_graph.py first"
+            "no PRE-specs/60 on-disk node_state directory found (any present "
+            "were written by the new code, which is not a backward-compat case)"
         )
     for d in dirs:
         nsm = NodeStateManager.load(d)
