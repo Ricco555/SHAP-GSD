@@ -869,6 +869,55 @@ _GOLDEN_FAILURE_NOTE = (
     "behaviour — has CHANGED, which specs/59 §6 forbids. Fix the product code."
 )
 
+# Cross-machine comparison policy for the golden fixture.
+#
+# The fixture is generated on one machine and asserted on another (developer
+# laptop vs. the HPC container), so dims computed through libm transcendentals
+# are NOT bit-portable: np.sin/np.cos (dims 11/12), np.log/np.log1p (8, 9, 10)
+# and everything derived from them (13, 14) can differ by a float32 ULP between
+# numpy/BLAS builds and CPU architectures. Observed for real on supek
+# 2026-08-14: 2 of 480 elements differed by 1.1920929e-07 — exactly one ULP at
+# that magnitude — which failed the pipeline's pytest gate and killed a
+# 38-job chain.
+#
+# Relaxing those dims to a float32 tolerance does not weaken what this test
+# exists to pin. Dim 1 (novelty) is pure boolean logic and stays EXACT, as do
+# the flag/count dims, which carry no transcendental. A real change to the
+# published recent_window dim-1 behaviour still fails loudly.
+_GOLDEN_EXACT_DIMS = [0, 1, 3, 4, 5, 6, 7]   # flags and integer-valued counts
+_GOLDEN_TOL = 1e-6                            # float32-appropriate; ~8x one ULP
+
+
+def _assert_golden_match(actual: np.ndarray, expected: np.ndarray,
+                         key: str, context: str) -> None:
+    """Compare one golden array: exact on flag/count dims, tolerant elsewhere.
+
+    Args:
+        actual:   freshly computed array, shape (..., 15).
+        expected: the stored fixture array, same shape.
+        key:      fixture key name, for the failure message.
+        context:  how the manager was constructed, for the failure message.
+    """
+    assert actual.shape == expected.shape, (
+        f"golden shape mismatch on '{key}' ({context}): "
+        f"{actual.shape} != {expected.shape}" + _GOLDEN_FAILURE_NOTE
+    )
+    # Exact — dim 1 is the published phi_N behaviour this test exists to pin.
+    np.testing.assert_array_equal(
+        actual[..., _GOLDEN_EXACT_DIMS], expected[..., _GOLDEN_EXACT_DIMS],
+        err_msg=f"golden mismatch on '{key}' ({context}), "
+                f"EXACT dims {_GOLDEN_EXACT_DIMS}" + _GOLDEN_FAILURE_NOTE,
+    )
+    # Tolerant — libm-dependent dims (see the policy note above).
+    tol_dims = [d for d in range(actual.shape[-1]) if d not in _GOLDEN_EXACT_DIMS]
+    np.testing.assert_allclose(
+        actual[..., tol_dims], expected[..., tol_dims],
+        rtol=_GOLDEN_TOL, atol=_GOLDEN_TOL,
+        err_msg=f"golden mismatch on '{key}' ({context}), "
+                f"tolerant dims {tol_dims} beyond {_GOLDEN_TOL}"
+                + _GOLDEN_FAILURE_NOTE,
+    )
+
 
 def _compute_golden_arrays(nsm: NodeStateManager) -> dict:
     """Recompute the golden arrays from a freshly built manager.
@@ -903,21 +952,26 @@ def test_default_mode_matches_golden():
     # (a) constructed with NO novelty_mode argument at all.
     fresh = _compute_golden_arrays(build_reference_manager(novelty_mode=None))
     for key in _GOLDEN_KEYS:
-        np.testing.assert_array_equal(
-            fresh[key], golden[key],
-            err_msg=f"golden mismatch on '{key}' (no novelty_mode argument)"
-                    + _GOLDEN_FAILURE_NOTE,
-        )
+        _assert_golden_match(fresh[key], golden[key], key,
+                             "no novelty_mode argument")
 
     # (b) constructed with an EXPLICIT "recent_window" — must be identical.
     explicit = _compute_golden_arrays(
         build_reference_manager(novelty_mode=NOVELTY_MODE_RECENT_WINDOW)
     )
     for key in _GOLDEN_KEYS:
+        _assert_golden_match(explicit[key], golden[key], key,
+                             "explicit novelty_mode='recent_window'")
+
+    # (c) the two constructions must agree with each other BIT-EXACTLY on every
+    # dim — same machine, same libm, so no tolerance is warranted here. This
+    # keeps a full-precision equality assertion in the test despite (a)/(b)
+    # being cross-machine tolerant.
+    for key in _GOLDEN_KEYS:
         np.testing.assert_array_equal(
-            explicit[key], golden[key],
-            err_msg=f"golden mismatch on '{key}' "
-                    f"(explicit novelty_mode='recent_window')"
+            fresh[key], explicit[key],
+            err_msg=f"'{key}': omitting novelty_mode and passing "
+                    f"'recent_window' explicitly disagree on the SAME machine"
                     + _GOLDEN_FAILURE_NOTE,
         )
 
