@@ -20,12 +20,13 @@ final/review01/coder_instructions_figure_determinism.md S4). No neighbour
 count or magnitude is hardcoded here — the per-class "Reason" line in each
 `.txt` output is built from that flow's own JSON at render time.
 
-Backdoor is not in the shared CANDIDATES list — no correctly-classified
-Backdoor flow exists in this run, so it cannot appear in an attribution
-case study (explore/case_studies.py excludes it entirely for that reason).
-This script renders it anyway from `BACKDOOR_TOPOLOGY_EID`, because the
-2-hop topology panel is structural and does not depend on the prediction
-being correct — it is Backdoor's one valid artifact in this figure set.
+A class with zero correctly-classified flows (e.g. UNSW's Backdoor: 0/200)
+is excluded from the shared curated-candidate list — it cannot appear in an
+attribution case study (explore/case_studies.py excludes it entirely for
+that reason). This script renders such classes anyway, via
+`select_topology_only_fallback`'s highest-confidence flow regardless of
+correctness, because the 2-hop topology panel is structural and does not
+depend on the prediction being correct.
 
 Files read (all resolved via explore._paths.paths(), run.dir-aware):
   outputs/explanations/<Class>/<EID>.json
@@ -57,7 +58,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
-from explore._case_candidates import CANDIDATES, BACKDOOR_TOPOLOGY_EID  # noqa: E402
+from explore._case_candidates import select_curated_candidates, select_topology_only_fallback  # noqa: E402
 from src.model.node_state import NodeStateManager  # noqa: E402
 _P = paths()
 OUT_DIR = _P["figures"] / "graph"
@@ -455,11 +456,13 @@ def main() -> None:
     eid_to_edge, inv_map = load_graph()
     nsm = load_node_state()
 
-    # Backdoor is not in the shared attribution-case CANDIDATES list (no
-    # correctly-classified Backdoor flow exists), but the topology panel is
-    # structural and does not depend on prediction correctness, so it is
-    # rendered here from its own dedicated EID.
-    all_candidates = list(CANDIDATES) + [("Backdoor", BACKDOOR_TOPOLOGY_EID)]
+    # Classes with zero correctly-classified flows (e.g. UNSW's Backdoor) are
+    # not in the shared attribution-case curated list, but the topology panel
+    # is structural and does not depend on prediction correctness, so each
+    # gets its own topology-only fallback flow instead.
+    curated  = select_curated_candidates(_P["explanations"])
+    fallback = select_topology_only_fallback(_P["explanations"], curated=curated)
+    all_candidates = list(curated) + list(fallback.items())
 
     for cls_name, eid in all_candidates:
         print(f"Processing {cls_name} EID={eid} …")

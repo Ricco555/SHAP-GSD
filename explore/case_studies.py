@@ -54,7 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
-from explore._case_candidates import CANDIDATES  # noqa: E402
+from explore._case_candidates import select_curated_candidates  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.model.temporal_sampler import TemporalNeighborSampler  # noqa: E402
 from src.visualization.case_study_plots import make_case_study_figure, make_panel_figures  # noqa: E402
@@ -243,12 +243,13 @@ def main() -> None:
         )
     else:
         out_dir = OUT_DIR
-        candidates = CANDIDATES
+        curated = select_curated_candidates(EXPL_DIR)
+        candidates = curated
         if args.filter_class:
-            candidates = [(c, e) for c, e in CANDIDATES if c == args.filter_class]
+            candidates = [(c, e) for c, e in curated if c == args.filter_class]
             if not candidates:
                 logger.error(f"No candidate found for class '{args.filter_class}'. "
-                             f"Valid classes: {[c for c, _ in CANDIDATES]}")
+                             f"Valid classes: {[c for c, _ in curated]}")
                 return
 
     for class_name, global_eid in candidates:
