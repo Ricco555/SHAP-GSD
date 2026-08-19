@@ -59,23 +59,25 @@ CLASS_COLORS = {
 }
 
 
-def load_eid_to_hour() -> dict:
-    """Return {edge_id: hour_utc} from DGL test graph timestamps."""
+def load_eid_to_hour() -> tuple[dict, float]:
+    """Return ({edge_id: hour_utc}, test-split capture span in hours) from
+    DGL test graph timestamps. Span is 0.0 if unavailable."""
     graph_path = _P["graphs"] / "test.bin"
     if not graph_path.exists():
-        return {}
+        return {}, 0.0
     try:
         import dgl
         gs, _ = dgl.load_graphs(str(graph_path))
         g = gs[0]
+        ts = g.edata["timestamp"].numpy()
+        span_hours = (float(ts.max()) - float(ts.min())) / 1000.0 / 3600.0 if len(ts) else 0.0
         return {
-            int(eid): datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).hour
-            for eid, ts in zip(g.edata[dgl.EID].numpy(),
-                               g.edata["timestamp"].numpy())
-        }
+            int(eid): datetime.fromtimestamp(int(t) / 1000, tz=timezone.utc).hour
+            for eid, t in zip(g.edata[dgl.EID].numpy(), ts)
+        }, span_hours
     except Exception as e:
         print(f"Warning: could not load DGL graph: {e}")
-        return {}
+        return {}, 0.0
 
 
 def load_novelty_audit() -> dict:
@@ -87,7 +89,7 @@ def load_novelty_audit() -> dict:
 
 
 def main() -> None:
-    eid_to_hour = load_eid_to_hour()
+    eid_to_hour, span_hours = load_eid_to_hour()
     has_timestamps = bool(eid_to_hour)
 
     # Load per-flow phi_N per class
@@ -121,6 +123,9 @@ def main() -> None:
             n_flows_total += 1
             if src_nov != 0.0 or dst_nov != 0.0:
                 n_novelty_exact_nonzero += 1
+        if not phi_n_list:
+            print(f"  SKIP {cls} — 0 explained flows")
+            continue
         class_phi_n[cls]   = phi_n_list
         class_hours[cls]   = hour_list
         class_totals[cls]  = total_list
@@ -179,9 +184,11 @@ def main() -> None:
     if has_timestamps:
         ax1.set_xlim(-0.5, 23.5)
         ax1.set_xticks(range(0, 24, 4))
-        ax1.text(0.02, 0.97,
-                 "Controlled lab env. (UNSW-NB15, 2 days)\n"
-                 "Full diurnal pattern not recoverable.",
+        if span_hours < 24:
+            span_note = f"{_P['dataset_name']} test capture: {span_hours:.1f}h.\nFull diurnal pattern not recoverable (<24h)."
+        else:
+            span_note = f"{_P['dataset_name']} test capture: {span_hours:.1f}h ({span_hours / 24:.1f} days)."
+        ax1.text(0.02, 0.97, span_note,
                  transform=ax1.transAxes, fontsize=7, va="top",
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_GRAY, alpha=0.85))
     else:
@@ -252,7 +259,7 @@ def main() -> None:
         "----",
         "φ_N (node-structural attribution) captures the contribution of GNN",
         "computation subgraph context: per-node SHAP plus src/dst novelty SHAP.",
-        "This is non-trivial on UNSW-NB15, proving that GNN context encodes signal",
+        f"This is non-trivial on {_P['dataset_name']}, proving that GNN context encodes signal",
         "that flat feature-only SHAP (φ_N ≡ 0) cannot see.",
         "",
         "KEY FINDINGS",
@@ -293,8 +300,8 @@ def main() -> None:
         "-------",
         r"Node-structural attribution (φ_N) across SHAP-GSD classes.",
         "Left: per-flow φ_N vs hour-of-day for the five largest classes; per-hour",
-        "mean marked with horizontal ticks; annotation notes the controlled-lab",
-        "environment of UNSW-NB15 (2 days, no full diurnal cycle).",
+        "mean marked with horizontal ticks; annotation notes the test-split capture",
+        f"span ({span_hours:.1f}h, {_P['dataset_name']}).",
         "Right: violin distribution of φ_N per class (coral fill), sorted by mean",
         fr"φ_N descending; ◆ = mean. φ_N accounts for {frac_min:.0f}–{frac_max:.0f}%",
         "of total |φ|, compared to φ_N ≡ 0 in flat KernelSHAP.",
