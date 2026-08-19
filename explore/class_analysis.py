@@ -165,8 +165,8 @@ for cls, d in per_class.items():
     for g, cnt in d["group_freq"].items():
         all_groups[g] += cnt
 
-# Select top N groups by total frequency
-TOP_N = 20
+# Select top N groups by total frequency (capped by how many groups actually occur)
+TOP_N = min(20, len(all_groups))
 top_groups = [g for g, _ in sorted(all_groups.items(), key=lambda x: -x[1])[:TOP_N]]
 
 # Build matrix: rows=groups, cols=classes; value = freq/n_correct (normalised)
