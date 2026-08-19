@@ -154,14 +154,20 @@ def main() -> None:
 
     # ------------------------------------------------------------------ txt
     absence_dominant = [(cls, ap) for cls, ap in zip(classes, abs_pct) if ap > 50]
+    n_attack   = sum(1 for cls, _ in absence_dominant if cls != "Benign")
+    has_benign = any(cls == "Benign" for cls, _ in absence_dominant)
+    breakdown  = f"{n_attack} attack class{'es' if n_attack != 1 else ''}"
+    if has_benign:
+        breakdown += " and Benign normal traffic"
 
     lines = [
         f"Figure reasoning — {STEM}",
         "=" * 48, "",
         "WHAT",
         "----",
-        "Four classes are characterised by absent network norms rather than",
-        "present attack signatures (three attack classes plus Benign normal traffic).",
+        f"{len(absence_dominant)} class{'es are' if len(absence_dominant) != 1 else ' is'} "
+        f"characterised by absent network norms rather than present attack",
+        f"signatures ({breakdown}).",
         "Negative Fidelity+ means the explanation correctly identifies missing",
         "features — it is semantically valid, not an explainer failure.",
         "",
@@ -180,12 +186,6 @@ def main() -> None:
         neg_grp = dominant_negative_group(cls)
         lines.append(f"    {cls:12s}: {ap:.1f}% absence-driven  |  dominant neg group: {neg_grp}")
 
-    n_attack   = sum(1 for cls, _ in absence_dominant if cls != "Benign")
-    has_benign = any(cls == "Benign" for cls, _ in absence_dominant)
-    breakdown  = f"{n_attack} attack class{'es' if n_attack != 1 else ''}"
-    if has_benign:
-        breakdown += " and Benign normal traffic"
-
     lines += [
         "",
         "PAPER FRAMING",
@@ -201,7 +201,7 @@ def main() -> None:
         "",
         "CAPTION",
         "-------",
-        "Presence vs absence attribution across UNSW-NB15 attack classes.",
+        f"Presence vs absence attribution across {_P['dataset_name']} attack classes.",
         "Left: per-class mean Fidelity+ ± 1 SEM, sorted ascending; teal bars indicate",
         "presence-driven classes (mean > 0), coral indicate absence-driven (mean ≤ 0);",
         "annotations show the percentage of flows with Fidelity+ ≤ 0. Right: 100%",
