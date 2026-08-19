@@ -63,14 +63,22 @@ _P = paths()
 OUT_DIR = _P["figures"] / "graph"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Encoded edge-feature dimensionality, read live (d_e is split-dependent —
+# never hardcode it, see explore/method_comparison_figure.py's fix, commit 9346a68)
+_META_PATH = ROOT / _P["cfg"]["output"]["transformers_dir"] / "meta.json"
+d_e = json.loads(_META_PATH.read_text())["d_e"]
+
 LABEL_FS = 10
 
 _TEAL  = "#2a9d8f"
 _AMBER = "#e9c46a"
 _GRAY  = "#888888"
 _GHOST = "#cccccc"
+_DEFAULT_CLASS_COLOR = "#6c757d"
 
-# Distinct colour per class (IEEE-safe)
+# Distinct colour per class (IEEE-safe). Classes outside this UNSW-NB15 list
+# (e.g. on another dataset) fall back to _DEFAULT_CLASS_COLOR rather than
+# KeyError.
 _CLASS_COLORS = {
     "Analysis":  "#6a4c93",
     "Backdoor":  "#fb8500",
@@ -319,7 +327,7 @@ def draw_flat_shap_panel(
         ns_str += ", ..."
     warn = (
         "Flat KernelSHAP sees:\n"
-        "  ✓ 212 encoded edge features\n"
+        f"  ✓ {d_e} encoded edge features\n"
         f"  ✗ {n_nbr} temporal neighbors (ghosted)\n"
         f"  ✗ {n_nids} node states (φ_N=[{ns_str}])\n"
         "  ✗ Rolling behaviour context"
@@ -348,7 +356,7 @@ def make_class_figure(
         return
 
     d          = json.loads(json_path.read_text())
-    cls_color  = _CLASS_COLORS[cls_name]
+    cls_color  = _CLASS_COLORS.get(cls_name, _DEFAULT_CLASS_COLOR)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.subplots_adjust(wspace=0.08)
