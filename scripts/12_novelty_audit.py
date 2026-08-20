@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.utils.config import load_config
+from src.explainer.endpoint_audit import build_endpoint_firing_table
 
 logging.basicConfig(
     level=logging.INFO,
@@ -161,19 +162,18 @@ def audit_explanation_jsons(expl_dir: Path) -> dict:
     }
 
 
-# ── Pass 3: NSM node-state dim sampling ──────────────────────────────────────
+# ── Shared artifact loading (Pass 3 / Pass 4) ────────────────────────────────
 
-def audit_node_states(cfg: dict, n_sample: int, seed: int) -> dict:
+def _load_test_graph_and_nsm(cfg: dict) -> tuple:
+    """Load the test-split DGL graph and NodeStateManager, shared by Pass 3
+    (--full) and Pass 4 (--endpoint-audit) so passing both flags together
+    loads these artifacts exactly once.
     """
-    Sample test flows and measure dim-0 (is_internal) and dim-1 (novelty)
-    distributions.  Requires NSM + test graph (run on SRCE).
-    """
-    import torch
     import dgl
     from src.model.node_state import NodeStateManager
 
-    graphs_dir  = Path(cfg["graph"]["dir"])
-    nsm_dir     = Path(cfg["graph"]["node_state_dir"])
+    graphs_dir = Path(cfg["graph"]["dir"])
+    nsm_dir    = Path(cfg["graph"]["node_state_dir"])
 
     logger.info("Loading test graph …")
     g_test, _ = dgl.load_graphs(str(graphs_dir / "test.bin"))
@@ -184,6 +184,18 @@ def audit_node_states(cfg: dict, n_sample: int, seed: int) -> dict:
         nsm_dir,
         expected_novelty_mode=cfg["model"].get("novelty_mode", "recent_window"),
     )
+    return g_test, nsm
+
+
+# ── Pass 3: NSM node-state dim sampling ──────────────────────────────────────
+
+def audit_node_states(g_test: "dgl.DGLGraph", nsm: "NodeStateManager", n_sample: int, seed: int) -> dict:
+    """
+    Sample test flows and measure dim-0 (is_internal) and dim-1 (novelty)
+    distributions.  Requires an already-loaded NSM + test graph (see
+    _load_test_graph_and_nsm), run on SRCE.
+    """
+    import torch
 
     n_edges = g_test.num_edges()
     rng = np.random.default_rng(seed)
@@ -231,6 +243,111 @@ def audit_node_states(cfg: dict, n_sample: int, seed: int) -> dict:
     return result
 
 
+# ── Pass 4: endpoint unseen-in-training vs realized phi_N firing ────────────
+
+def audit_endpoint_novelty_vs_firing(
+    g_test: "dgl.DGLGraph",
+    nsm: "NodeStateManager",
+    expl_dir: Path,
+    fire_floor: float = 1e-6,
+) -> dict:
+    """Pass 4: for every explained flow, recover its real (src, dst) via
+    edge_id, look up each endpoint's unseen-in-training bit, and cross-tab
+    against realized phi_N firing — per class.
+
+    Args:
+        g_test: the loaded test-split DGL graph (graphs_dir/test.bin).
+        nsm: the loaded NodeStateManager. Must have been built under
+            novelty_mode="unseen_in_training" — dim 1 of the node state
+            means "unseen in training" only under that mode; under the
+            default "recent_window" mode it means "first seen within the
+            rolling window W", a different quantity. This function raises
+            ValueError immediately if nsm.novelty_mode is not
+            "unseen_in_training", before touching g_test/expl_dir, so a
+            mismatched-mode run fails loudly instead of silently emitting a
+            mislabeled table.
+        expl_dir: outputs/explanations/ directory, walked exactly as
+            audit_explanation_jsons does (one subdirectory per class name).
+        fire_floor: noise floor for "did phi_N fire", matching Pass 2's
+            existing 1e-6 convention (specs/59 §4.2b) — do not pass a
+            different value.
+
+    Returns:
+        dict as returned by build_endpoint_firing_table, plus a
+        "novelty_mode" key stamped with nsm.novelty_mode (always
+        "unseen_in_training" at return time, since any other value raises).
+
+    Raises:
+        ValueError: if nsm.novelty_mode != "unseen_in_training".
+    """
+    import torch
+    import dgl
+
+    if nsm.novelty_mode != "unseen_in_training":
+        raise ValueError(
+            "audit_endpoint_novelty_vs_firing requires an NSM built with "
+            f"novelty_mode='unseen_in_training', got {nsm.novelty_mode!r}. "
+            "Re-run phase 2 with model.novelty_mode: unseen_in_training, "
+            "per specs/59 / specs/60."
+        )
+
+    geid_to_local = {
+        int(geid): i for i, geid in enumerate(g_test.edata[dgl.EID].numpy())
+    }
+
+    records: list[dict] = []
+    for cls_dir in sorted(expl_dir.iterdir()):
+        if not cls_dir.is_dir():
+            continue
+        cls_name = cls_dir.name
+
+        for p in cls_dir.glob("*.json"):
+            if not p.stem.lstrip("-").isdigit():
+                continue
+            try:
+                d = json.loads(p.read_text())
+            except Exception:
+                continue
+
+            global_eid = int(d["edge_id"])
+            src_nov = float(d.get("src_novelty_shap", 0.0))
+            dst_nov = float(d.get("dst_novelty_shap", 0.0))
+
+            local_eid = geid_to_local.get(global_eid)
+            if local_eid is None:
+                logger.warning(
+                    f"Global EID {global_eid} not found in test graph — "
+                    f"skipping (class={cls_name}, file={p})"
+                )
+                continue
+
+            ts = float(g_test.edata["timestamp"][local_eid])
+            src_t, dst_t = g_test.find_edges(torch.tensor([local_eid]))
+            src_nid = int(src_t[0])
+            dst_nid = int(dst_t[0])
+
+            src_unseen = bool(nsm.get_state_at_time(src_nid, ts)[1] != 0)
+            dst_unseen = bool(nsm.get_state_at_time(dst_nid, ts)[1] != 0)
+
+            records.append({
+                "class_name": cls_name,
+                "src_unseen": src_unseen,
+                "dst_unseen": dst_unseen,
+                "src_novelty_shap": src_nov,
+                "dst_novelty_shap": dst_nov,
+                "fire_floor": fire_floor,
+            })
+
+    table = build_endpoint_firing_table(records)
+    table["novelty_mode"] = nsm.novelty_mode
+    logger.info(
+        f"Endpoint audit: {table['_overall']['n_flows']} flows, "
+        f"{table['_overall']['frac_any_endpoint_unseen']*100:.1f}% any-endpoint-unseen, "
+        f"{table['_overall']['frac_fired']*100:.1f}% fired"
+    )
+    return table
+
+
 # ── Report writer ─────────────────────────────────────────────────────────────
 
 def _write_report(
@@ -238,6 +355,7 @@ def _write_report(
     json_audit: dict,
     state_audit: dict | None,
     out_txt: Path,
+    endpoint_audit: dict | None = None,
 ) -> None:
     lines = [
         "Node Novelty Audit — SHAP-GSD / NF-UNSW-NB15-v3",
@@ -295,6 +413,24 @@ def _write_report(
             "  (skipped — run with --full on SRCE to get dim-0/dim-1 distributions)",
         ]
 
+    if endpoint_audit:
+        mode = endpoint_audit.get("novelty_mode", "N/A")
+        lines += [
+            "",
+            "── Endpoint unseen-in-training vs phi_N firing (per class) ──",
+            f"  novelty_mode: {mode}",
+        ]
+        for cls, v in sorted(endpoint_audit.items()):
+            if cls in ("novelty_mode",):
+                continue
+            n = v.get("n_flows", 0)
+            lines.append(
+                f"    {cls:12s}: {n:4d} flows, "
+                f"{v.get('frac_any_endpoint_unseen', 0)*100:.1f}% any-endpoint-unseen, "
+                f"{v.get('frac_both_endpoints_unseen', 0)*100:.1f}% both-unseen, "
+                f"{v.get('frac_fired', 0)*100:.1f}% fired"
+            )
+
     out_txt.write_text("\n".join(lines) + "\n")
     logger.info(f"Report → {out_txt}")
 
@@ -313,6 +449,10 @@ def main() -> None:
     parser.add_argument("--n-sample", type=int, default=500,
                         help="Number of test flows to sample for dim audit (default 500)")
     parser.add_argument("--seed",     type=int, default=42)
+    parser.add_argument("--endpoint-audit", action="store_true",
+                        help="Also cross-tab endpoint unseen-in-training rate against realized "
+                             "phi_N firing, per class over the actual explained-flow set (requires "
+                             "NSM + test graph; PROXEVAL research tooling, off by default)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -329,26 +469,59 @@ def main() -> None:
     logger.info("Scanning explanation JSONs …")
     json_audit = audit_explanation_jsons(expl_dir)
 
+    # Shared artifact load for Pass 3 (--full) and Pass 4 (--endpoint-audit) —
+    # loaded once even when both flags are given.
+    g_test = nsm = None
+    if args.full or args.endpoint_audit:
+        try:
+            g_test, nsm = _load_test_graph_and_nsm(cfg)
+        except Exception:
+            logger.exception("Artifact load failed — NSM not available? Run on SRCE.")
+
     # Pass 3 (optional)
     state_audit: dict | None = None
     if args.full:
-        logger.info(f"Running full node-state dim audit (n_sample={args.n_sample}) …")
-        try:
-            state_audit = audit_node_states(cfg, args.n_sample, args.seed)
-        except Exception:
-            logger.exception("Full audit failed — NSM not available? Run on SRCE.")
+        if g_test is None or nsm is None:
+            logger.warning("Skipping --full: test graph / NSM load failed above.")
+        else:
+            logger.info(f"Running full node-state dim audit (n_sample={args.n_sample}) …")
+            try:
+                state_audit = audit_node_states(g_test, nsm, args.n_sample, args.seed)
+            except Exception:
+                logger.exception("Full audit failed — NSM not available? Run on SRCE.")
+
+    # Pass 4 (optional)
+    # g_test/nsm/nsm-load failures were already caught above by the broad
+    # except; that handling ends there. The call below is NOT wrapped in a
+    # broad except — a load failure ("NSM not available? Run on SRCE") and a
+    # novelty_mode guard failure (wrong mode for this analysis) are different
+    # failure classes and MUST be distinguishable in the exit status and log
+    # output. audit_endpoint_novelty_vs_firing's ValueError (novelty_mode
+    # guard) is therefore allowed to propagate and exit the script non-zero.
+    # Silently swallowing that ValueError under a generic "NSM not
+    # available?" except is exactly the failure class this spec exists to
+    # prevent: a mismatched-mode run must be loud, not indistinguishable from
+    # a missing-artifact skip.
+    endpoint_audit: dict | None = None
+    if args.endpoint_audit:
+        if g_test is None or nsm is None:
+            logger.warning("Skipping --endpoint-audit: test graph / NSM load failed above.")
+        else:
+            logger.info("Running endpoint unseen-in-training vs phi_N firing audit …")
+            endpoint_audit = audit_endpoint_novelty_vs_firing(g_test, nsm, expl_dir)
 
     # Write outputs
     output = {
-        "node_map_audit":        node_map,
+        "node_map_audit":         node_map,
         "explanation_json_audit": json_audit,
         "node_state_audit":       state_audit,
+        "endpoint_novelty_audit": endpoint_audit,
     }
     json_path = metrics_dir / "novelty_audit.json"
     json_path.write_text(json.dumps(output, indent=2))
     logger.info(f"JSON → {json_path}")
 
-    _write_report(node_map, json_audit, state_audit, metrics_dir / "novelty_audit.txt")
+    _write_report(node_map, json_audit, state_audit, metrics_dir / "novelty_audit.txt", endpoint_audit)
 
 
 if __name__ == "__main__":
