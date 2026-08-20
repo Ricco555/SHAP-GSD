@@ -16,4 +16,14 @@ model:
                                          # left at configs/default.yaml's defaults pending this dataset's own
                                          # Phase 3 tuning pass (do not copy UNSW's tuned values here)
 
+  # Node-novelty mode (added 2026-08-14). "recent_window" is the default and
+  # reproduces every published SHAP-GSD number; it fires 0.000%/0.002% in the
+  # test region on the small-node captures (UNSW 44 nodes, BoT-IoT 293), making
+  # phi_N a measured null there. This capture has a large node population, which
+  # is where "unseen_in_training" is expected to carry signal and where
+  # PROXEVAL research_plan.md 5.5's IoT-vs-enterprise novelty comparison can
+  # actually be tested. Flip back to "recent_window" if strict comparability
+  # with the published UNSW run matters more than measuring this dimension.
+  novelty_mode: "unseen_in_training"
+
 seed: 42
