@@ -18,11 +18,16 @@ Files read:
 
 Files output:
   outputs/figures/arguments/arg5_node_state.{pdf,png,txt}
+  outputs/figures/arguments/arg5_ip_topology.txt  — RFC1918/loopback/public
+                                                      node-IP breakdown,
+                                                      computed live from
+                                                      graphs/node_id_map.json
 """
 
 import matplotlib
 matplotlib.use("Agg")
 
+import ipaddress
 import json
 import sys
 import numpy as np
@@ -39,6 +44,31 @@ _P = paths()
 EXP_DIR = _P["explanations"]
 OUT_DIR = _P["figures"] / "arguments"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def classify_node_ips() -> dict:
+    """Classify every node's IP in graphs/node_id_map.json as RFC1918,
+    loopback, or public. Returns counts plus the raw per-category IP lists,
+    computed live so it holds for any dataset, not just UNSW-NB15.
+    """
+    map_path = _P["graphs"] / "node_id_map.json"
+    if not map_path.exists():
+        return {"rfc1918": [], "loopback": [], "public": [], "unparseable": []}
+    ip_to_id: dict = json.loads(map_path.read_text())
+    buckets: dict[str, list[str]] = {"rfc1918": [], "loopback": [], "public": [], "unparseable": []}
+    for ip_str in ip_to_id:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            buckets["unparseable"].append(ip_str)
+            continue
+        if addr.is_loopback:
+            buckets["loopback"].append(ip_str)
+        elif addr.is_private:
+            buckets["rfc1918"].append(ip_str)
+        else:
+            buckets["public"].append(ip_str)
+    return buckets
 
 STEM     = "arg5_node_state"
 LABEL_FS = 9
@@ -91,6 +121,29 @@ def load_novelty_audit() -> dict:
 def main() -> None:
     eid_to_hour, span_hours = load_eid_to_hour()
     has_timestamps = bool(eid_to_hour)
+
+    ip_buckets = classify_node_ips()
+    n_rfc1918 = len(ip_buckets["rfc1918"])
+    n_loopback = len(ip_buckets["loopback"])
+    n_public  = len(ip_buckets["public"])
+    n_private = n_rfc1918 + n_loopback
+    ip_topology_lines = [
+        f"IP topology — {_P['dataset_name']}",
+        "=" * 48, "",
+        f"RFC1918 private: {n_rfc1918}",
+        f"Loopback:        {n_loopback}",
+        f"Public:          {n_public}",
+    ]
+    if ip_buckets["unparseable"]:
+        ip_topology_lines.append(f"Unparseable:     {len(ip_buckets['unparseable'])}")
+    ip_topology_path = OUT_DIR / "arg5_ip_topology.txt"
+    ip_topology_path.write_text("\n".join(ip_topology_lines))
+    print(f"Saved {ip_topology_path}")
+    mixed_ip_note = (
+        f"mixed-IP topology: {n_private} RFC1918/loopback, {n_public} public"
+        if n_private and n_public else
+        f"{n_private} RFC1918/loopback, {n_public} public"
+    )
 
     # Load per-flow phi_N per class
     class_phi_n: dict[str, list[float]] = {}
@@ -278,7 +331,7 @@ def main() -> None:
         f"({nov_n_nonzero}/{nov_n_total}, PRIMARY, >1e-6 threshold, per novelty_audit.json);",
         f"  Secondary — exact-zero threshold: {n_novelty_exact_nonzero}/{n_flows_total} "
         f"({n_novelty_exact_nonzero / n_flows_total * 100:.2f}%)",
-        f"  {nov_top2_str} highest (mixed-IP topology: 9 RFC1918/loopback)",
+        f"  {nov_top2_str} highest ({mixed_ip_note})",
         "",
         "PAPER FRAMING",
         "-------------",
@@ -292,8 +345,9 @@ def main() -> None:
         f"are non-zero in {nov_frac:.1f}% of explained flows ({nov_n_nonzero}/{nov_n_total},",
         f"PRIMARY convention, >1e-6 threshold; {n_novelty_exact_nonzero}/{n_flows_total} at exact",
         f"zero, secondary), with attack classes averaging {nov_attack_mean:.1f}% and {nov_top2_str} reaching",
-        "the highest rates. The dataset contains a mixed-IP topology (9 RFC1918/loopback",
-        "endpoints alongside 34 public IPs), so novelty is a live signal. Full per-class",
+        f"the highest rates. The dataset contains {n_private} RFC1918/loopback and",
+        f"{n_public} public IPs" + (" (a mixed topology)" if n_private and n_public else "") +
+        ", so novelty is a live signal. Full per-class",
         "rates are in §4.5 and novelty_audit.txt.",
         "",
         "CAPTION",
