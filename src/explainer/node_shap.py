@@ -209,7 +209,12 @@ class NodeNoveltySHAP:
               'src_novelty_shap': float
               'dst_novelty_shap': float
               'node_shap': dict {node_id_str: φ} for non-target nodes
-              'coalition_size': int (|V_sub| + 2)
+              'coalition_size': int (|V_sub| + 2), full conceptual width —
+                  unaffected by the degenerate-toggle guard below
+              'n_degenerate_novelty_players': int, 0-2, count of target
+                  novelty toggles dropped from the solver's coalition matrix
+                  because their "absent" and "present" states are bit-
+                  identical (specs/63)
         """
         import shap
 
@@ -227,9 +232,60 @@ class NodeNoveltySHAP:
 
         non_target_pos: dict[int, int] = build_non_target_pos(non_target_ids)
 
+        # Degenerate-toggle guard (specs/63). A target endpoint's novelty
+        # toggle is degenerate iff its native dim-1 value already equals the
+        # value build_masked_node_states forces onto the "absent" state
+        # (always 0.0, see build_masked_node_states above) — i.e. iff the
+        # native value is 0.0. In that case "present" and "absent" coalition
+        # inputs are bit-identical, so the TRUE Shapley value for that scalar
+        # is exactly 0. Dropping the column (rather than including a constant
+        # column) also avoids handing the solver zero-variance regression
+        # noise that would otherwise perturb the fit of the other players.
+        src_row_idx = next(
+            j for j, nid in enumerate(input_node_ids) if int(nid) == src_nid
+        )
+        dst_row_idx = next(
+            j for j, nid in enumerate(input_node_ids) if int(nid) == dst_nid
+        )
+        src_degenerate = bool(base_node_feats[src_row_idx, _NOVELTY_DIM] == 0.0)
+        dst_degenerate = bool(base_node_feats[dst_row_idx, _NOVELTY_DIM] == 0.0)
+        n_degenerate_novelty_players = int(src_degenerate) + int(dst_degenerate)
+
+        # Full (conceptual, width coalition_size) -> reduced (solver-facing)
+        # column index mapping. Degenerate columns are simply absent from
+        # this mapping.
+        full_to_reduced: dict[int, int] = {}
+        reduced_col = 0
+        if not src_degenerate:
+            full_to_reduced[0] = reduced_col
+            reduced_col += 1
+        if not dst_degenerate:
+            full_to_reduced[1] = reduced_col
+            reduced_col += 1
+        for i in range(M):
+            full_to_reduced[2 + i] = reduced_col
+            reduced_col += 1
+        reduced_size = reduced_col  # coalition_size - n_degenerate_novelty_players
+
+        def _expand_row(reduced_row: np.ndarray) -> np.ndarray:
+            """Reduced-width solver row -> full-width coalition row.
+
+            Degenerate columns are filled with a constant 1 (arbitrary but
+            fixed): build_masked_node_states reads this as "present", which
+            is a no-op for a degenerate player by definition, since present
+            and absent already produce the same masked state.
+            """
+            full_row = np.empty(coalition_size, dtype=np.float32)
+            full_row[0] = 1.0 if src_degenerate else reduced_row[full_to_reduced[0]]
+            full_row[1] = 1.0 if dst_degenerate else reduced_row[full_to_reduced[1]]
+            for i in range(M):
+                full_row[2 + i] = reduced_row[full_to_reduced[2 + i]]
+            return full_row
+
         def _predict_fn(coalition_matrix: np.ndarray) -> np.ndarray:
             results: list[float] = []
-            for row in coalition_matrix:
+            for reduced_row in coalition_matrix:
+                row = _expand_row(reduced_row)
                 modified = self.build_masked_node_states(
                     row, base_node_feats, input_node_ids,
                     src_nid, dst_nid, non_target_pos, true_class,
@@ -240,20 +296,37 @@ class NodeNoveltySHAP:
                 results.append(logit[0, true_class].item())
             return np.array(results, dtype=np.float64)
 
-        background_data = np.zeros((1, coalition_size), dtype=np.float32)
-        foreground_data = np.ones((1, coalition_size), dtype=np.float32)
-        explainer = shap.KernelExplainer(_predict_fn, background_data)
-        f_baseline = float(np.squeeze(explainer.expected_value))
-        f_logit = float(_predict_fn(foreground_data)[0])
-        phi_raw = explainer.shap_values(
-            foreground_data,
-            nsamples=nsamples,
-            l1_reg=_L1_REG,
-            silent=True,
-        )
-        phi = np.array(phi_raw).squeeze()
-        if coalition_size == 1:
-            phi = np.array([float(phi)])
+        if reduced_size == 0:
+            # Both target endpoints degenerate and no non-target nodes: the
+            # single achievable coalition state (everything degenerate or
+            # absent-equals-present) is also the only one there is, so
+            # baseline and foreground logits coincide by construction.
+            phi_reduced = np.array([])
+            f_baseline = f_logit = float(
+                _predict_fn(np.ones((1, 0), dtype=np.float32))[0]
+            )
+        else:
+            background_data = np.zeros((1, reduced_size), dtype=np.float32)
+            foreground_data = np.ones((1, reduced_size), dtype=np.float32)
+            explainer = shap.KernelExplainer(_predict_fn, background_data)
+            f_baseline = float(np.squeeze(explainer.expected_value))
+            f_logit = float(_predict_fn(foreground_data)[0])
+            phi_raw = explainer.shap_values(
+                foreground_data,
+                nsamples=nsamples,
+                l1_reg=_L1_REG,
+                silent=True,
+            )
+            if reduced_size == 1:
+                phi_reduced = np.array([float(np.squeeze(phi_raw))])
+            else:
+                phi_reduced = np.array(phi_raw).squeeze()
+
+        # Reassemble the full-width phi vector. Degenerate columns are left
+        # at their np.zeros initialization — an exact 0.0, not estimated.
+        phi = np.zeros(coalition_size, dtype=np.float64)
+        for full_idx, reduced_idx in full_to_reduced.items():
+            phi[full_idx] = phi_reduced[reduced_idx]
 
         src_novelty_phi = float(phi[0])
         dst_novelty_phi = float(phi[1])
@@ -261,6 +334,7 @@ class NodeNoveltySHAP:
 
         logger.debug(
             f"Node SHAP: class={true_class}, coalition_size={coalition_size}, "
+            f"n_degenerate_novelty_players={n_degenerate_novelty_players}, "
             f"src_novelty_φ={src_novelty_phi:.4f}, dst_novelty_φ={dst_novelty_phi:.4f}, "
             f"efficiency_err={abs(phi.sum() - (f_logit - f_baseline)):.4f}"
         )
@@ -270,6 +344,7 @@ class NodeNoveltySHAP:
             "dst_novelty_shap": dst_novelty_phi,
             "node_shap": node_phi,
             "coalition_size": coalition_size,
+            "n_degenerate_novelty_players": n_degenerate_novelty_players,
             "f_baseline": f_baseline,
             "f_logit": f_logit,
         }

@@ -143,19 +143,33 @@ def is_exhaustive(n_players: int, nsamples: int) -> bool:
 
 def collect_player_counts(
     expl_dir: Path,
-) -> tuple[np.ndarray, dict[str, int], dict[int, int]]:
-    """Read the node-game player count P for every explained flow.
+) -> tuple[np.ndarray, np.ndarray, dict[str, int], dict[int, int]]:
+    """Read the node-game player counts for every explained flow.
+
+    Two counts are tracked per flow (specs/63 sec 6):
+      * P            — the conceptual player count, ``len(node_shap) + 2``.
+        Unchanged in meaning; still what ``crosscheck_player_counts``
+        validates against ``fidelity_novelty.csv``'s ``n_players`` column.
+      * M_effective  — ``P - n_degenerate_novelty_players``, the solver's
+        actual working width after the degenerate-toggle guard
+        (``src/explainer/node_shap.py``) drops provably-null target novelty
+        columns from the KernelSHAP coalition regression. This is the count
+        that determines whether a flow's node-layer attribution is an exact
+        Shapley value — the conceptual P over-counts columns the solver
+        never actually fit.
 
     Args:
         expl_dir: ``outputs/explanations`` directory.
 
     Returns:
-        (array of P per flow, {class name: flow count}, {edge_id: P}).
+        (array of P per flow, array of M_effective per flow,
+        {class name: flow count}, {edge_id: P}).
 
     Raises:
         SystemExit: if no explanation JSONs are found.
     """
     players: list[int] = []
+    players_effective: list[int] = []
     per_class: dict[str, int] = {}
     by_eid: dict[int, int] = {}
     for path in sorted(expl_dir.glob("*/*.json")):
@@ -169,13 +183,21 @@ def collect_player_counts(
                 f"({len(node_ids)}) length mismatch"
             )
         # +2 for the two target-endpoint novelty flags (node_shap.py:226).
-        players.append(len(node_shap) + 2)
-        by_eid[int(d["edge_id"])] = len(node_shap) + 2
+        p = len(node_shap) + 2
+        n_degenerate = int(d.get("n_degenerate_novelty_players", 0))
+        players.append(p)
+        players_effective.append(p - n_degenerate)
+        by_eid[int(d["edge_id"])] = p
         per_class[path.parent.name] = per_class.get(path.parent.name, 0) + 1
 
     if not players:
         raise SystemExit(f"No explanation JSONs under {expl_dir}")
-    return np.asarray(players, dtype=int), per_class, by_eid
+    return (
+        np.asarray(players, dtype=int),
+        np.asarray(players_effective, dtype=int),
+        per_class,
+        by_eid,
+    )
 
 
 def crosscheck_player_counts(metrics_dir: Path, players: dict[int, int]) -> str:
@@ -284,15 +306,23 @@ def main() -> None:
     node_nsamples = int(explainer_cfg["node_nsamples"])
     logger.info(f"Configured node_nsamples = {node_nsamples} (from {args.config})")
 
-    P, per_class, P_by_eid = collect_player_counts(EXPL_DIR)
+    P, M_eff, per_class, P_by_eid = collect_player_counts(EXPL_DIR)
     n_flows = int(P.size)
     logger.info(f"Read {n_flows} explanation JSONs across {len(per_class)} classes")
 
+    # Cross-check uses the conceptual P against fidelity_novelty.csv's
+    # n_players column (unaffected by the degenerate-toggle guard, specs/63
+    # sec 3/6) -- NOT M_effective, which the CSV does not carry.
     xcheck = crosscheck_player_counts(METRICS_DIR, P_by_eid)
     logger.info(f"Player-count cross-check: {xcheck}")
 
+    # Exactness is a property of the solver's actual working width
+    # (M_effective = P - n_degenerate_novelty_players), not the conceptual
+    # player count P (specs/63 sec 6). Every exactness computation below
+    # uses M_effective; P is retained only for the crosscheck above and for
+    # reporting the conceptual player-count distribution.
     p_max_exact = max_exhaustive_players(node_nsamples)
-    exact_mask = np.array([is_exhaustive(int(p), node_nsamples) for p in P])
+    exact_mask = np.array([is_exhaustive(int(m), node_nsamples) for m in M_eff])
     n_exact = int(exact_mask.sum())
     n_sampled = n_flows - n_exact
     pct_exact = 100.0 * n_exact / n_flows
@@ -303,11 +333,17 @@ def main() -> None:
         "mean":   round(float(P.mean()), 2),
         "max":    int(P.max()),
     }
+    dist_effective = {
+        "min":    int(M_eff.min()),
+        "median": float(np.median(M_eff)),
+        "mean":   round(float(M_eff.mean()), 2),
+        "max":    int(M_eff.max()),
+    }
 
     sensitivity = []
     for ns in sorted(set(SENSITIVITY_NSAMPLES) | {node_nsamples}):
         thr = max_exhaustive_players(ns)
-        cnt = int(sum(1 for p in P if is_exhaustive(int(p), ns)))
+        cnt = int(sum(1 for m in M_eff if is_exhaustive(int(m), ns)))
         sensitivity.append({
             "nsamples":         ns,
             "max_exact_P":      thr,
@@ -316,18 +352,26 @@ def main() -> None:
             "is_configured":    ns == node_nsamples,
         })
 
+    # player_count_histogram: conceptual P distribution (crosscheck-backed).
+    # player_count_histogram_effective: M_effective distribution, the count
+    # that actually determines exactness (specs/63 sec 6).
     histogram = {int(p): int(c) for p, c in zip(*np.unique(P, return_counts=True))}
+    histogram_effective = {
+        int(m): int(c) for m, c in zip(*np.unique(M_eff, return_counts=True))
+    }
     stability = read_stability_crossref(METRICS_DIR)
 
     # ── JSON ──────────────────────────────────────────────────────────────
     output_data = {
         "metric": "node_layer_exhaustive_enumeration_share",
         "shap_version_verified": "0.51.0",
-        "exhaustive_condition": "2**P - 2 <= nsamples  (P <= 30)",
+        "exhaustive_condition": "2**M_effective - 2 <= nsamples  (M_effective <= 30)",
         "exhaustive_condition_source":
             "shap/explainers/_kernel.py:407-411 (clamp), :434-471 (enumeration "
             "loop), :478 (sampling skipped), :699/:703 (l1_reg=False -> no "
-            "feature selection), :355-361 (M == P given zeros/ones background)",
+            "feature selection), :355-361 (M == coalition width actually handed "
+            "to the solver, i.e. M_effective per specs/63's degenerate-toggle "
+            "guard, not the conceptual P)",
         "config_path":            str(args.config),
         "node_nsamples":          node_nsamples,
         "n_flows":                n_flows,
@@ -341,8 +385,20 @@ def main() -> None:
         "player_count_crosscheck":  xcheck,
         "player_count_distribution": dist,
         "player_count_histogram": histogram,
+        "player_count_distribution_effective": dist_effective,
+        "player_count_histogram_effective": histogram_effective,
         "nsamples_sensitivity":   sensitivity,
         "sampled_tail_error_reference": stability,
+        "note_P_vs_M_effective": (
+            "P (player_count_distribution/histogram) is the conceptual "
+            "node-game player count len(node_shap) + 2, cross-checked against "
+            "fidelity_novelty.csv's n_players column (player_count_crosscheck "
+            "above). M_effective (player_count_distribution/histogram_effective) "
+            "is P minus n_degenerate_novelty_players -- the solver's actual "
+            "working width after specs/63's degenerate-toggle guard drops "
+            "provably-null target novelty columns -- and is what n_exact/"
+            "pct_exact/n_sampled/nsamples_sensitivity above are computed from."
+        ),
     }
     json_path = METRICS_DIR / "node_shap_convergence.json"
     with open(json_path, "w") as f:
@@ -362,38 +418,51 @@ def main() -> None:
         f"{EXPL_DIR.relative_to(outputs.parent)}), {len(per_class)} classes",
         f"player-count formula P = len(node_shap) + 2 cross-checked against "
         f"{xcheck}",
+        f"exactness is determined by M_effective = P - n_degenerate_novelty_players "
+        f"(specs/63) -- the solver's actual working width after the "
+        f"degenerate-toggle guard drops provably-null target novelty columns; "
+        f"P itself is reported only for the crosscheck above and the "
+        f"conceptual player-count distribution below",
         "",
         "WHAT THE FIGURE SHOWS",
         "----------------------",
-        "  Left panel: the distribution of node-game player counts P over every",
-        "  explained flow, split at the largest P that shap's KernelExplainer",
-        "  solves by exhaustive coalition enumeration at the configured budget.",
+        "  Left panel: the distribution of the solver's effective node-game",
+        "  player count M_effective over every explained flow, split at the",
+        "  largest M_effective that shap's KernelExplainer solves by exhaustive",
+        "  coalition enumeration at the configured budget.",
         "  Right panel: the share of flows receiving exact Shapley values as a",
         "  function of that budget.",
         "",
-        "  shap's KernelExplainer clamps nsamples to 2**P - 2 and then",
+        "  shap's KernelExplainer clamps nsamples to 2**M_effective - 2 and then",
         "  enumerates every coalition, so a flow whose node game has",
-        f"  2**P - 2 <= {node_nsamples} receives the EXACT Shapley value, not a",
+        f"  2**M_effective - 2 <= {node_nsamples} receives the EXACT Shapley "
+        f"value, not a",
         "  sampled estimate. Verified in shap 0.51.0 at",
         "  shap/explainers/_kernel.py:407-411 and :434-471; l1_reg=False",
         "  (node_shap.py:37) keeps the solver at :703 from truncating players.",
         "",
         "KEY FINDINGS",
         "------------",
-        f"  * exhaustive when P <= {p_max_exact}  (at nsamples={node_nsamples})",
+        f"  * exhaustive when M_effective <= {p_max_exact}  "
+        f"(at nsamples={node_nsamples})",
         f"  * exact  (enumerated) {n_exact:>5d} of {n_flows}  ({pct_exact:.1f}%)",
         f"  * sampled (estimated) {n_sampled:>5d} of {n_flows}  "
         f"({100.0 - pct_exact:.1f}%)",
-        f"  * node-game players P = len(node_shap) + 2 novelty flags:",
+        f"  * conceptual node-game players P = len(node_shap) + 2 novelty flags:",
         f"    min {dist['min']}, median {dist['median']:.0f}, "
         f"mean {dist['mean']:.2f}, max {dist['max']}",
-        f"  * sampled tail is exactly the P > {p_max_exact} flows: {n_sampled}",
+        f"  * effective (solver-facing) players M_effective = P - "
+        f"n_degenerate_novelty_players:",
+        f"    min {dist_effective['min']}, median {dist_effective['median']:.0f}, "
+        f"mean {dist_effective['mean']:.2f}, max {dist_effective['max']}",
+        f"  * sampled tail is exactly the M_effective > {p_max_exact} flows: "
+        f"{n_sampled}",
         "",
-        "  P : flows",
+        "  M_effective : flows",
     ]
-    for p in sorted(histogram):
-        tag = "exact " if is_exhaustive(p, node_nsamples) else "sampled"
-        lines.append(f"  {p:>2d} : {histogram[p]:>5d}   {tag}")
+    for m in sorted(histogram_effective):
+        tag = "exact " if is_exhaustive(m, node_nsamples) else "sampled"
+        lines.append(f"  {m:>2d} : {histogram_effective[m]:>5d}   {tag}")
 
     lines += [
         "",
@@ -405,7 +474,8 @@ def main() -> None:
     for s in sensitivity:
         mark = "  <-- configured" if s["is_configured"] else ""
         lines.append(
-            f"  {s['nsamples']:>9d}  {'P <= ' + str(s['max_exact_P']):>16s}  "
+            f"  {s['nsamples']:>9d}  "
+            f"{'M_effective <= ' + str(s['max_exact_P']):>16s}  "
             f"{s['n_exact']:>8d}  {s['pct_exact']:>5.1f}%{mark}"
         )
 
@@ -436,14 +506,16 @@ def main() -> None:
         "",
         "PAPER FRAMING",
         "-------------",
-        f"  The node-novelty coalition game has a small player set (P = "
-        f"{dist['min']}-{dist['max']}, median {dist['median']:.0f} over "
-        f"{n_flows} explained",
+        f"  The node-novelty coalition game has a small effective player set "
+        f"(M_effective = "
+        f"{dist_effective['min']}-{dist_effective['max']}, median "
+        f"{dist_effective['median']:.0f} over {n_flows} explained",
         f"  flows), and KernelSHAP enumerates the coalition space exhaustively "
         f"whenever",
-        f"  2^P - 2 does not exceed the sampling budget. At the configured "
-        f"budget of",
-        f"  nsamples = {node_nsamples} this holds for P <= {p_max_exact}, so "
+        f"  2^M_effective - 2 does not exceed the sampling budget. At the "
+        f"configured budget of",
+        f"  nsamples = {node_nsamples} this holds for M_effective <= "
+        f"{p_max_exact}, so "
         f"{n_exact} of {n_flows} flows ({pct_exact:.1f}%) receive",
         f"  exact Shapley values at the node layer rather than Monte Carlo "
         f"estimates.",
@@ -454,14 +526,17 @@ def main() -> None:
         "-------------------------",
         f"  Node-layer attribution exactness. Left: distribution of "
         f"node-novelty coalition",
-        f"  player counts P = |V_sub \\ endpoints| + 2 novelty flags over the "
-        f"{n_flows} explained",
-        f"  flows (min {dist['min']}, median {dist['median']:.0f}, "
-        f"mean {dist['mean']:.2f}, max {dist['max']}). KernelSHAP enumerates "
-        f"the full",
-        f"  coalition space when 2^P - 2 <= nsamples, which at the configured "
-        f"nsamples = {node_nsamples}",
-        f"  means P <= {p_max_exact} (green bars); those "
+        f"  effective player counts M_effective (the solver's actual working "
+        f"width after specs/63's",
+        f"  degenerate-toggle guard drops provably-null target novelty "
+        f"columns) over the {n_flows} explained",
+        f"  flows (min {dist_effective['min']}, median "
+        f"{dist_effective['median']:.0f}, "
+        f"mean {dist_effective['mean']:.2f}, max {dist_effective['max']}). "
+        f"KernelSHAP enumerates the full",
+        f"  coalition space when 2^M_effective - 2 <= nsamples, which at the "
+        f"configured nsamples = {node_nsamples}",
+        f"  means M_effective <= {p_max_exact} (green bars); those "
         f"{n_exact} flows ({pct_exact:.1f}%) receive exact Shapley values, "
         f"while the",
         f"  remaining {n_sampled} ({100.0 - pct_exact:.1f}%) are sampled. "
@@ -478,23 +553,24 @@ def main() -> None:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
 
     ax = axes[0]
-    ps = np.array(sorted(histogram))
-    counts = np.array([histogram[int(p)] for p in ps])
+    ms = np.array(sorted(histogram_effective))
+    counts = np.array([histogram_effective[int(m)] for m in ms])
     colors = [
-        "seagreen" if is_exhaustive(int(p), node_nsamples) else "lightsteelblue"
-        for p in ps
+        "seagreen" if is_exhaustive(int(m), node_nsamples) else "lightsteelblue"
+        for m in ms
     ]
-    ax.bar(ps, counts, color=colors, edgecolor="white", linewidth=0.5)
+    ax.bar(ms, counts, color=colors, edgecolor="white", linewidth=0.5)
     ax.axvline(p_max_exact + 0.5, color="tomato", ls="--", lw=1.2)
     ax.text(
         p_max_exact + 0.7, counts.max() * 0.92,
-        f"exhaustive: P $\\leq$ {p_max_exact}\n(nsamples = {node_nsamples})",
+        f"exhaustive: $M_{{effective}}$ $\\leq$ {p_max_exact}\n"
+        f"(nsamples = {node_nsamples})",
         fontsize=8, color="tomato", va="top",
     )
-    ax.set_xlabel("Node-game players $P$")
+    ax.set_xlabel("Effective node-game players $M_{effective}$")
     ax.set_ylabel("Flows")
     ax.set_title(
-        f"Node-layer player counts (n = {n_flows} flows)\n"
+        f"Node-layer effective player counts (n = {n_flows} flows)\n"
         f"{n_exact} exact ({pct_exact:.1f}%), {n_sampled} sampled"
     )
     ax.grid(True, axis="y", alpha=0.3)
