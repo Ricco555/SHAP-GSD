@@ -32,7 +32,7 @@ from src.data.feature_groups import (  # noqa: E402
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-R3S2_FG = REPO_ROOT / "runs/nf_unsw_nb15_v3_r3_s2/artifacts/feature_groups.json"
+R3S2_FG = REPO_ROOT / "runs/nf_unsw_nb15_v3/artifacts/feature_groups.json"
 
 
 @pytest.fixture()
