@@ -355,10 +355,11 @@ def _write_report(
     json_audit: dict,
     state_audit: dict | None,
     out_txt: Path,
+    dataset_label: str,
     endpoint_audit: dict | None = None,
 ) -> None:
     lines = [
-        "Node Novelty Audit — SHAP-GSD / NF-UNSW-NB15-v3",
+        f"Node Novelty Audit — {dataset_label}",
         "=" * 60,
         "",
         f"Unique nodes: {node_map.get('n_unique_nodes', 'N/A')}",
@@ -461,6 +462,7 @@ def main() -> None:
     expl_dir    = outputs_dir / "explanations"
     metrics_dir = outputs_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    dataset_label = Path(cfg["data"]["csv_path"]).stem
 
     # Pass 1
     node_map = audit_node_map(graphs_dir)
@@ -521,7 +523,10 @@ def main() -> None:
     json_path.write_text(json.dumps(output, indent=2))
     logger.info(f"JSON → {json_path}")
 
-    _write_report(node_map, json_audit, state_audit, metrics_dir / "novelty_audit.txt", endpoint_audit)
+    _write_report(
+        node_map, json_audit, state_audit, metrics_dir / "novelty_audit.txt",
+        dataset_label, endpoint_audit,
+    )
 
 
 if __name__ == "__main__":
