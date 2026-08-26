@@ -65,6 +65,14 @@ class ExplanationResult:
     # because their "absent" and "present" states are bit-identical.
     n_degenerate_novelty_players: int = 0
 
+    # Count of target novelty toggles (0-2) dropped from the node-novelty
+    # KernelSHAP coalition matrix by the output-dummy guard (specs/65)
+    # because the model's output does not respond to them even though their
+    # coalition input genuinely varies. Disjoint from
+    # n_degenerate_novelty_players: only players that PASS the input-side
+    # check are screened for output-dummyness.
+    n_dummy_novelty_players: int = 0
+
     # Shapley efficiency baselines (logit space, for true_class)
     # f_baseline = E[f(background)]; f_logit = f(all-present foreground)
     # efficiency_error = |sum(phi) - (f_logit - f_baseline)|
@@ -299,6 +307,7 @@ class SHAPGSDExplainer:
             src_novelty_shap=node_result["src_novelty_shap"],
             dst_novelty_shap=node_result["dst_novelty_shap"],
             n_degenerate_novelty_players=node_result["n_degenerate_novelty_players"],
+            n_dummy_novelty_players=node_result["n_dummy_novelty_players"],
             subgraph_edge_ids=subgraph_eids,
             subgraph_shap_weights=subgraph_weights,
             f_baseline_feature=f_baseline_feat,

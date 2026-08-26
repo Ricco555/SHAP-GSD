@@ -146,17 +146,20 @@ def collect_player_counts(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int], dict[int, int]]:
     """Read the node-game player counts for every explained flow.
 
-    Two counts are tracked per flow (specs/63 sec 6):
+    Two counts are tracked per flow (specs/63 sec 6, specs/65 sec 4):
       * P            — the conceptual player count, ``len(node_shap) + 2``.
         Unchanged in meaning; still what ``crosscheck_player_counts``
         validates against ``fidelity_novelty.csv``'s ``n_players`` column.
-      * M_effective  — ``P - n_degenerate_novelty_players``, the solver's
-        actual working width after the degenerate-toggle guard
-        (``src/explainer/node_shap.py``) drops provably-null target novelty
-        columns from the KernelSHAP coalition regression. This is the count
-        that determines whether a flow's node-layer attribution is an exact
-        Shapley value — the conceptual P over-counts columns the solver
-        never actually fit.
+      * M_effective  — ``P - n_degenerate_novelty_players
+        - n_dummy_novelty_players``, the solver's actual working width after
+        BOTH dummy-player guards in ``src/explainer/node_shap.py`` drop
+        provably-null target novelty columns from the KernelSHAP coalition
+        regression: the input-degeneracy guard (specs/63) and the
+        output-dummy guard (specs/65). This is the count that determines
+        whether a flow's node-layer attribution is an exact Shapley value —
+        the conceptual P over-counts columns the solver never actually fit.
+        Both fields default to 0 when absent, so JSONs predating either
+        guard fall back to the widest (most conservative) width.
 
     Args:
         expl_dir: ``outputs/explanations`` directory.
@@ -185,8 +188,9 @@ def collect_player_counts(
         # +2 for the two target-endpoint novelty flags (node_shap.py:226).
         p = len(node_shap) + 2
         n_degenerate = int(d.get("n_degenerate_novelty_players", 0))
+        n_dummy = int(d.get("n_dummy_novelty_players", 0))
         players.append(p)
-        players_effective.append(p - n_degenerate)
+        players_effective.append(p - n_degenerate - n_dummy)
         by_eid[int(d["edge_id"])] = p
         per_class[path.parent.name] = per_class.get(path.parent.name, 0) + 1
 
@@ -317,8 +321,9 @@ def main() -> None:
     logger.info(f"Player-count cross-check: {xcheck}")
 
     # Exactness is a property of the solver's actual working width
-    # (M_effective = P - n_degenerate_novelty_players), not the conceptual
-    # player count P (specs/63 sec 6). Every exactness computation below
+    # (M_effective = P - n_degenerate_novelty_players
+    # - n_dummy_novelty_players), not the conceptual player count P
+    # (specs/63 sec 6, specs/65 sec 4). Every exactness computation below
     # uses M_effective; P is retained only for the crosscheck above and for
     # reporting the conceptual player-count distribution.
     p_max_exact = max_exhaustive_players(node_nsamples)
@@ -394,9 +399,11 @@ def main() -> None:
             "node-game player count len(node_shap) + 2, cross-checked against "
             "fidelity_novelty.csv's n_players column (player_count_crosscheck "
             "above). M_effective (player_count_distribution/histogram_effective) "
-            "is P minus n_degenerate_novelty_players -- the solver's actual "
-            "working width after specs/63's degenerate-toggle guard drops "
-            "provably-null target novelty columns -- and is what n_exact/"
+            "is P minus n_degenerate_novelty_players minus "
+            "n_dummy_novelty_players -- the solver's actual working width "
+            "after specs/63's input-degeneracy guard and specs/65's "
+            "output-dummy guard drop provably-null target novelty columns "
+            "-- and is what n_exact/"
             "pct_exact/n_sampled/nsamples_sensitivity above are computed from."
         ),
     }
@@ -419,8 +426,9 @@ def main() -> None:
         f"player-count formula P = len(node_shap) + 2 cross-checked against "
         f"{xcheck}",
         f"exactness is determined by M_effective = P - n_degenerate_novelty_players "
-        f"(specs/63) -- the solver's actual working width after the "
-        f"degenerate-toggle guard drops provably-null target novelty columns; "
+        f"- n_dummy_novelty_players (specs/63, specs/65) -- the solver's actual "
+        f"working width after the input-degeneracy and output-dummy guards drop "
+        f"provably-null target novelty columns; "
         f"P itself is reported only for the crosscheck above and the "
         f"conceptual player-count distribution below",
         "",
@@ -452,7 +460,7 @@ def main() -> None:
         f"    min {dist['min']}, median {dist['median']:.0f}, "
         f"mean {dist['mean']:.2f}, max {dist['max']}",
         f"  * effective (solver-facing) players M_effective = P - "
-        f"n_degenerate_novelty_players:",
+        f"n_degenerate_novelty_players - n_dummy_novelty_players:",
         f"    min {dist_effective['min']}, median {dist_effective['median']:.0f}, "
         f"mean {dist_effective['mean']:.2f}, max {dist_effective['max']}",
         f"  * sampled tail is exactly the M_effective > {p_max_exact} flows: "
