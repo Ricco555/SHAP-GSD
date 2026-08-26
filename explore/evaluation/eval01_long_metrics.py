@@ -96,9 +96,12 @@ COVERAGE_MD_NAME = "eval_long_metrics_coverage.md"
 CLASSIFICATION_SPACE = "none"
 
 #: Metrics read out of each ``summary*.json`` per-class dict, in output order.
-#: ``fidelity_*_std`` and ``n_flows`` extend Part I §4.1's enum: they are
-#: present in every ``summary*.json`` and are needed by eval03/eval07b, so
-#: dropping them would force a second read of the same file (specs/64 §14.1.2).
+#: ``fidelity_*_std`` and ``n_flows`` extend Part I §4.1's enum: they sit
+#: alongside the mean in the same ``summary*.json`` per-class dict, and their
+#: consumer is ``eval08``'s fidelity comparison table, where a cross-dataset
+#: fidelity mean is unreadable without its dispersion and the flow count it was
+#: computed over. Dropping them here would force a second read of the same file
+#: (specs/64 §14.1.2).
 FIDELITY_METRIC_KEYS: tuple[str, ...] = (
     "fidelity_plus",
     "fidelity_plus_std",

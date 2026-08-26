@@ -1,9 +1,15 @@
 # explore/evaluation/
 
 Cross-dataset evaluation-methodology and comparison library: fidelity aggregation,
-missing-class-aware macro statistics, cross-explainer agreement with actual
-statistical testing, global coherence against a proxy ground truth, and stability
-beyond the pipeline's intra-run measure.
+missing-class-aware macro statistics, global coherence against a proxy ground
+truth with actual statistical testing, and stability beyond the pipeline's
+intra-run measure.
+
+Its subject throughout is **SHAP-GSD's own metrics compared across datasets** —
+does explanation quality generalise beyond one network environment? Comparing
+SHAP-GSD against other explanation methods is out of scope here: the SHAP-GSD
+paper already does that once, on UNSW, and it is not repeated per-dataset
+(specs/64, DESCOPED 2026-08-26).
 
 Specified by `specs/64_functional_spec_evaluation_methodology_2026-08-26.md`
 (Part I functional, Part II implementation — Part II governs).
@@ -93,7 +99,7 @@ exists anywhere.
 
 ## Run order
 
-`eval01` → `eval02` → `eval05` → `eval04` → `eval03` → `eval07b` → `eval08`.
+`eval01` → `eval02` → `eval05` → `eval04` → `eval07b` → `eval08`.
 `eval04` depends on `eval05`'s CSV; `eval08` reads every other module's CSV and
 never recomputes a number.
 
@@ -106,7 +112,6 @@ never recomputes a number.
 | `_stats.py` | BH-FDR, Wilcoxon/Friedman wrappers, Spearman ρ / Kendall τ / Jaccard |
 | `eval01_long_metrics.py` | `eval_long_metrics.csv` (one row per dataset × class × coalition space × metric) + `eval_long_metrics_coverage.md` |
 | `eval02_macro_denominators.py` | `macro_stats_by_denominator.csv` — macro stats under all three denominators |
-| `eval03_cross_explainer_agreement.py` | `cross_explainer_agreement.csv`, `cross_explainer_disagreement_flags.csv`, per-dataset heatmaps |
 | `eval04_global_coherence.py` | `global_coherence_rank_correlation.csv`, `global_coherence_structural.csv`, per-dataset summary figures, `source3_consistency_cells.md` |
 | `eval05_per_class_explanations.py` | `per_class_explanation_summary.csv` |
 | `eval07b_stability_windows.py` | `stability_temporal_windows.csv`, per-dataset stability comparison figures |
@@ -151,6 +156,5 @@ defect. See `AGENT.md`.
   of 2026-08-26), which makes the closed-set denominator not computable for that
   dataset. That is reported explicitly, never silently replaced by another
   denominator.
-- Baseline-explainer numbers under `outputs/baselines/` predate the `build_h_full`
-  correctness fix; see CLAUDE.md's standing "regenerate Phase-10 baselines" item
-  before citing `eval03` output in a manuscript.
+- `outputs/baselines/**` is **never read** by anything in this package. Those are
+  the SHAP-GSD paper's own baseline-comparison numbers, not a PROXEVAL input.

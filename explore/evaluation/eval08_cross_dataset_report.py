@@ -1,10 +1,19 @@
 """
 eval08_cross_dataset_report.py — the assembled cross-dataset comparison report
 ==============================================================================
-Implements specs/64 Part I §4.8 / Part II §14.8.
+Implements specs/64 Part I §4.8 / Part II §14.8 — **the main PROXEVAL
+deliverable**.
+
+Its subject is SHAP-GSD's **own** explanation metrics — fidelity, global
+coherence and stability — compared **across datasets**, which is what PROXEVAL
+asks about: does explanation quality generalise beyond one network environment?
+It therefore reads no baseline-comparison artifact of any kind. Comparing
+SHAP-GSD against other explanation methods is an activity of the SHAP-GSD paper
+itself, performed once on UNSW, and is deliberately not repeated per-dataset
+here (specs/64, DESCOPED 2026-08-26).
 
 What it does:
-  Assembles the other six modules' CSVs into one generated markdown document,
+  Assembles the other five modules' CSVs into one generated markdown document,
   in a fixed section order, and **never recomputes a number**. Every figure in
   the report is read from the CSV that owns it; a missing CSV produces an
   explicit "not available — run <script>" stub rather than a silently absent
@@ -21,8 +30,6 @@ and a one-dataset "comparison" would be a misleading deliverable. Pass
 Files read (all under the same ``--out-dir``, all produced by this package):
   eval_long_metrics.csv, eval_long_metrics_coverage.md   (eval01)
   macro_stats_by_denominator.csv                          (eval02)
-  cross_explainer_agreement.csv,
-  cross_explainer_disagreement_flags.csv                  (eval03)
   global_coherence_rank_correlation.csv,
   global_coherence_structural.csv                         (eval04)
   per_class_explanation_summary.csv                       (eval05)
@@ -77,8 +84,6 @@ REPORT_NAME = "cross_dataset_comparison_report.md"
 INPUT_SOURCES: dict[str, str] = {
     "eval_long_metrics.csv": "explore/evaluation/eval01_long_metrics.py",
     "macro_stats_by_denominator.csv": "explore/evaluation/eval02_macro_denominators.py",
-    "cross_explainer_agreement.csv": "explore/evaluation/eval03_cross_explainer_agreement.py",
-    "cross_explainer_disagreement_flags.csv": "explore/evaluation/eval03_cross_explainer_agreement.py",
     "global_coherence_rank_correlation.csv": "explore/evaluation/eval04_global_coherence.py",
     "global_coherence_structural.csv": "explore/evaluation/eval04_global_coherence.py",
     "per_class_explanation_summary.csv": "explore/evaluation/eval05_per_class_explanations.py",
@@ -312,7 +317,7 @@ def build_report(runs: list[DatasetRun], out_dir: Path) -> str:
             "Which denominator a cross-dataset macro-F1 uses is not a "
             "presentational detail: on a dataset whose test split covers only "
             "part of the label space the three differ by several fold. The "
-            "per-dataset coverage that drives the spread is in section 6, "
+            "per-dataset coverage that drives the spread is in section 5, "
             "stated per table rather than relegated to a footnote.",
             "",
         ]
@@ -322,43 +327,8 @@ def build_report(runs: list[DatasetRun], out_dir: Path) -> str:
         ], int_columns=("n_classes_in_denominator",))
         lines.append("")
 
-    # --- 3. Cross-explainer agreement -------------------------------------
-    lines += ["## 3. Cross-explainer agreement", ""]
-    agreement = frames["cross_explainer_agreement.csv"]
-    flags = frames["cross_explainer_disagreement_flags.csv"]
-    if agreement is None:
-        lines += [stub("cross_explainer_agreement.csv"), ""]
-    else:
-        summary = (
-            agreement.groupby(["dataset", "space"])
-            .agg(
-                pairs=("spearman_rho", "size"),
-                scored=("spearman_rho", lambda s: int(np.isfinite(s).sum())),
-                mean_rho=("spearman_rho", "mean"),
-                mean_jaccard=("jaccard_topk", "mean"),
-            ).reset_index()
-        )
-        lines += _markdown_table(
-            summary, ["dataset", "space", "pairs", "scored", "mean_rho", "mean_jaccard"],
-        )
-        lines.append("")
-        for (dataset_label, space), _ in agreement.groupby(["dataset", "space"]):
-            stem = f"cross_explainer_agreement_heatmap_{dataset_label}_{space}"
-            lines += [f"**{stem}** — {figure_caption(out_dir, stem)}", ""]
-    if flags is not None and not flags.empty:
-        flagged = flags[flags["flagged"].astype(bool)]
-        lines += ["### Flagged disagreement regions", ""]
-        if flagged.empty:
-            lines += ["_No class fell below the disagreement threshold._", ""]
-        else:
-            lines += _markdown_table(flagged, [
-                "dataset", "class_name", "space",
-                "shap_gsd_rank_vs_majority_rho", "threshold", "n_pairs",
-            ])
-            lines.append("")
-
-    # --- 4. Global coherence ----------------------------------------------
-    lines += ["## 4. Global coherence", ""]
+    # --- 3. Global coherence ----------------------------------------------
+    lines += ["## 3. Global coherence", ""]
     rank = frames["global_coherence_rank_correlation.csv"]
     structural = frames["global_coherence_structural.csv"]
     if rank is None:
@@ -390,8 +360,8 @@ def build_report(runs: list[DatasetRun], out_dir: Path) -> str:
             stem = f"global_coherence_summary_{dataset_label}"
             lines += [f"**{stem}** — {figure_caption(out_dir, stem)}", ""]
 
-    # --- 5. Stability ------------------------------------------------------
-    lines += ["## 5. Stability", ""]
+    # --- 4. Stability ------------------------------------------------------
+    lines += ["## 4. Stability", ""]
     windows = frames["stability_temporal_windows.csv"]
     lines += [
         "Three sub-dimensions are in scope. Intra-run dispersion is computed "
@@ -435,8 +405,8 @@ def build_report(runs: list[DatasetRun], out_dir: Path) -> str:
         "",
     ]
 
-    # --- 6. Coverage and caveats ------------------------------------------
-    lines += ["## 6. Coverage and caveats", ""]
+    # --- 5. Coverage and caveats ------------------------------------------
+    lines += ["## 5. Coverage and caveats", ""]
     coverage_md = out_dir / "eval_long_metrics_coverage.md"
     if long_metrics is None:
         lines += [stub("eval_long_metrics.csv"), ""]

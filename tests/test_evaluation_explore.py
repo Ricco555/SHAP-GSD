@@ -25,7 +25,6 @@ Test map (spec §20 names are the contract and are not renamed):
 Additional coverage, for behaviour the two coding passes added beyond §20:
   test_classification_rows_use_coalition_space_none
   test_missing_structural_expectations_csv_reports_not_supplied
-  test_node_coalition_agreement_is_nan_with_alignment_note
   test_absent_train_feature_store_yields_nan_closed_set_row
   test_out_of_split_subgraph_edge_id_is_a_hard_error
   test_empty_temporal_window_is_reported_not_dropped
@@ -62,7 +61,6 @@ if str(REPO_ROOT) not in sys.path:
 from explore.evaluation import _discover, _stats  # noqa: E402
 from explore.evaluation import eval01_long_metrics as eval01  # noqa: E402
 from explore.evaluation import eval02_macro_denominators as eval02  # noqa: E402
-from explore.evaluation import eval03_cross_explainer_agreement as eval03  # noqa: E402
 from explore.evaluation import eval04_global_coherence as eval04  # noqa: E402
 from explore.evaluation import eval05_per_class_explanations as eval05  # noqa: E402
 from explore.evaluation import eval07b_stability_windows as eval07b  # noqa: E402
@@ -182,7 +180,6 @@ def make_run(
     test_edge_ids: list[int] | None = None,
     test_timestamps: list[float] | None = None,
     test_endpoints: list[tuple[str, str]] | None = None,
-    baselines: dict[str, pd.DataFrame] | None = None,
     feature_groups: list[str] | None = None,
 ) -> Path:
     """Write one synthetic, resolution-complete run directory.
@@ -257,11 +254,6 @@ def make_run(
             {"groups": {name: [name.lower()] for name in feature_groups}},
         )
 
-    for name, frame in (baselines or {}).items():
-        baselines_dir = run_dir / "outputs" / "baselines"
-        baselines_dir.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(baselines_dir / f"{name}{eval03.BASELINE_SUFFIX}", index=False)
-
     assert not _discover.missing_required_artifacts(run_dir), (
         f"synthetic run {dir_name} is not resolution-complete"
     )
@@ -277,7 +269,7 @@ def _reset_discover_log_dedup():
 
 
 def _full_run(tmp_path: Path) -> tuple[Path, Path, "_discover.DatasetRun"]:
-    """A resolution-complete run rich enough for eval03/eval04/eval07b.
+    """A resolution-complete run rich enough for eval04/eval07b.
 
     Classes: ``Benign`` and ``Probe`` with explained flows, ``Ghost`` with zero
     test support and no explanations directory at all.
@@ -309,24 +301,6 @@ def _full_run(tmp_path: Path) -> tuple[Path, Path, "_discover.DatasetRun"]:
         ],
     }
     all_eids = sorted(benign_eids + probe_eids)
-    class_column = ["Benign"] * 3 + ["Probe"] * 3
-    baseline_frames = {}
-    for name in ("pgexplainer", "gnnshap"):
-        baseline_frames[name] = pd.DataFrame({
-            "edge_id": all_eids,
-            # Six entries against SHAP-GSD's four node_ids: the real, measured
-            # length mismatch that makes node-coalition agreement uncomputable.
-            "node_scores": [json.dumps([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-                            for _ in all_eids],
-            "_class_name": class_column,
-        })
-    # One feature-group baseline, so the alignable half of eval03 is exercised
-    # alongside the unalignable node half.
-    baseline_frames["gnnexplainer"] = pd.DataFrame({
-        "edge_id": all_eids,
-        "group_scores": [json.dumps([0.4, 0.3, 0.15, 0.05]) for _ in all_eids],
-        "_class_name": class_column,
-    })
     make_run(
         runs_root, "nf_alpha_v3",
         class_names=class_names, per_class=per_class,
@@ -348,7 +322,6 @@ def _full_run(tmp_path: Path) -> tuple[Path, Path, "_discover.DatasetRun"]:
         train_labels=[0, 0, 0, 1, 2, 2],
         test_edge_ids=all_eids,
         test_timestamps=[1.0, 2.0, 3.0, 100.0, 101.0, 102.0],
-        baselines=baseline_frames,
         feature_groups=list(_GROUPS),
     )
     run = resolve_dataset("alpha", runs_root=runs_root)
@@ -1184,57 +1157,6 @@ def test_out_of_split_subgraph_edge_id_is_a_hard_error():
         eval07b.lookup_timestamp(
             edge_indices, np.asarray([1.0, 2.0, 3.0, 4.0]), 999, "alpha",
         )
-
-
-# ---------------------------------------------------------------------------
-# eval03 — the node-coalition gap is reported, not papered over
-# ---------------------------------------------------------------------------
-
-def test_node_coalition_agreement_is_nan_with_alignment_note(tmp_path):
-    runs_root, out_dir, run = _full_run(tmp_path)
-
-    agreement = eval03.compute_agreement([run], top_k=3)
-    node_rows = agreement[agreement["space"] == eval03.SPACE_NODE_COALITION]
-    assert not node_rows.empty, "no node-coalition rows were emitted at all"
-
-    # Every node-coalition cell is NaN by structural necessity...
-    assert node_rows["spearman_rho"].isna().all()
-    assert node_rows["kendall_tau"].isna().all()
-    assert node_rows["jaccard_topk"].isna().all()
-    # ... and every one of them says WHY, specifically.
-    assert node_rows["notes"].str.contains("no accompanying node-id column").all()
-    # Rows involving SHAP-GSD carry the live-measured length evidence, so the
-    # gap is demonstrated rather than merely asserted.
-    involving = node_rows[
-        (node_rows["explainer_a"] == eval03.SHAP_GSD)
-        | (node_rows["explainer_b"] == eval03.SHAP_GSD)
-    ]
-    assert not involving.empty
-    assert involving["notes"].str.contains("shared flows").all()
-    assert involving["notes"].str.contains("matches SHAP-GSD's node_ids length "
-                                           "in 0 of them").all()
-
-    # The alignable half still works, so the NaNs above are specific to the
-    # node space rather than eval03 failing wholesale.
-    feature_rows = agreement[agreement["space"] == eval03.SPACE_FEATURE_GROUP]
-    assert not feature_rows.empty
-    scored = feature_rows[feature_rows["n_flows"] > 0]
-    assert np.isfinite(scored["spearman_rho"].to_numpy(dtype=float)).all()
-    assert np.isfinite(scored["p_corrected"].to_numpy(dtype=float)).all()
-    assert scored["correction_family"].str.startswith("dataset=").all()
-    # BH families are per (dataset, space), never mixed across spaces.
-    assert set(feature_rows["correction_family"]) != set(
-        node_rows["correction_family"]
-    )
-
-    flags = eval03.compute_disagreement_flags(agreement, eval03.DEFAULT_RHO_THRESHOLD)
-    node_flags = flags[flags["space"] == eval03.SPACE_NODE_COALITION]
-    assert not node_flags.empty
-    # NaN never reads as "below threshold": an uncomputable rho is not a
-    # disagreement finding.
-    assert not node_flags["flagged"].any()
-    assert (node_flags["n_pairs"] == 0).all()
-    assert node_flags["notes"].str.contains("no computable rho").all()
 
 
 # ---------------------------------------------------------------------------

@@ -226,6 +226,13 @@ def paired_wilcoxon(
     pairs remain (below which the exact test cannot attain significance at
     alpha = 0.05) or when every difference is zero (scipy raises).
 
+    **Retained deliberately with no caller — do not delete as dead code.**
+    This is the implementation Part I §4.7a's inter-seed stability needs; that
+    dimension is spec-only today (it requires several independently-seeded
+    training runs per dataset, which do not exist yet), so re-deriving this
+    helper later is worse than keeping one tested, unused function. Do not
+    invent a new caller to justify it either (specs/64 §15, §23.5).
+
     Args:
         a: First paired sample.
         b: Second paired sample, same length as ``a``.
@@ -281,6 +288,11 @@ def friedman(*groups: Sequence[float] | np.ndarray) -> FriedmanResult:
     distribution, i.e. a dependency this repo does not carry (specs/64 D7), so
     ``posthoc`` is always :data:`POSTHOC_UNAVAILABLE`. A significant omnibus
     is still reported — never silently omitted.
+
+    **Retained deliberately with no caller — do not delete as dead code.**
+    Same rationale as :func:`paired_wilcoxon`: this is what Part I §4.7a's
+    inter-seed stability will use across three or more seeds once such runs
+    exist (specs/64 §15, §23.5).
 
     Args:
         *groups: Three or more equal-length samples, one per group.
