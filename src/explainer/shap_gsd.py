@@ -73,6 +73,14 @@ class ExplanationResult:
     # check are screened for output-dummyness.
     n_dummy_novelty_players: int = 0
 
+    # Count of feature groups (0-K) dropped from the feature-group
+    # KernelSHAP coalition matrix by the input-degeneracy guard (specs/67)
+    # because their "absent" and "present" coalition inputs are
+    # bit-identical for this flow. The names carry the analytic payload
+    # (which group, not just how many); the count is derived from them.
+    n_degenerate_feature_players: int = 0
+    degenerate_feature_groups: list[str] = field(default_factory=list)
+
     # Shapley efficiency baselines (logit space, for true_class)
     # f_baseline = E[f(background)]; f_logit = f(all-present foreground)
     # efficiency_error = |sum(phi) - (f_logit - f_baseline)|
@@ -212,7 +220,7 @@ class SHAPGSDExplainer:
 
         # --- Feature-group SHAP ---
         _t_feat = time.time()
-        feat_phi_dict, f_baseline_feat, f_logit_feat = self.feat_shap.explain(
+        feat_phi_dict, f_baseline_feat, f_logit_feat, degenerate_feature_groups = self.feat_shap.explain(
             true_class=true_label,
             model=self.model,
             blocks=blocks,
@@ -308,6 +316,8 @@ class SHAPGSDExplainer:
             dst_novelty_shap=node_result["dst_novelty_shap"],
             n_degenerate_novelty_players=node_result["n_degenerate_novelty_players"],
             n_dummy_novelty_players=node_result["n_dummy_novelty_players"],
+            degenerate_feature_groups=degenerate_feature_groups,
+            n_degenerate_feature_players=len(degenerate_feature_groups),
             subgraph_edge_ids=subgraph_eids,
             subgraph_shap_weights=subgraph_weights,
             f_baseline_feature=f_baseline_feat,

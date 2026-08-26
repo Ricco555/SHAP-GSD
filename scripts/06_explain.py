@@ -104,6 +104,8 @@ def _result_to_dict(result: ExplanationResult) -> dict:
         "dst_novelty_shap":   result.dst_novelty_shap,
         "n_degenerate_novelty_players": result.n_degenerate_novelty_players,
         "n_dummy_novelty_players": result.n_dummy_novelty_players,
+        "n_degenerate_feature_players": result.n_degenerate_feature_players,
+        "degenerate_feature_groups": result.degenerate_feature_groups,
         "subgraph_edge_ids":  result.subgraph_edge_ids,
         "subgraph_shap_weights": result.subgraph_shap_weights,
         # Shapley efficiency baselines (logit space for true_class)
@@ -269,6 +271,7 @@ def main() -> None:
                     if top_feat_idx >= 0 else 0.0
                 ),
                 "sum_feature_shap":  float(result.feature_group_shap.sum()),
+                "n_degenerate_feature_players": result.n_degenerate_feature_players,
                 "n_neighbors":       len(result.neighbor_edge_ids),
                 "top_neighbor_shap": top_nbr_phi,
                 "src_novelty_shap":  result.src_novelty_shap,

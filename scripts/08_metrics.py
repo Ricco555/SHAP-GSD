@@ -794,7 +794,7 @@ def compute_stability(
         phi_runs: list[np.ndarray] = []
         for seed in range(n_seeds):
             np.random.seed(seed * 1000 + i)
-            phi_dict, _f_baseline, _f_logit = feat_shap.explain(
+            phi_dict, _f_baseline, _f_logit, _degenerate = feat_shap.explain(
                 true_class=true_label,
                 model=model,
                 blocks=blocks,

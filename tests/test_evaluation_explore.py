@@ -146,6 +146,7 @@ def _explanation_record(
     src_novelty: float = 0.0,
     dst_novelty: float = 0.0,
     degenerate: int | None = 2,
+    degenerate_feature: int | None = None,
 ) -> dict:
     record = {
         "edge_id": edge_id,
@@ -162,6 +163,8 @@ def _explanation_record(
     }
     if degenerate is not None:
         record["n_degenerate_novelty_players"] = degenerate
+    if degenerate_feature is not None:
+        record["n_degenerate_feature_players"] = degenerate_feature
     return record
 
 
@@ -479,6 +482,69 @@ def test_absent_degenerate_novelty_field_is_nan_with_note(tmp_path):
         without_field["notes"]
     )
     assert "cannot be attributed to degenerate" in str(without_field["notes"])
+
+
+def test_absent_degenerate_feature_field_is_nan_with_note(tmp_path):
+    """Records without ``n_degenerate_feature_players`` -- the pre-specs/67
+    state every on-disk explanation JSON is in until Phase 6 is re-run
+    (specs/67 §4, §8.4). Mirrors
+    ``test_absent_degenerate_novelty_field_is_nan_with_note`` above for the
+    feature-group input-degeneracy guard (specs/67): a record dict carrying
+    NEITHER new key must round-trip through eval05's aggregation to NaN plus
+    an explanatory note -- never a ``KeyError``, never a silently-wrong 0.
+    """
+    runs_root = tmp_path / "runs"
+    out_dir = tmp_path / "out"
+    make_run(
+        runs_root, "nf_alpha_v3",
+        class_names=["Benign", "Probe"],
+        per_class={
+            "Benign": {"precision": 0.9, "recall": 0.9, "f1": 0.9, "support": 100},
+            "Probe": {"precision": 0.5, "recall": 0.5, "f1": 0.5, "support": 50},
+        },
+        explanations={
+            # Carries the field: the aggregate is attributable.
+            "Benign": [
+                _explanation_record(
+                    eid, group_shap=[0.5, 0.2, 0.1, 0.05], node_ids=[1, 2],
+                    subgraph_edge_ids=[eid], degenerate_feature=1,
+                )
+                for eid in (10, 11)
+            ],
+            # Carries NEITHER n_degenerate_feature_players nor (redundantly)
+            # n_degenerate_novelty_players: the pre-any-guard record shape.
+            "Probe": [
+                _explanation_record(
+                    eid, group_shap=[0.1, 0.4, 0.3, 0.05], node_ids=[3, 4],
+                    subgraph_edge_ids=[eid], degenerate=None,
+                    degenerate_feature=None,
+                )
+                for eid in (20, 21)
+            ],
+        },
+    )
+    run = resolve_dataset("alpha", runs_root=runs_root)
+    frame = eval05.run([run], out_dir)
+    by_class = {row["class_name"]: row for _, row in frame.iterrows()}
+
+    with_field = by_class["Benign"]
+    assert float(with_field["mean_n_degenerate_feature_players"]) == pytest.approx(1.0)
+    assert "n_degenerate_feature_players" not in str(with_field["notes"])
+
+    without_field = by_class["Probe"]
+    assert int(without_field["n_flows_aggregated"]) == 2, "the flows were still read"
+    assert np.isnan(float(without_field["mean_n_degenerate_feature_players"]))
+    assert "records carry no n_degenerate_feature_players field" in str(
+        without_field["notes"]
+    )
+    assert "feature-group input-degeneracy rate cannot be reported" in str(
+        without_field["notes"]
+    )
+    # The novelty-side note also fires here (record carries neither field),
+    # and both notes must coexist rather than one clobbering the other.
+    assert "records carry no n_degenerate_novelty_players field" in str(
+        without_field["notes"]
+    )
 
 
 def test_three_way_agreement_categories_and_precedence():

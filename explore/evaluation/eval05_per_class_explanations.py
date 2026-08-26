@@ -115,6 +115,7 @@ CSV_COLUMNS: tuple[str, ...] = (
     "mean_novelty_magnitude",
     "mean_n_degenerate_novelty_players",
     "frac_flows_both_endpoints_degenerate",
+    "mean_n_degenerate_feature_players",
     "notes",
 )
 
@@ -192,6 +193,7 @@ def _empty_row(
         "mean_novelty_magnitude": float("nan"),
         "mean_n_degenerate_novelty_players": float("nan"),
         "frac_flows_both_endpoints_degenerate": float("nan"),
+        "mean_n_degenerate_feature_players": float("nan"),
         "notes": note,
     }
 
@@ -277,6 +279,13 @@ def aggregate_class(
             if float(degenerate) >= 2.0:
                 n_both_degenerate += 1
 
+    # --- feature-group input-degeneracy guard (specs/67) --------------------
+    degenerate_feature_counts: list[float] = []
+    for rec in records:
+        degenerate_feat = rec.get("n_degenerate_feature_players")
+        if degenerate_feat is not None:
+            degenerate_feature_counts.append(float(degenerate_feat))
+
     n_flows = len(records)
     notes = ""
     if n_rollup and n_rollup != n_flows:
@@ -289,6 +298,12 @@ def aggregate_class(
             "records carry no n_degenerate_novelty_players field, so a "
             "near-zero novelty aggregate cannot be attributed to degenerate "
             "coalition players"
+        )
+    if not degenerate_feature_counts:
+        notes = (notes + "; " if notes else "") + (
+            "records carry no n_degenerate_feature_players field, so the "
+            "feature-group input-degeneracy rate cannot be reported for "
+            "this class"
         )
 
     return {
@@ -317,6 +332,10 @@ def aggregate_class(
         ),
         "frac_flows_both_endpoints_degenerate": (
             n_both_degenerate / n_flows if degenerate_counts else float("nan")
+        ),
+        "mean_n_degenerate_feature_players": (
+            float(np.mean(degenerate_feature_counts))
+            if degenerate_feature_counts else float("nan")
         ),
         "notes": notes,
     }
