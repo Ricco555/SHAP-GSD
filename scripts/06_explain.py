@@ -103,6 +103,7 @@ def _result_to_dict(result: ExplanationResult) -> dict:
         "src_novelty_shap":   result.src_novelty_shap,
         "dst_novelty_shap":   result.dst_novelty_shap,
         "n_degenerate_novelty_players": result.n_degenerate_novelty_players,
+        "n_dummy_novelty_players": result.n_dummy_novelty_players,
         "subgraph_edge_ids":  result.subgraph_edge_ids,
         "subgraph_shap_weights": result.subgraph_shap_weights,
         # Shapley efficiency baselines (logit space for true_class)
