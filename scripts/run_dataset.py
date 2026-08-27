@@ -869,6 +869,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "and experiment config so results never collide."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
         epilog=(
             "Examples\n"
             "--------\n"
