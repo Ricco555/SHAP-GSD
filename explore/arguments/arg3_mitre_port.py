@@ -161,9 +161,18 @@ def main() -> None:
     ax1.set_yticklabels(freq_order, fontsize=LABEL_FS)
     ax1.set_title("DST_PORT_GROUP attribution × MITRE ATT&CK service", fontsize=LABEL_FS + 1)
 
-    # ★ on dominant service
+    # ★ on dominant service — only for classes with a literature-known mapping;
+    # a class outside CLASS_SERVICE (e.g. a non-UNSW taxonomy) gets no star
+    # rather than a fabricated HTTP claim.
+    unmapped_classes = [c for c in freq_order if c not in CLASS_SERVICE]
+    if unmapped_classes:
+        print(
+            f"WARNING [{STEM}]: no literature-known dominant service for "
+            f"class(es) {unmapped_classes} — omitting their ★ marker and "
+            f"KEY FINDINGS dominant-service line rather than defaulting to HTTP."
+        )
     for i, cls in enumerate(freq_order):
-        dom_svc = CLASS_SERVICE.get(cls, "HTTP")
+        dom_svc = CLASS_SERVICE.get(cls)
         if dom_svc in PORT_SERVICES:
             j = PORT_SERVICES.index(dom_svc)
             ax1.text(j, i, "★", ha="center", va="center",
@@ -214,9 +223,12 @@ def main() -> None:
     ]
     for cls in top_classes:
         freq = topk_freq.get(cls, 0)
-        dom  = CLASS_SERVICE.get(cls, "HTTP")
-        tid, tech = MITRE_MAP[dom]
-        lines.append(f"  {cls:12s}: {freq:.1f}%  dominant service: {dom} ({tid} — {tech})")
+        dom  = CLASS_SERVICE.get(cls)
+        if dom is None:
+            lines.append(f"  {cls:12s}: {freq:.1f}%  dominant service: unknown (no literature mapping for this class)")
+        else:
+            tid, tech = MITRE_MAP[dom]
+            lines.append(f"  {cls:12s}: {freq:.1f}%  dominant service: {dom} ({tid} — {tech})")
     lines += [
         "",
         "  Mean |φ| (DST_PORT_GROUP) per class:",
