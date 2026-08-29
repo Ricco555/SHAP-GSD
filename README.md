@@ -27,11 +27,11 @@ instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ### Version note for reviewers
 
-**The current manuscript revision reflects `v2.2.17`** — check out that tag
+**The current manuscript revision reflects `v2.2.16`** — check out that tag
 to match what's currently under review:
 
 ```bash
-git checkout v2.2.17
+git checkout v2.2.16
 ```
 
 The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
@@ -41,7 +41,7 @@ The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
 git checkout v2.1.0
 ```
 
-As of `v2.2.17`, `arg10_global_profiles.py` (the global-profile-coherence
+As of `v2.2.17` (untagged — `main` only), `arg10_global_profiles.py` (the global-profile-coherence
 exploration figure) no longer scores an undefined literature comparison as
 `ρ = +0.000 ("weak")`: any class with no valid comparison — because it has
 no entry in the literature lookup table at all, or because its entry's
