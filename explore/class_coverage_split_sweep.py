@@ -79,6 +79,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from explore._paths import paths                                   # noqa: E402
+from explore._temporal_streaming import (                          # noqa: E402  [PROPOSED NEW]
+    argsort_and_take,
+    per_class_sorted_positions,
+)
 from explore.class_coverage_analysis import resolve_local_csv_path  # noqa: E402  [EXISTING, reused]
 from src.data.loader import NODE_ID_COLS, PORT_COLS, LABEL_COLS     # noqa: E402  [EXISTING, reused]
 from src.data.preprocessor import Preprocessor                      # noqa: E402  [EXISTING, reused]
@@ -156,15 +160,21 @@ def run_sweep(csv_path: Path, baseline_train: float, baseline_val: float) -> dic
     df = df[["FLOW_START_MILLISECONDS", "Attack"]].copy()
     gc.collect()
 
-    df = df.sort_values("FLOW_START_MILLISECONDS", kind="mergesort").reset_index(drop=True)
-    n = len(df)
+    # Replaces sort_values(kind="mergesort") + to_numpy + map + del df with
+    # a cheap paired-array reorder (specs/72 §1.3/§3.3). class_ints narrowed
+    # to int16 (was int64) — n_classes < 256 in every dataset run so far
+    # (specs/72 §2.3) — argsort_and_take is dtype-preserving, so class_ints
+    # stays int16 after the reorder too.
     ts = df["FLOW_START_MILLISECONDS"].to_numpy(dtype=np.int64)
-    class_ints = df["Attack"].map(label_map).to_numpy(dtype=np.int64)
+    class_ints = df["Attack"].map(label_map).to_numpy(dtype=np.int16)
     del df
     gc.collect()
+
+    ts, class_ints = argsort_and_take(ts, class_ints)
+    n = len(ts)
     print(f"Sorted, n_total={n:,}")
 
-    class_positions = {c: np.flatnonzero(class_ints == c) for c in range(n_classes)}
+    class_positions = per_class_sorted_positions(class_ints, n_classes)
 
     def counts_in_range(lo: int, hi: int) -> np.ndarray:
         out = np.zeros(n_classes, dtype=np.int64)

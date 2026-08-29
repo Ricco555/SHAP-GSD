@@ -61,12 +61,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from explore._paths import paths  # noqa: E402
+from explore._temporal_streaming import (  # noqa: E402
+    cdf_from_hist,
+    per_class_time_histograms_from_csv,
+    pooled_timestamp_stats_from_csv,
+    quantile_from_hist,
+    windowed_sum,
+)
 
 _P = paths()
 CFG = _P["cfg"]
@@ -76,64 +82,97 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 STEM = "class_time_distribution"
 LABEL_FS = 9
 
-# ── Load raw CSV (Attack + timestamp columns only) ──────────────────────────
+# Streaming-pass tuning (specs/71 SS5, specs/72 SS3.1): matches
+# node_novelty_precheck.py's already-validated chunksize at CICIoT2023 scale
+# (540.7M rows); not exposed as a CLI flag, per explore/AGENT.md's
+# SHAP_GSD_CONFIG-only convention for scripts that take no CLI arguments.
+CHUNK_SIZE = 5_000_000
+FINE_BIN_SECONDS = 1.0
+MAX_FINE_BINS = 5_000_000
+
+# ── Two-pass streaming read (Attack + FLOW_START_MILLISECONDS only) ────────
+# Pass 1: pooled timestamp axis (t0, total span, largest gap, zoom start,
+# split-boundary hours/ms) — a chunked read + a sort of the timestamp array
+# alone, never the whole two-column frame (specs/71 SS2/SS3.2).
+# Pass 2: per-class fine-grained (default ~1s resolution) time histograms,
+# accumulated per chunk — every per-class quantity below (CDF, hourly
+# counts, t10/t50/t90, burst/boundary criteria, split support) is derived
+# from these histograms rather than exact per-row arrays (specs/71 SS3.3).
 
 csv_path = ROOT / CFG["data"]["csv_path"]
-df = pd.read_csv(csv_path, usecols=["Attack", "FLOW_START_MILLISECONDS"])
-df = df.sort_values("FLOW_START_MILLISECONDS", kind="mergesort").reset_index(drop=True)
-
-t0 = df["FLOW_START_MILLISECONDS"].iloc[0]
-elapsed_hours = (df["FLOW_START_MILLISECONDS"] - t0) / (1000.0 * 3600.0)
-total_span_hours = float(elapsed_hours.iloc[-1])
-
-# ── Split-boundary reference lines (currently active config) ───────────────
-
-n = len(df)
 train_frac = float(CFG["data"]["train_frac"])
 val_frac = float(CFG["data"]["val_frac"])
+
+pass1 = pooled_timestamp_stats_from_csv(
+    csv_path, ts_col="FLOW_START_MILLISECONDS",
+    train_frac=train_frac, val_frac=val_frac, chunksize=CHUNK_SIZE,
+)
+
+n = pass1.n
+t0 = pass1.t0_ms
+total_span_hours = pass1.total_span_hours
+tau_train_h = pass1.tau_train_h
+tau_val_h = pass1.tau_val_h
+tau_train_ms = pass1.tau_train_ms
+tau_val_ms = pass1.tau_val_ms
+largest_gap_size = pass1.largest_gap_size_h
+gap_end_h = pass1.gap_end_h
+zoom_start_h = pass1.zoom_start_h
+
+# Row-index cut positions, for the exact per-row split_of_row convention
+# criterion C still uses below — same row-fraction convention Pass 1 used
+# to locate tau_train_ms/tau_val_ms (specs/71 SS3.2).
 train_cut_idx = int(n * train_frac) - 1
 val_cut_idx = int(n * (train_frac + val_frac)) - 1
-tau_train_h = float(elapsed_hours.iloc[max(train_cut_idx, 0)])
-tau_val_h = float(elapsed_hours.iloc[max(val_cut_idx, 0)])
 
-# ── Per-class ECDF over time ────────────────────────────────────────────────
+pass2 = per_class_time_histograms_from_csv(
+    csv_path, class_col="Attack", ts_col="FLOW_START_MILLISECONDS",
+    pass1=pass1, chunksize=CHUNK_SIZE,
+    fine_bin_seconds=FINE_BIN_SECONDS, max_fine_bins=MAX_FINE_BINS,
+)
 
-classes = sorted(df["Attack"].unique())
+classes = pass2.classes
 n_classes = len(classes)
+bin_edges_h = pass2.bin_edges_h
+fine_hist = pass2.fine_hist
+n_per_class = pass2.n_per_class
+support_table_raw = pass2.support_table
+tie_at_boundary = pass2.tie_at_boundary
+
 cmap = plt.get_cmap("tab10" if n_classes <= 10 else "tab20")
 colors = {cls: cmap(i % cmap.N) for i, cls in enumerate(classes)}
 
-curves = {}
-for cls in classes:
-    ct = np.sort(elapsed_hours[df["Attack"] == cls].to_numpy())
-    frac = np.arange(1, len(ct) + 1) / len(ct)
-    curves[cls] = (ct, frac)
-
-# ── Auto-detect the largest single idle gap across ALL flows combined ──────
-# (dataset-agnostic: if a dataset has a dominant capture-session gap like
-# UNSW's, the zoomed panel starts right after it; if not, the gap is small
-# and the zoomed panel just falls back to the last 10% of the span.)
-
-all_t = np.sort(elapsed_hours.to_numpy())
-gaps = np.diff(all_t)
-largest_gap_idx = int(np.argmax(gaps))
-largest_gap_size = float(gaps[largest_gap_idx])
-gap_end_h = float(all_t[largest_gap_idx + 1])
-
-if largest_gap_size >= 0.05 * total_span_hours:
-    zoom_start_h = gap_end_h
-else:
-    zoom_start_h = total_span_hours * 0.90
+# Downsampled (x, y) CDF curves for plotting — one per class (specs/71 SS5's
+# `_cdf_from_hist`; plotting one vertex per raw flow, as the original per-row
+# `ax.plot(ct, frac, ...)` did, would be a memory AND rendering-practicality
+# problem at multi-hundred-million-row scale).
+curves = {cls: cdf_from_hist(fine_hist[cls], bin_edges_h) for cls in classes}
 
 # ── 1-hour-bin flow counts per class (for the bottom row) ──────────────────
+# Hour-aligned fine bins (specs/72 SS1.5) put every hour boundary EXACTLY on
+# a fine-bin edge, so summing fine bins between consecutive hour-boundary
+# fine-bin indices reproduces np.histogram(..., bins=<1-hour edges>) EXACTLY,
+# not merely to within one fine-bin's width. Direct per-hour slicing (rather
+# than np.add.reduceat) sidesteps reduceat's documented same-index quirk for
+# a zero-width segment, at the cost of one Python-level loop over n_hours
+# (small — at most a few thousand for any dataset this project runs).
 
-bin_edges_full = np.arange(0.0, np.ceil(total_span_hours) + 1.0, 1.0)
+n_hours = max(1, int(np.ceil(total_span_hours)))
+bin_edges_full = np.arange(0.0, n_hours + 1.0, 1.0)
 bin_centers_full = bin_edges_full[:-1] + 0.5
+
+# Fine-bin index of each hour boundary (0, 1, ..., n_hours), via
+# searchsorted against bin_edges_h — exact under hour-aligned construction.
+hour_boundary_bin_idx = np.searchsorted(bin_edges_h, np.arange(0, n_hours + 1, dtype=float))
+hour_boundary_bin_idx = np.clip(hour_boundary_bin_idx, 0, len(bin_edges_h) - 1)
 
 hist_counts = {}
 for cls in classes:
-    ct, _ = curves[cls]
-    counts, _ = np.histogram(ct, bins=bin_edges_full)
+    fh = fine_hist[cls]
+    counts = np.array([
+        fh[hour_boundary_bin_idx[k]:hour_boundary_bin_idx[k + 1]].sum()
+        for k in range(n_hours)
+    ])
     counts_f = counts.astype(float)
     counts_f[counts_f == 0] = np.nan  # gaps on log scale instead of log(0) warnings
     hist_counts[cls] = counts_f
@@ -233,44 +272,45 @@ plt.close(fig)
 lines = []
 full_stats = {}
 for cls in classes:
-    ct, frac = curves[cls]
-    n_cls = len(ct)
-    # time at which the class reaches 10%/50%/90% cumulative
-    def t_at(q, ct=ct, frac=frac):
-        idx = int(np.searchsorted(frac, q))
-        idx = min(idx, len(ct) - 1)
-        return float(ct[idx])
-    full_stats[cls] = {
-        "n": n_cls, "t10": t_at(0.10), "t50": t_at(0.50), "t90": t_at(0.90),
-    }
+    n_cls = n_per_class[cls]
+    fh = fine_hist[cls]
+    t10 = quantile_from_hist(fh, bin_edges_h, 0.10)
+    t50 = quantile_from_hist(fh, bin_edges_h, 0.50)
+    t90 = quantile_from_hist(fh, bin_edges_h, 0.90)
+    full_stats[cls] = {"n": n_cls, "t10": t10, "t50": t50, "t90": t90}
     lines.append(
         f"  {cls:<16} n={n_cls:>8,}  "
-        f"t10%={t_at(0.10):>7.2f}h  t50%={t_at(0.50):>7.2f}h  t90%={t_at(0.90):>7.2f}h"
+        f"t10%={t10:>7.2f}h  t50%={t50:>7.2f}h  t90%={t90:>7.2f}h"
     )
 per_class_block = "\n".join(lines)
 
 zoom_span_h = total_span_hours - zoom_start_h
 
+# Per-class fine-bin histogram restricted to the zoomed/dense region only —
+# the fine-bin index at or just after zoom_start_h (hour-aligned bin edges
+# make this a sub-array slice, not a re-histogram).
+zoom_start_bin_idx = int(np.searchsorted(bin_edges_h, zoom_start_h))
+zoom_start_bin_idx = min(zoom_start_bin_idx, len(bin_edges_h) - 1)
+bin_edges_zoom = bin_edges_h[zoom_start_bin_idx:]
+fine_hist_zoom = {cls: fine_hist[cls][zoom_start_bin_idx:] for cls in classes}
+n_zoom_per_class = {cls: int(fine_hist_zoom[cls].sum()) for cls in classes}
+
 zoom_lines = []
 zoom_stats = {}
 for cls in classes:
-    ct_full, _ = curves[cls]
-    ct_zoom = ct_full[ct_full >= zoom_start_h] - zoom_start_h
-    n_zoom = len(ct_zoom)
+    n_zoom = n_zoom_per_class[cls]
     if n_zoom == 0:
         zoom_stats[cls] = {"n": 0, "t10": None, "t50": None, "t90": None}
         zoom_lines.append(f"  {cls:<16} n=0 (no flows in the zoomed/dense region)")
         continue
-    frac_zoom = np.arange(1, n_zoom + 1) / n_zoom
-    def tz_at(q, ct=ct_zoom, frac=frac_zoom):
-        idx = min(int(np.searchsorted(frac, q)), len(ct) - 1)
-        return float(ct[idx])
-    zoom_stats[cls] = {
-        "n": n_zoom, "t10": tz_at(0.10), "t50": tz_at(0.50), "t90": tz_at(0.90),
-    }
+    fhz = fine_hist_zoom[cls]
+    tz10 = quantile_from_hist(fhz, bin_edges_zoom, 0.10, offset_h=zoom_start_h)
+    tz50 = quantile_from_hist(fhz, bin_edges_zoom, 0.50, offset_h=zoom_start_h)
+    tz90 = quantile_from_hist(fhz, bin_edges_zoom, 0.90, offset_h=zoom_start_h)
+    zoom_stats[cls] = {"n": n_zoom, "t10": tz10, "t50": tz50, "t90": tz90}
     zoom_lines.append(
         f"  {cls:<16} n={n_zoom:>8,}  "
-        f"t10%={tz_at(0.10):>7.2f}h  t50%={tz_at(0.50):>7.2f}h  t90%={tz_at(0.90):>7.2f}h"
+        f"t10%={tz10:>7.2f}h  t50%={tz50:>7.2f}h  t90%={tz90:>7.2f}h"
         f"  (hours elapsed WITHIN the zoomed region)"
     )
 zoom_block = "\n".join(zoom_lines)
@@ -335,12 +375,10 @@ for tau_name, tau_h in (("tau_train", tau_train_h), ("tau_val", tau_val_h)):
         boundary_untestable.append((tau_name, tau_h))
         continue
     for cls in classes:
-        ct_full, _ = curves[cls]
-        ct_zoom = ct_full[ct_full >= zoom_start_h]
-        n_zoom = len(ct_zoom)
+        n_zoom = n_zoom_per_class[cls]
         if n_zoom == 0:
             continue
-        n_in_win = int(np.sum(np.abs(ct_zoom - tau_h) <= BOUNDARY_WIN_H))
+        n_in_win = windowed_sum(fine_hist_zoom[cls], bin_edges_zoom, tau_h, BOUNDARY_WIN_H)
         if n_in_win == 0:
             continue
         win_frac = n_in_win / n_zoom
@@ -349,19 +387,19 @@ for tau_name, tau_h in (("tau_train", tau_train_h), ("tau_val", tau_val_h)):
 boundary_hits.sort(key=lambda r: -r[4])
 
 # Criterion C — near-zero support on one side of a split boundary. Splits are
-# chronological ROW fractions, exactly as the pipeline cuts them.
+# chronological ROW fractions, exactly as the pipeline cuts them. Support
+# counts come directly from Pass 2's exact per-chunk support_table (value-
+# based ts<=tau_train_ms/tau_val_ms thresholds) rather than an exact row-
+# index partition — these agree exactly unless multiple rows share the exact
+# boundary millisecond value, which tie_at_boundary (reported below) measures
+# directly rather than assuming away (specs/71 SS3.4).
 SUPPORT_FRAC_MIN = 0.01     # < 1% of the class's own flows in a split, or
 SUPPORT_ABS_MIN = 30        # < 30 rows outright, counts as near-zero support.
-split_of_row = np.full(n, 2, dtype=np.int8)
-split_of_row[: train_cut_idx + 1] = 0
-split_of_row[train_cut_idx + 1 : val_cut_idx + 1] = 1
 split_names = ("train", "val", "test")
-support_table = {}
+support_table = support_table_raw
 support_hits = []
 for cls in classes:
-    mask = (df["Attack"] == cls).to_numpy()
-    counts_split = [int(np.sum(split_of_row[mask] == k)) for k in range(3)]
-    support_table[cls] = counts_split
+    counts_split = support_table[cls]
     for k, c in enumerate(counts_split):
         frac = c / full_stats[cls]["n"]
         if c < SUPPORT_ABS_MIN or frac < SUPPORT_FRAC_MIN:
@@ -453,6 +491,15 @@ for cls in classes:
         f"      {cls:<16} train={tr:>9,}  val={va:>9,}  test={te:>9,}"
         f"   (total {full_stats[cls]['n']:>9,})"
     )
+fnd.append(
+    f"    Rows exactly AT the tau_train/tau_val boundary millisecond "
+    f"(tie_at_boundary, specs/71 SS3.4): "
+    f"tau_train={tie_at_boundary['train']:,}  tau_val={tie_at_boundary['val']:,}"
+    f" -- support-table counts above assign every tied row to the <=-side of "
+    f"its boundary; this is only distinguishable from an exact row-index "
+    f"partition when a boundary's tie count exceeds {SUPPORT_ABS_MIN} "
+    f"({'not the case on this run' if max(tie_at_boundary.values()) < SUPPORT_ABS_MIN else 'THE CASE ON THIS RUN -- treat criterion C near this boundary with caution'})."
+)
 key_findings_block = "\n".join(fnd)
 
 # ── Computed PAPER FRAMING ──────────────────────────────────────────────────
