@@ -1,6 +1,6 @@
 # SHAP-GSD
 
-**Version 2.2.16**
+**Version 2.2.17**
 
 **SHAP-GSD** (SHapley Additive exPlanations on Graph-Structured Data) is a
 temporally constrained Shapley explanation framework for GNN-based network
@@ -27,11 +27,11 @@ instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ### Version note for reviewers
 
-**The current manuscript revision reflects `v2.2.16`** — check out that tag
+**The current manuscript revision reflects `v2.2.17`** — check out that tag
 to match what's currently under review:
 
 ```bash
-git checkout v2.2.16
+git checkout v2.2.17
 ```
 
 The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
@@ -40,6 +40,18 @@ The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
 ```bash
 git checkout v2.1.0
 ```
+
+As of `v2.2.17`, `arg10_global_profiles.py` (the global-profile-coherence
+exploration figure) no longer scores an undefined literature comparison as
+`ρ = +0.000 ("weak")`: any class with no valid comparison — because it has
+no entry in the literature lookup table at all, or because its entry's
+groups fall outside the figure's compared column set — is now reported as
+an explicit exclusion, never folded into the reported mean or agreement
+buckets. This does not affect model training, evaluation, or the underlying
+SHAP values; it affects only this one exploration figure's own summary
+statistic (a previously-reported mean correlation for `NF-UNSW-NB15-v3`
+changed from 0.266 to 0.380 as a result — the corrected number, not a new
+finding).
 
 Everything between those two tags is correctness fixes plus one addition —
 `SHAP-GSD[raw]`, a raw per-feature KernelSHAP configuration with no semantic

@@ -144,12 +144,27 @@ def main() -> None:
     # --- Spearman ρ per class ---
     rho_vals = []
     rho_nan  = set()   # classes with undefined ρ (constant literature rank)
+    # Undefined ρ has two distinct causes that must be reported differently:
+    # (a) cls has NO entry in LITERATURE_TOP_GROUPS at all (a UNSW-NB15-only
+    #     lookup table — every class on a non-UNSW dataset falls here) —
+    #     genuinely "no literature profile available";
+    # (b) cls HAS an entry, but none of its literature top-5 groups happen to
+    #     fall inside this figure's 12-group union (built from SHAP top-5s,
+    #     not literature) — a real profile exists, it just isn't comparable
+    #     against this particular figure's column set. This happens even on
+    #     UNSW itself (e.g. Worms/Benign/DoS) and is NOT an EX-C coverage gap.
+    no_lit_cls     = set()  # (a)
+    no_overlap_cls = set()  # (b)
     for i, cls in enumerate(classes):
         lit_row = lit_ranks[i]
         if np.all(lit_row == lit_row[0]):
             # All literature groups outside the union — ρ undefined
             rho_vals.append(0.0)
             rho_nan.add(cls)
+            if LITERATURE_TOP_GROUPS.get(cls):
+                no_overlap_cls.add(cls)
+            else:
+                no_lit_cls.add(cls)
         else:
             rho, _ = spearmanr(shap_ranks[i], lit_ranks[i])
             rho_vals.append(float(rho) if not np.isnan(rho) else 0.0)
@@ -220,28 +235,38 @@ def main() -> None:
     print(f"Saved {OUT_DIR / STEM}.{{pdf,png}}")
 
     # ------------------------------------------------------------------ txt
-    strong = [(c, r) for c, r in zip(cls_sorted, rho_sorted) if r >= 0.7]
-    moderate = [(c, r) for c, r in zip(cls_sorted, rho_sorted) if 0.4 <= r < 0.7]
-    weak = [(c, r) for c, r in zip(cls_sorted, rho_sorted) if r < 0.4]
-    mean_rho = np.mean(rho_sorted)
+    # Classes with an undefined ρ (rho_nan) must never be folded into a
+    # computed ρ bucket: rho_vals forces these to 0.0, and treating that as
+    # real "weak agreement" would silently claim a literature comparison
+    # that never happened — the same fabrication failure mode
+    # arg3_mitre_port.py's dominant-service claim had (fixed 2026-08-27; see
+    # CLAUDE.md EX-C). Report the two distinct causes separately (see the
+    # rho_nan loop above): no_lit_cls (no LITERATURE_TOP_GROUPS entry at
+    # all — every class on a non-UNSW dataset) vs. no_overlap_cls (an entry
+    # exists but doesn't intersect this figure's 12-group union — a real,
+    # expected case even on UNSW itself, not an EX-C coverage gap).
+    lit_pairs = [(c, r) for c, r in zip(cls_sorted, rho_sorted) if c not in rho_nan]
+    no_lit_sorted     = [c for c in cls_sorted if c in no_lit_cls]
+    no_overlap_sorted = [c for c in cls_sorted if c in no_overlap_cls]
 
-    top_cls, top_rho = cls_sorted[0], rho_sorted[0]
-    top_strength = "strong" if top_rho >= 0.7 else ("moderate" if top_rho >= 0.4 else "weak")
-    overall_strength = "weak" if mean_rho < 0.4 else ("moderate" if mean_rho < 0.7 else "strong")
+    def _nan_clause(no_lit, no_overlap):
+        parts = []
+        if no_lit:
+            parts.append(
+                f"{len(no_lit)} class(es) ({', '.join(no_lit)}) have no "
+                "literature profile in LITERATURE_TOP_GROUPS at all"
+            )
+        if no_overlap:
+            parts.append(
+                f"{len(no_overlap)} class(es) ({', '.join(no_overlap)}) have a "
+                "literature profile whose groups fall outside this figure's "
+                "12-group union"
+            )
+        return "; ".join(parts)
 
-    if strong:
-        threshold_sentence = (
-            f"Spearman ρ measures cross-source rank correlation; {len(strong)} of "
-            f"{len(classes)} classes ("
-            + ", ".join(c for c, _ in strong)
-            + f") reach ρ ≥ 0.7, with the highest at {top_cls} (ρ = {top_rho:+.3f})."
-        )
-    else:
-        threshold_sentence = (
-            f"Spearman ρ measures cross-source rank correlation; no class reaches ρ ≥ 0.7 — "
-            f"the highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}), "
-            "so the threshold cannot be used as a blanket validation claim."
-        )
+    strong = [(c, r) for c, r in lit_pairs if r >= 0.7]
+    moderate = [(c, r) for c, r in lit_pairs if 0.4 <= r < 0.7]
+    weak = [(c, r) for c, r in lit_pairs if r < 0.4]
 
     lines = [
         f"Figure reasoning — {STEM}",
@@ -250,57 +275,144 @@ def main() -> None:
         "----",
         "SHAP-GSD per-class feature-group rankings are compared against independently",
         "derived literature profiles (Moustafa & Slay 2015, UNSW-NB15 attack descriptions).",
-        threshold_sentence,
-        "",
-        "KEY FINDINGS",
-        "------------",
-        "Spearman ρ (SHAP-GSD rank vs Moustafa & Slay 2015):",
     ]
-    for cls, r in zip(cls_sorted, rho_sorted):
-        strength = "strong" if r >= 0.7 else ("moderate" if r >= 0.4 else "weak")
-        lines.append(f"  {cls:12s}: ρ = {r:+.3f}  ({strength})")
-    lines += [
-        "",
-        f"  Mean ρ across all classes: {mean_rho:.3f}",
-        f"  Strong agreement  (ρ ≥ 0.7): {len(strong)} classes: "
-        + ", ".join(c for c, _ in strong),
-        f"  Moderate agreement (0.4–0.7): {len(moderate)} classes: "
-        + ", ".join(c for c, _ in moderate),
-        f"  Weak agreement    (ρ < 0.4):  {len(weak)} classes: "
-        + ", ".join(c for c, _ in weak),
-        "",
-        "  Union of top-5 groups per class (12 groups shown in heatmap):",
-    ]
-    for g in union_groups:
-        lines.append(f"    {g}")
-    lines += [
-        "",
-        "PAPER FRAMING",
-        "-------------",
-        "The cross-source Spearman correlation between SHAP-GSD rankings and",
-        "Moustafa & Slay (2015) literature profiles is a check on whether global",
-        "SHAP-GSD profiles align with literature-derived attack signatures, not a",
-        "validation that can be claimed uniformly across classes.",
-    ]
-    lines += [
-        f"The highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}); "
-        f"{len(strong)} of {len(classes)} classes",
-        f"reach the ρ ≥ 0.7 threshold. Mean ρ = {mean_rho:.3f} across all classes indicates",
-        f"{overall_strength} agreement overall — most classes' rankings diverge substantially",
-        "from the 2015 raw-traffic characterisation, plausibly reflecting real",
-        "distributional differences between that dataset's original feature set and the",
-        "NetFlow feature set used here, rather than an explainer failure specific to",
-        "any one class.",
-        "",
-        "CAPTION",
-        "-------",
-        "Global feature-group profile coherence: SHAP-GSD vs Moustafa & Slay (2015).",
-        "Left: heatmap of per-class SHAP-GSD feature-group importance rank for the",
-        "12-group union of top-5 per class (lighter = rank 1 = most important).",
-        "Right: per-class Spearman ρ between SHAP-GSD rank and independent literature",
-        "rank; green = strong agreement (ρ ≥ 0.7), amber = moderate, coral = weak.",
-        f"Mean ρ = {mean_rho:.2f}; {len(strong)} of {len(classes)} classes show strong cross-source alignment.",
-    ]
+
+    if not lit_pairs:
+        # No class in this dataset produced a defined ρ. State the actual
+        # cause(s) plainly instead of reporting a fabricated near-zero rho
+        # per class.
+        lines += [
+            f"No class in this dataset has a defined Spearman ρ against "
+            f"Moustafa & Slay (2015) — {len(classes)} of {len(classes)} classes "
+            f"excluded: " + _nan_clause(no_lit_sorted, no_overlap_sorted) + ".",
+            "",
+            "KEY FINDINGS",
+            "------------",
+        ]
+        if no_lit_sorted:
+            lines.append(
+                f"  No literature profile at all: {len(no_lit_sorted)} classes: "
+                + ", ".join(no_lit_sorted)
+            )
+        if no_overlap_sorted:
+            lines.append(
+                f"  Literature profile exists but outside the 12-group union: "
+                f"{len(no_overlap_sorted)} classes: " + ", ".join(no_overlap_sorted)
+            )
+        lines += [
+            "",
+            "  Union of top-5 groups per class (12 groups shown in heatmap):",
+        ]
+        for g in union_groups:
+            lines.append(f"    {g}")
+        lines += [
+            "",
+            "PAPER FRAMING",
+            "-------------",
+            "This figure checks whether SHAP-GSD's per-class feature-group rankings",
+            "correlate with Moustafa & Slay (2015)'s independently-derived literature",
+            f"profiles (Spearman ρ, per class). On this dataset: "
+            f"{_nan_clause(no_lit_sorted, no_overlap_sorted)}.",
+            "",
+            "CAPTION",
+            "-------",
+            "Global feature-group importance rank (SHAP-GSD only). No Spearman ρ vs",
+            "literature is shown — see WHAT above for which classes were excluded",
+            "and why.",
+        ]
+    else:
+        top_cls, top_rho = lit_pairs[0]
+        mean_rho = float(np.mean([r for _, r in lit_pairs]))
+        top_strength = "strong" if top_rho >= 0.7 else ("moderate" if top_rho >= 0.4 else "weak")
+        overall_strength = "weak" if mean_rho < 0.4 else ("moderate" if mean_rho < 0.7 else "strong")
+
+        if strong:
+            threshold_sentence = (
+                f"Spearman ρ measures cross-source rank correlation; {len(strong)} of "
+                f"{len(lit_pairs)} classes with a literature profile ("
+                + ", ".join(c for c, _ in strong)
+                + f") reach ρ ≥ 0.7, with the highest at {top_cls} (ρ = {top_rho:+.3f})."
+            )
+        else:
+            threshold_sentence = (
+                f"Spearman ρ measures cross-source rank correlation; no class reaches ρ ≥ 0.7 — "
+                f"the highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}), "
+                "so the threshold cannot be used as a blanket validation claim."
+            )
+        if no_lit_sorted or no_overlap_sorted:
+            threshold_sentence += (
+                f" {len(no_lit_sorted) + len(no_overlap_sorted)} of {len(classes)} "
+                "classes excluded from this comparison: "
+                + _nan_clause(no_lit_sorted, no_overlap_sorted) + "."
+            )
+        lines.append(threshold_sentence)
+
+        lines += [
+            "",
+            "KEY FINDINGS",
+            "------------",
+            f"Spearman ρ (SHAP-GSD rank vs Moustafa & Slay 2015), "
+            f"{len(lit_pairs)} of {len(classes)} classes with a literature profile:",
+        ]
+        for cls, r in lit_pairs:
+            strength = "strong" if r >= 0.7 else ("moderate" if r >= 0.4 else "weak")
+            lines.append(f"  {cls:12s}: ρ = {r:+.3f}  ({strength})")
+        lines += [
+            "",
+            f"  Mean ρ across classes with a literature profile: {mean_rho:.3f}",
+            f"  Strong agreement  (ρ ≥ 0.7): {len(strong)} classes: "
+            + ", ".join(c for c, _ in strong),
+            f"  Moderate agreement (0.4–0.7): {len(moderate)} classes: "
+            + ", ".join(c for c, _ in moderate),
+            f"  Weak agreement    (ρ < 0.4):  {len(weak)} classes: "
+            + ", ".join(c for c, _ in weak),
+        ]
+        if no_lit_sorted:
+            lines.append(
+                f"  No literature profile at all: {len(no_lit_sorted)} classes: "
+                + ", ".join(no_lit_sorted)
+            )
+        if no_overlap_sorted:
+            lines.append(
+                f"  Literature profile exists but outside the 12-group union: "
+                f"{len(no_overlap_sorted)} classes: " + ", ".join(no_overlap_sorted)
+            )
+        lines += [
+            "",
+            "  Union of top-5 groups per class (12 groups shown in heatmap):",
+        ]
+        for g in union_groups:
+            lines.append(f"    {g}")
+        lines += [
+            "",
+            "PAPER FRAMING",
+            "-------------",
+            "The cross-source Spearman correlation between SHAP-GSD rankings and",
+            "Moustafa & Slay (2015) literature profiles is a check on whether global",
+            "SHAP-GSD profiles align with literature-derived attack signatures, not a",
+            "validation that can be claimed uniformly across classes.",
+        ]
+        lines += [
+            f"The highest agreement is {top_cls} (ρ = {top_rho:+.3f}, {top_strength}); "
+            f"{len(strong)} of {len(lit_pairs)} classes with a literature profile",
+            f"reach the ρ ≥ 0.7 threshold. Mean ρ = {mean_rho:.3f} across those classes indicates",
+            f"{overall_strength} agreement overall — most classes' rankings diverge substantially",
+            "from the 2015 raw-traffic characterisation, plausibly reflecting real",
+            "distributional differences between that dataset's original feature set and the",
+            "NetFlow feature set used here, rather than an explainer failure specific to",
+            "any one class.",
+            "",
+            "CAPTION",
+            "-------",
+            "Global feature-group profile coherence: SHAP-GSD vs Moustafa & Slay (2015).",
+            "Left: heatmap of per-class SHAP-GSD feature-group importance rank for the",
+            "12-group union of top-5 per class (lighter = rank 1 = most important).",
+            "Right: per-class Spearman ρ between SHAP-GSD rank and independent literature",
+            "rank; green = strong agreement (ρ ≥ 0.7), amber = moderate, coral = weak.",
+            f"Mean ρ = {mean_rho:.2f}; {len(strong)} of {len(lit_pairs)} classes with a "
+            f"literature profile show strong cross-source alignment.",
+        ]
+
     notes = load_paper_notes(STEM)
     if notes:
         lines += [""] + notes
