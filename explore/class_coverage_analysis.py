@@ -80,6 +80,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from explore._temporal_streaming import (  # noqa: E402  [PROPOSED NEW]
+    argsort_and_take,
+    pooled_timestamp_stats_from_array,
+)
 from src.data.loader import NODE_ID_COLS, PORT_COLS, LABEL_COLS  # noqa: E402  [EXISTING, reused]
 from src.data.preprocessor import Preprocessor  # noqa: E402      [EXISTING, reused]
 from src.utils.config import load_config  # noqa: E402            [EXISTING, reused]
@@ -220,13 +224,41 @@ def compute_class_coverage(
     df = df[["FLOW_START_MILLISECONDS", "Attack"]].copy()
     gc.collect()
 
-    df = df.sort_values("FLOW_START_MILLISECONDS", kind="mergesort").reset_index(drop=True)
-
+    # build_label_map is order-independent, so it is computed BEFORE the
+    # sort — it never needed sorted input (specs/72 §3.2).
     label_map = Preprocessor.build_label_map(df)                       # [EXISTING, reused]
     ordered_classes = sorted(label_map, key=lambda c: label_map[c])
+    int_to_class = {v: k for k, v in label_map.items()}
+
+    # Narrow to compact arrays BEFORE the sort (specs/72 §2.3): ts stays
+    # float64 (NOT int64) because FLOW_START_MILLISECONDS may contain NaN
+    # (see n_unassigned below, specs/72 §3.2.1); codes is a compact int16
+    # class-code array, not an object/string array, so argsort_and_take's
+    # reindex step costs ~8.6x less than reindexing raw Attack strings.
+    ts = df["FLOW_START_MILLISECONDS"].to_numpy(dtype=np.float64)
+    codes = df["Attack"].map(label_map).to_numpy(dtype=np.int16)
+    del df
+    gc.collect()
+
+    # Replaces sort_values(kind="mergesort") — a cheap paired-array reorder
+    # instead of a full-frame permute (specs/72 §1.3).
+    ts_sorted, codes_sorted = argsort_and_take(ts, codes)
+    del ts, codes
+    gc.collect()
+
+    pass1 = pooled_timestamp_stats_from_array(ts_sorted, train_frac, val_frac)
+
+    # Reconstruct the small 2-column, now-genuinely-sorted DataFrame
+    # Preprocessor._temporal_split expects (specs/72 §3.2).
+    sorted_df = pd.DataFrame({
+        "FLOW_START_MILLISECONDS": ts_sorted,
+        "Attack": pd.Categorical.from_codes(
+            codes_sorted, categories=[int_to_class[i] for i in range(len(label_map))]
+        ),
+    })
 
     pre = Preprocessor(train_frac=train_frac, val_frac=val_frac)
-    train_df, val_df, test_df = pre._temporal_split(df)                # [EXISTING, reused]
+    train_df, val_df, test_df = pre._temporal_split(sorted_df)         # [EXISTING, reused]
     tau_train_ms, tau_val_ms = pre.tau_train_ms, pre.tau_val_ms
 
     counts: dict[str, dict[str, int]] = {}
@@ -240,14 +272,23 @@ def compute_class_coverage(
     n_train, n_val, n_test = len(train_df), len(val_df), len(test_df)
     n_unassigned = n_clean - (n_train + n_val + n_test)   # specs/48 §0.6
 
-    t0_ms = int(df["FLOW_START_MILLISECONDS"].iloc[0])
-    elapsed_hours = (df["FLOW_START_MILLISECONDS"].to_numpy() - t0_ms) / (1000.0 * 3600.0)
-    # NOT elapsed_hours[-1]: sort_values() places NaN last, so a NaN
-    # FLOW_START_MILLISECONDS row (see n_unassigned) would otherwise poison
-    # total_span_hours with NaN, which write_timeline_figure then feeds into
-    # np.linspace(0.0, nan, ...) as non-monotonic histogram bin edges.
-    # nanmax skips the NaN and finds the true latest finite timestamp.
-    total_span_hours = float(np.nanmax(elapsed_hours))
+    t0_ms = pass1.t0_ms
+    elapsed_hours = (ts_sorted - t0_ms) / (1000.0 * 3600.0)
+    total_span_hours = pass1.total_span_hours
+    # NOT pass1.tau_train_h/tau_val_h: Pass1Result's tau_train_h/tau_val_h are
+    # derived from pooled_timestamp_stats_from_array's OWN row-fraction-cut
+    # index convention (int(n*train_frac) - 1, class_time_distribution.py's
+    # convention -- see _pass1_from_sorted_ms's docstring), which differs by
+    # one rank from Preprocessor._temporal_split's convention
+    # (int(n*train_frac), no -1) that ACTUALLY produced tau_train_ms/
+    # tau_val_ms above. Using pass1's tau_*_h here would silently derive the
+    # figure's split-boundary lines (write_timeline_figure's
+    # ax.axvline(r.tau_train_h)) from a different cut than the one that
+    # produced the returned tau_train_ms/tau_val_ms and train_df/val_df/
+    # test_df -- an internally inconsistent result object whenever the two
+    # ranks don't happen to share a tied timestamp value. Recomputed here
+    # from the ACTUAL tau_train_ms/tau_val_ms instead, matching the original
+    # (pre-refactor) script's formula exactly.
     tau_train_h = (tau_train_ms - t0_ms) / (1000.0 * 3600.0)
     tau_val_h   = (tau_val_ms   - t0_ms) / (1000.0 * 3600.0)
 
@@ -258,7 +299,7 @@ def compute_class_coverage(
         tau_train_ms=tau_train_ms, tau_val_ms=tau_val_ms,
         label_map=label_map, ordered_classes=ordered_classes, counts=counts,
         n_train=n_train, n_val=n_val, n_test=n_test, n_unassigned=n_unassigned,
-        elapsed_hours=elapsed_hours, class_of_row=df["Attack"].to_numpy(),
+        elapsed_hours=elapsed_hours, class_of_row=sorted_df["Attack"].to_numpy(),
         total_span_hours=total_span_hours,
         tau_train_h=tau_train_h, tau_val_h=tau_val_h,
     )
