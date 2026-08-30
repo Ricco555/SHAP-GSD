@@ -58,7 +58,7 @@ grouping (see `jobs_draft/config_i_prep_notes.md` for its sample-budget
 rationale if reproducing from scratch) — none of which changes the core
 training/evaluation pipeline. Full detail for any intermediate tag is in
 `git log` / the [Releases](https://github.com/Ricco555/SHAP-GSD/releases)
-page, not repeated here. When comparing against a specific reported result,
+page. When comparing against a specific reported result,
 check out the matching tag rather than assuming a later `main` reproduces
 an earlier tag's numbers exactly. Regenerate explanation-derived metrics
 and baseline-comparison output from whichever version you're actually
