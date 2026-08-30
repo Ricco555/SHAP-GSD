@@ -54,9 +54,8 @@ changed from 0.266 to 0.380 as a result).
 
 Everything between those two tags is correctness fixes plus one addition —
 `SHAP-GSD[raw]`, a raw per-feature KernelSHAP configuration with no semantic
-grouping (see `jobs_draft/config_i_prep_notes.md` for its sample-budget
-rationale if reproducing from scratch) — none of which changes the core
-training/evaluation pipeline. Full detail for any intermediate tag is in
+grouping — none of which changes the core training/evaluation pipeline.
+Full detail for any intermediate tag is in
 `git log` / the [Releases](https://github.com/Ricco555/SHAP-GSD/releases)
 page. When comparing against a specific reported result,
 check out the matching tag rather than assuming a later `main` reproduces
