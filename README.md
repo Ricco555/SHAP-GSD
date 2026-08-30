@@ -288,9 +288,9 @@ All path resolution goes through `explore/_paths.py`, which reads
 | `explore/graph/w_sensitivity_full.py` | `figures/graph/w_sensitivity_annotated.*` | Dataset-agnostic |
 | `explore/graph/topology_panel.py` | `figures/graph/topology_<Class>_<EID>.*` | UNSW-specific |
 | `explore/arguments/arg1_semantic_grouping.py` | `figures/arguments/arg1_*` | Borderline |
-| `explore/arguments/arg2_absence_driven.py` | `figures/arguments/arg2_*` | UNSW-specific |
+| `explore/arguments/arg2_absence_driven.py` | `figures/arguments/arg2_*` | Dataset-agnostic |
 | `explore/arguments/arg3_mitre_port.py` | `figures/arguments/arg3_*` | UNSW-specific |
-| `explore/arguments/arg5_node_state.py` | `figures/arguments/arg5_*` | UNSW-specific |
+| `explore/arguments/arg5_node_state.py` | `figures/arguments/arg5_*` | Borderline |
 | `explore/arguments/arg8_temporal_faithfulness.py` | `figures/arguments/arg8_*` | Borderline |
 | `explore/arguments/arg10_global_profiles.py` | `figures/arguments/arg10_*` | UNSW-specific |
 
