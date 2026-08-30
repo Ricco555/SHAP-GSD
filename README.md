@@ -48,10 +48,9 @@ no entry in the literature lookup table at all, or because its entry's
 groups fall outside the figure's compared column set — is now reported as
 an explicit exclusion, never folded into the reported mean or agreement
 buckets. This does not affect model training, evaluation, or the underlying
-SHAP values; it affects only this one exploration figure's own summary
+SHAP values. It affects only this one exploration figure's own summary
 statistic (a previously-reported mean correlation for `NF-UNSW-NB15-v3`
-changed from 0.266 to 0.380 as a result — the corrected number, not a new
-finding).
+changed from 0.266 to 0.380 as a result).
 
 Everything between those two tags is correctness fixes plus one addition —
 `SHAP-GSD[raw]`, a raw per-feature KernelSHAP configuration with no semantic
@@ -61,7 +60,7 @@ training/evaluation pipeline. Full detail for any intermediate tag is in
 `git log` / the [Releases](https://github.com/Ricco555/SHAP-GSD/releases)
 page, not repeated here. When comparing against a specific reported result,
 check out the matching tag rather than assuming a later `main` reproduces
-an earlier tag's numbers exactly — regenerate explanation-derived metrics
+an earlier tag's numbers exactly. Regenerate explanation-derived metrics
 and baseline-comparison output from whichever version you're actually
 running.
 
