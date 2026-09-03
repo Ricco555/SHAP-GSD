@@ -103,6 +103,20 @@ STRUCTURAL_CSV_NAME = "global_coherence_structural.csv"
 SOURCE3_MD_NAME = "source3_consistency_cells.md"
 FIGURE_STEM_PREFIX = "global_coherence_summary_"
 
+# SHAP-GSD samples its 200 explained flows per class by ground-truth label,
+# regardless of the model's prediction — so a low-recall class's explained
+# set is dominated by attributions of wrong decisions, not the attack
+# signature Source 3 is meant to check consistency against. The manuscript's
+# own Discussion §VI-C5 established recall >= 0.49 as the bar for "the
+# trained model detects this class" and used exactly that cutoff to isolate
+# a clean subset for its own analysis; Source 3 reuses that same,
+# already-precedented threshold rather than inventing a new one. A ">0%"
+# filter is not sufficient: UNSW DoS clears it at ~17% recall while the
+# manuscript's own Discussion attributes its rho = -0.367 (the most negative
+# in the benchmark) to this exact contamination mechanism, not a genuine
+# literature mismatch.
+SOURCE3_RECALL_THRESHOLD = 0.49
+
 MAPPING_CSV_NAME = "proxy_gt_feature_expectation_mapping.csv"
 STRUCTURAL_EXPECTATION_CSV_NAME = "proxy_gt_structural_expectation_mapping.csv"
 
@@ -860,9 +874,31 @@ def write_dataset_figure(
     # Explicit, so the first and last rows are not flush against the axes
     # frame when no bar artist is present to give matplotlib a y-extent.
     ax.set_ylim(len(classes) - 0.4, -0.6)
+    # Suppress the two categories that never carry a real three-way finding:
+    # AGREEMENT_LITERATURE_MISSING means no literature leg was ever supplied
+    # for this class (no comparison was possible), and AGREEMENT_NONE mostly
+    # fires trivially when SHAP-GSD's own leg is "indeterminate" for lack of
+    # explained flows, not from a genuine three-leg disagreement. Printing
+    # either at the row's right edge reads as a finding when it is really an
+    # absence of one; the remaining categories (full, stage0_indeterminate,
+    # shap_stage0_only, shap_literature_only, stage0_literature_only) all
+    # reflect an actual comparison outcome and stay labelled — EXCEPT that
+    # stage0_indeterminate and stage0_literature_only can also fire when
+    # SHAP-GSD's own leg is "indeterminate" (zero explained flows): in that
+    # case the label is purely a literature-vs-Stage-0 comparison that never
+    # involved SHAP-GSD at all, and printing it next to a "not scored" bar
+    # reads as an explainer finding that does not exist. Suppress any label
+    # whenever SHAP-GSD's own topology is indeterminate, regardless of which
+    # category the comparison landed in.
+    _SUPPRESSED_AGREEMENT_LABELS = {AGREEMENT_LITERATURE_MISSING, AGREEMENT_NONE}
     for y, (_, row) in zip(y_positions, structural_rows.iterrows()):
+        agreement = str(row["three_way_agreement"])
+        if agreement in _SUPPRESSED_AGREEMENT_LABELS:
+            continue
+        if str(row["shap_subgraph_topology"]) == TOPOLOGY_INDETERMINATE:
+            continue
         ax.text(
-            1.10, y, str(row["three_way_agreement"]),
+            1.10, y, agreement,
             fontsize=LABEL_FS - 2, va="center", ha="left", color=_GRAY,
             clip_on=False,
         )
@@ -900,10 +936,16 @@ A row reading "not scored" at the zero line means the correlation was NOT
 scored — either the mapping table does not cover that class or the class has
 no explained flows. The row is kept rather than dropped, and is marked with
 words rather than a bar, so that a missing score can be neither overlooked nor
-mistaken for a zero (or a perfect) one. The grey label at the right of each row is that
-class's three-way structural-agreement category, comparing SHAP-GSD's own
-explanatory subgraph topology, the literature expectation, and the Stage-0
-measured topology.
+mistaken for a zero (or a perfect) one. A grey label at the right of a row, when
+present, is that class's three-way structural-agreement category, comparing
+SHAP-GSD's own explanatory subgraph topology, the literature expectation, and
+the Stage-0 measured topology. The label is omitted for the two categories
+that never carry a real three-way finding: "literature_not_supplied" (no
+literature expectation exists for this class, so no comparison was possible)
+and "none" (which mostly fires trivially when SHAP-GSD's own leg is
+"indeterminate" from zero explained flows, not from a genuine three-way
+disagreement). A row with no label at its right means one of those two, not
+that the comparison was skipped.
 
 KEY FINDINGS
 ------------
@@ -924,10 +966,24 @@ SUGGESTED FIGURE CAPTION
 ------------------------
 Per-class global coherence for {dataset_label}: Spearman rank correlation
 between SHAP-GSD's feature-group importance ranking and the literature-derived
-expected profile, annotated with the three-way structural-agreement category
-(SHAP-GSD subgraph vs. literature expectation vs. Stage-0 measurement).
-Classes for which no rank correlation was scored carry no bar and are marked
-"not scored" at the zero line.
+expected profile. Where present, the right-hand label names which two of three
+independently-derived topologies agreed — SHAP-GSD's own explanatory subgraph,
+the literature-expected topology, and the Stage-0 topology measured directly
+from the capture — e.g. "shap_stage0_only" means SHAP-GSD's subgraph matched
+the independent Stage-0 measurement while both disagreed with the literature
+expectation, and "full" means all three agreed. A label is omitted, not
+merely left off, whenever it would not carry a finding that actually involves
+SHAP-GSD's own explanation: when no literature expectation exists for the
+class ("literature_not_supplied"), when none of the three pairwise
+comparisons coincided ("none"), or when SHAP-GSD has no explained flows for
+the class at all, in which case any apparent literature-vs-Stage-0 agreement
+is unrelated to the explainer and would misleadingly read as one of its
+findings. Classes for which no rank correlation was scored carry no bar and
+are marked "not scored" at the zero line; a class with zero explained flows
+is always both "not scored" and unlabelled, though the two omissions are not
+otherwise the same condition — a class can be "not scored" purely because the
+literature mapping omits it while still keeping a labelled subgraph, if it has
+explained flows of its own.
 """
     (out_dir / f"{stem}.txt").write_text(reasoning)
     log.info("wrote %s.{pdf,png,txt}", out_dir / stem)
@@ -939,13 +995,21 @@ Classes for which no rank correlation was scored carry no bar and are marked
 
 
 def write_source3_cells(
-    rank_frame: pd.DataFrame, structural_frame: pd.DataFrame, path: Path,
+    rank_frame: pd.DataFrame,
+    structural_frame: pd.DataFrame,
+    runs: list[DatasetRun],
+    path: Path,
 ) -> None:
     """Render the Source-3 prose cells for the owner to paste into the proxy-GT table.
 
     Args:
         rank_frame: The rank-correlation frame (possibly empty).
         structural_frame: The structural-coherence frame.
+        runs: The resolved dataset runs, for per-class recall lookup — a
+            class's explained flows are sampled by ground-truth label
+            regardless of prediction, so a low-recall class's 200 explained
+            flows are mostly attributions of wrong decisions. See
+            ``SOURCE3_RECALL_THRESHOLD``.
         path: Destination ``.md`` path.
     """
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -965,6 +1029,13 @@ def write_source3_cells(
         "`Source 3 (SHAP-GSD consistency)` column. This script never opens or "
         "edits that table; paste the cells in by hand.",
         "",
+        f"A class whose test recall is below {SOURCE3_RECALL_THRESHOLD} (the "
+        "manuscript's own Discussion §VI-C5 detection-threshold "
+        "precedent) gets no consistency claim: its 200 explained flows are "
+        "sampled by ground-truth label regardless of prediction, so most of "
+        "them would be attributions of a wrong decision, not the attack "
+        "signature being checked.",
+        "",
         "| dataset | class_name | Source 3 (SHAP-GSD consistency) |",
         "|---|---|---|",
     ]
@@ -972,9 +1043,29 @@ def write_source3_cells(
         (str(r["dataset"]), str(r["class_name"])): r
         for _, r in rank_frame.iterrows()
     } if not rank_frame.empty else {}
+    recall_lookup: dict[tuple[str, str], float] = {}
+    for run in runs:
+        metrics = load_eval_metrics(run)
+        for class_name, class_metrics in metrics.per_class.items():
+            recall = class_metrics.get("recall")
+            if recall is not None:
+                recall_lookup[(run.label, str(class_name))] = float(recall)
 
     for _, row in structural_frame.iterrows():
         key = (str(row["dataset"]), str(row["class_name"]))
+        recall = recall_lookup.get(key)
+        if recall is not None and recall < SOURCE3_RECALL_THRESHOLD:
+            cell = (
+                f"No consistency claim made: test recall for this class is "
+                f"{recall:.3f}, below the {SOURCE3_RECALL_THRESHOLD} "
+                "detection-threshold (Discussion §VI-C5). Roughly "
+                f"{(1 - recall) * 100:.0f}% of its 200 explained flows are "
+                "attributions of a misclassified instance, which would "
+                "contaminate any rank-correlation or structural claim rather "
+                "than test it."
+            )
+            lines.append(f"| {row['dataset']} | {row['class_name']} | {cell} |")
+            continue
         rank_row = rho_lookup.get(key)
         if rank_row is not None and np.isfinite(float(rank_row["spearman_rho_vs_expected"])):
             rho_text = (
@@ -1109,7 +1200,7 @@ def run(
         )
 
     if source3_locked:
-        write_source3_cells(rank_frame, structural_frame, out_dir / SOURCE3_MD_NAME)
+        write_source3_cells(rank_frame, structural_frame, runs, out_dir / SOURCE3_MD_NAME)
     else:
         log.warning(
             "Source 3 was NOT emitted: --source3-locked was not passed, so the "
