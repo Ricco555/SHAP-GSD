@@ -11,57 +11,35 @@ a 15-dim temporal node state, and three-granularity SHAP coalitions:
 feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
 
 > **Paper:** *SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural
-> Networks in Network Intrusion Detection* — currently under peer review.
+> Networks in Network Intrusion Detection*.
 > Full citation to follow upon acceptance.
+
+> **Related paper:** *A Non-Circular Proxy Ground-Truth Framework for Evaluating
+> SHAP-GSD Explanations Across NetFlow Intrusion Detection Datasets* — a proxy
+> ground-truth evaluation framework that scores SHAP-GSD's explanation Fidelity,
+> Stability, and Global Coherence against three independent, non-circular
+> expectation sources across four NetFlow benchmark datasets; submitted to IEEE
+> Access, currently under peer review. Full citation to follow upon acceptance.
 
 ---
 
 ## For reviewers
 
 This repository accompanies *SHAP-GSD: Temporal Multi-granular Explanation Method
-for Graph Neural Networks in Network Intrusion Detection* (under peer review).
+for Graph Neural Networks in Network Intrusion Detection*.
 All results in the paper are from the single-dataset run on **NF-UNSW-NB15-v3**.
 
-Jump to the **[SHAP-GSD](#shap-gsd-under-peer-review)** section for reproduction
+Jump to the **[SHAP-GSD](#shap-gsd)** section for reproduction
 instructions. Each dataset run is fully isolated under `runs/<run_id>/`.
 
 ### Version note for reviewers
 
-**The current manuscript revision reflects `v2.2.16`** — check out that tag
-to match what's currently under review:
+**The current manuscript revision reflects `v2.2.17`** — check out that tag
+to match the publication-ready version:
 
 ```bash
-git checkout v2.2.16
+git checkout v2.2.17
 ```
-
-The original submission snapshot is tagged **`v2.1.0`** (commit `a024a6d`,
-2026-06-16):
-
-```bash
-git checkout v2.1.0
-```
-
-As of `v2.2.17`, `arg10_global_profiles.py` (the global-profile-coherence
-exploration figure) no longer scores an undefined literature comparison as
-`ρ = +0.000 ("weak")`: any class with no valid comparison — because it has
-no entry in the literature lookup table at all, or because its entry's
-groups fall outside the figure's compared column set — is now reported as
-an explicit exclusion, never folded into the reported mean or agreement
-buckets. This does not affect model training, evaluation, or the underlying
-SHAP values. It affects only this one exploration figure's own summary
-statistic (a previously-reported mean correlation for `NF-UNSW-NB15-v3`
-changed from 0.266 to 0.380 as a result).
-
-Everything between those two tags is correctness fixes plus one addition —
-`SHAP-GSD[raw]`, a raw per-feature KernelSHAP configuration with no semantic
-grouping — none of which changes the core training/evaluation pipeline.
-Full detail for any intermediate tag is in
-`git log` / the [Releases](https://github.com/Ricco555/SHAP-GSD/releases)
-page. When comparing against a specific reported result,
-check out the matching tag rather than assuming a later `main` reproduces
-an earlier tag's numbers exactly. Regenerate explanation-derived metrics
-and baseline-comparison output from whichever version you're actually
-running.
 
 ---
 
@@ -79,7 +57,7 @@ pip install dgl -f https://data.dgl.ai/wheels/repo.html
 
 ---
 
-## SHAP-GSD (under peer review)
+## SHAP-GSD
 
 *SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural Networks
 in Network Intrusion Detection* — full citation to follow upon acceptance.
