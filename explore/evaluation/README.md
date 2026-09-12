@@ -123,10 +123,12 @@ never recomputes a number.
   above except the two items below.
 - **B — gated on an owner-authored input:** `eval04`'s §4.4a rank-correlation half
   needs `proxy_gt_feature_expectation_mapping.csv`, which is **manually authored
-  by the researcher and never generated** (Part I §8). Until it exists, `eval04`
-  logs a WARNING naming the path, writes the structural half only, and exits 0.
-  `eval04 --source3-locked` additionally needs the researcher's explicit
-  non-circularity assertion that proxy-GT sources 1/2/4 are frozen.
+  by the researcher and never generated** (Part I §8). It ships git-tracked at
+  `explore/evaluation/data/` (the default `eval04` reads from) so it is present
+  in a fresh clone. Until it exists, `eval04` logs a WARNING naming the path,
+  writes the structural half only, and exits 0. `eval04 --source3-locked`
+  additionally needs the researcher's explicit non-circularity assertion that
+  proxy-GT sources 1/2/4 are frozen.
 - **C — spec-only, no code:** inter-seed stability (Part I §4.7a) needs 5
   independently-seeded training runs per dataset plus a compute-budget sign-off;
   the Nemenyi post-hoc needs a new dependency (`scikit-posthocs`/`statsmodels`)

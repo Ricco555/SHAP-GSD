@@ -18,6 +18,10 @@ specs/
 *.parquet
 datasets/
 
+# Exception: owner-authored proxy-GT mapping CSVs, hand-written citation
+# tables (not pipeline output/raw data) released as supplementary material
+!/explore/evaluation/data/*.csv
+
 # instructions and guides
 CLAUDE.md
 CHANGELOG.md

@@ -33,8 +33,8 @@ by this repo's git.
 
 Files read (read-only):
   <out-dir>/per_class_explanation_summary.csv      — eval05's output (the ranking)
-  <out-dir>/proxy_gt_feature_expectation_mapping.csv — owner-authored (§4.4a)
-  <out-dir>/proxy_gt_structural_expectation_mapping.csv — owner-authored, optional
+  explore/evaluation/data/proxy_gt_feature_expectation_mapping.csv — owner-authored (§4.4a), git-tracked
+  explore/evaluation/data/proxy_gt_structural_expectation_mapping.csv — owner-authored, optional, git-tracked
   <run>/outputs/explanations/<Class>/*.json        — subgraph_edge_ids
   <run>/feature_store/test/edge_indices.npy        — EID -> row alignment
   <run>/feature_store/test/edges_meta.parquet      — src_ip/dst_ip per row
@@ -97,6 +97,12 @@ from explore.evaluation.eval05_per_class_explanations import (  # noqa: E402
 log = logging.getLogger("eval04_global_coherence")
 
 OUT_DIR: Path = DEFAULT_OUT_DIR  # see module docstring for why this is hardcoded
+
+#: Canonical, git-tracked home for the two owner-authored proxy-GT mapping
+#: CSVs (specs/64 §4.4a). These are hand-authored literature citations, not
+#: pipeline output, so they live outside the gitignored `outputs/` tree and
+#: ship with the repo (released alongside v2.2.17 as supplementary material).
+MAPPING_DATA_DIR = REPO_ROOT / "explore" / "evaluation" / "data"
 
 RANK_CSV_NAME = "global_coherence_rank_correlation.csv"
 STRUCTURAL_CSV_NAME = "global_coherence_structural.csv"
@@ -1234,14 +1240,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mapping-csv", type=Path, default=None,
         help=f"Owner-authored feature-expectation mapping (default: "
-             f"<out-dir>/{MAPPING_CSV_NAME}). Absent is a normal state: the "
-             f"rank-correlation half is skipped with a warning.",
+             f"explore/evaluation/data/{MAPPING_CSV_NAME}, the git-tracked "
+             f"canonical copy). Absent is a normal state: the rank-correlation "
+             f"half is skipped with a warning.",
     )
     parser.add_argument(
         "--structural-expectations-csv", type=Path, default=None,
         help=f"Owner-authored literature structural expectations (default: "
-             f"<out-dir>/{STRUCTURAL_EXPECTATION_CSV_NAME}). Absent means the "
-             f"literature leg is reported as not supplied rather than guessed.",
+             f"explore/evaluation/data/{STRUCTURAL_EXPECTATION_CSV_NAME}, the "
+             f"git-tracked canonical copy). Absent means the literature leg is "
+             f"reported as not supplied rather than guessed.",
     )
     parser.add_argument(
         "--per-class-csv", type=Path, default=None,
@@ -1277,10 +1285,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out_dir = Path(args.out_dir)
-    mapping_csv = Path(args.mapping_csv) if args.mapping_csv else out_dir / MAPPING_CSV_NAME
+    mapping_csv = (
+        Path(args.mapping_csv) if args.mapping_csv
+        else MAPPING_DATA_DIR / MAPPING_CSV_NAME
+    )
     structural_csv = (
         Path(args.structural_expectations_csv) if args.structural_expectations_csv
-        else out_dir / STRUCTURAL_EXPECTATION_CSV_NAME
+        else MAPPING_DATA_DIR / STRUCTURAL_EXPECTATION_CSV_NAME
     )
     try:
         rank_frame, structural_frame = run(
