@@ -122,9 +122,9 @@ def main() -> None:
 
     # Per-class absolute-value annotations
     for i, (cls, ff, ft, fn, _) in enumerate(rows):
-        label = f"φ_F={ff:.2f}  φ_T={ft:.3f}  φ_N={fn:.2f}"
-        ax1.text(1.02, y[i], label, va="center", fontsize=9,
-                 color=_GRAY, transform=ax1.get_yaxis_transform())
+        label = rf"$\varphi_F={ff:.2f}$  $\varphi_T={ft:.3f}$  $\varphi_N={fn:.2f}$"
+        ax1.text(0.02, y[i], label, va="center", fontsize=9,
+                 color="white", transform=ax1.get_yaxis_transform())
 
     ax1.set_yticks(y)
     ax1.set_yticklabels(classes, fontsize=LABEL_FS)
