@@ -60,7 +60,7 @@ pip install dgl -f https://data.dgl.ai/wheels/repo.html
 ## SHAP-GSD
 
 *SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural Networks
-in Network Intrusion Detection* — full citation to follow upon acceptance.
+in Network Intrusion Detection*.
 
 SHAP-GSD introduces a temporally-faithful, multi-granularity Shapley explanation
 framework evaluated on **NF-UNSW-NB15-v3** — classification performance,
