@@ -10,9 +10,9 @@ Extends TE-G-SAGE with IP-level nodes, temporally-faithful neighbour sampling,
 a 15-dim temporal node state, and three-granularity SHAP coalitions:
 feature-group (φ_F), temporal neighbourhood (φ_T), and node novelty (φ_N).
 
-> **Paper:** *SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural
-> Networks in Network Intrusion Detection*.
-> Full citation to follow upon acceptance.
+> **Paper:** R. Luša, D. Pintar and M. Vranić, "*SHAP-GSD: Temporal Multi-granular Explanation Method for Graph Neural
+> Networks in Network Intrusion Detection*," OJCOMS, 2026
+Article DOI: 10.1109/OJCOMS.2026.3734159
 
 > **Related paper:** *A Non-Circular Proxy Ground-Truth Framework for Evaluating
 > SHAP-GSD Explanations Across NetFlow Intrusion Detection Datasets* — a proxy
